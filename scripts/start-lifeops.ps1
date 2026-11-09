@@ -63,7 +63,9 @@ if ($LASTEXITCODE -ne 0) {
 Step "Starting local Supabase (first run downloads images; this can take several minutes)"
 Push-Location $root
 try {
-  & $supabase start --ignore-health-check
+  # Its progress goes to stderr and stays visible; the status it prints on stdout at the end
+  # holds the local keys, so it is dropped (write-local-env.mjs reads them without printing).
+  & $supabase start --ignore-health-check | Out-Null
   if ($LASTEXITCODE -ne 0) { Fail "supabase start failed (exit $LASTEXITCODE)." }
   # `supabase start` runs the migrations only when it creates the database. On an existing
   # database (data kept by `supabase stop`) apply the ones added since; a no-op when none are.
