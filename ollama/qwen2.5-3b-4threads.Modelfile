@@ -1,0 +1,14 @@
+# Qwen 2.5 3B Instruct (the qwen2.5:3b weights) with 4 CPU threads and an 8192-token context.
+# LifeOps' local default model (see RUNNING.md, "The AI model"). Create it once:
+#   docker exec cvfix-ollama ollama pull qwen2.5:3b
+#   Get-Content ollama\qwen2.5-3b-4threads.Modelfile | docker exec -i cvfix-ollama sh -c "cat > /tmp/Modelfile && ollama create qwen2.5-3b-4threads -f /tmp/Modelfile"
+# (with a native Ollama: ollama create qwen2.5-3b-4threads -f ollama/qwen2.5-3b-4threads.Modelfile)
+#
+# Why 4 threads: on this 8-core PC (4 performance + 4 low-power cores, shared with other work)
+# llama.cpp with all 8 threads generated 0.45 tokens/s, the same weights with 4 threads 4-5
+# tokens/s under the same load (Ollama log, 9 Nov 2026). Why exactly these two settings: Ollama
+# keeps one runner per weights file; a request for the same weights with other settings
+# (qwen2.5:3b with its defaults) unloads that runner and waits for its running request first.
+FROM qwen2.5:3b
+PARAMETER num_thread 4
+PARAMETER num_ctx 8192

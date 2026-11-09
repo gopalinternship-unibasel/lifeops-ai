@@ -118,7 +118,15 @@ if ($llmBase -match '(localhost|127\.0\.0\.1):11434') {
   try {
     $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 10
     $names = @($tags.models | ForEach-Object { $_.name })
-    if ($names -notcontains $llmModel) {
+    # Ollama lists "name:latest" for a model asked for as "name".
+    $present = ($names -contains $llmModel) -or ($names -contains "${llmModel}:latest")
+    $modelfile = Join-Path $root "ollama\$llmModel.Modelfile"
+    if (-not $present -and (Test-Path $modelfile)) {
+      # A local variant (for example qwen2.5-3b-4threads) is created from its Modelfile, not pulled.
+      Write-Host "WARNING: Ollama is up but $llmModel is missing. Create it once (see the Modelfile):" -ForegroundColor Yellow
+      Write-Host "  docker exec cvfix-ollama ollama pull qwen2.5:3b" -ForegroundColor Yellow
+      Write-Host "  Get-Content ollama\$llmModel.Modelfile | docker exec -i cvfix-ollama sh -c `"cat > /tmp/Modelfile && ollama create $llmModel -f /tmp/Modelfile`"" -ForegroundColor Yellow
+    } elseif (-not $present) {
       Write-Host "WARNING: Ollama is up but $llmModel is missing. Run: docker exec cvfix-ollama ollama pull $llmModel" -ForegroundColor Yellow
     } else {
       Write-Host "Ollama has $llmModel."

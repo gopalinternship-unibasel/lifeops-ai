@@ -24,7 +24,10 @@ const supabaseExe =
 //   --model <name>           LLM_MODEL in .env.local AND fastapi-backend/.env
 //   --set KEY=VALUE          any key in .env.local (repeatable)
 //   --backend-set KEY=VALUE  any key in fastapi-backend/.env (repeatable)
-const LOCAL_DEFAULT_MODEL = "qwen2.5:3b";
+// Qwen 2.5 3B with 4 CPU threads and an 8192-token context (ollama/qwen2.5-3b-4threads.Modelfile):
+// on this shared 8-core PC it generates about ten times faster than qwen2.5:3b with Ollama's
+// default of all 8 threads, and it shares one Ollama runner with other work that uses it.
+const LOCAL_DEFAULT_MODEL = "qwen2.5-3b-4threads";
 
 const frontendOverrides = {};
 const backendOverrides = {};
@@ -97,15 +100,15 @@ upsertEnvFile(
     GOOGLE_OAUTH_STATE_SECRET: randomBytes(48).toString("base64url"),
     // Local, free, OpenAI-compatible model served by Ollama. See RUNNING.md to switch providers.
     // The intended model is Llama 3.1 8B (llama3.1:8b here, meta-llama/Llama-3.1-8B-Instruct on
-    // Hugging Face). The local default is the smaller Qwen 2.5 3B because the shared, CPU-only
-    // Ollama on this PC is too slow for 8B answers; switch with --model llama3.1:8b.
+    // Hugging Face). The local default is the smaller Qwen 2.5 3B (4 threads, see above) because
+    // the shared, CPU-only Ollama on this PC is too slow for 8B answers; switch with --model llama3.1:8b.
     LLM_BASE_URL: "http://localhost:11434/v1",
     LLM_API_KEY: "ollama",
     LLM_MODEL: LOCAL_DEFAULT_MODEL,
     LLM_TIMEOUT_MS: "900000",
     LLM_MAX_TOKENS: "1200",
-    // A 7-day plan is longer than a chat answer; 1500 prompt + 2400 answer tokens still fit
-    // Ollama's default 4096-token context.
+    // A 7-day plan is longer than a chat answer; 1500 prompt + 2400 answer tokens fit the
+    // model's 8192-token context (and Ollama's default of 4096 for other models).
     LLM_MAX_TOKENS_PLAN: "2400",
     LLM_STRUCTURED_OUTPUT: "json_schema",
     LIFEOPS_BACKEND_URL: "http://127.0.0.1:8010",
