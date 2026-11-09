@@ -332,7 +332,8 @@ async function singleCall(opts: {
     completion = JSON.parse(responseText) as typeof completion;
   } catch {
     console.error(`[llm] ${opts.config.provider} ${opts.model}: answer is not JSON: ${responseText.slice(0, 300)}`);
-    throw new Error(`${opts.config.provider} sent an answer that is not valid JSON. Try again in a moment.`);
+    const who = opts.config.provider.charAt(0).toUpperCase() + opts.config.provider.slice(1);
+    throw new Error(`${who} sent an answer that is not valid JSON. Try again in a moment.`);
   }
   console.info(
     `[llm] ${opts.config.provider} ${opts.model}: ${completion.usage?.prompt_tokens ?? "?"} prompt + ${completion.usage?.completion_tokens ?? "?"} completion tokens in ${((Date.now() - startedAt) / 1000).toFixed(1)} s`,
@@ -382,9 +383,11 @@ function fetchCauseCode(e: unknown): string | undefined {
 }
 
 export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseUrl" | "timeoutMs">): Error {
+  // The provider's name at the start of a sentence ("the AI provider" for an unknown host).
+  const who = config.provider.charAt(0).toUpperCase() + config.provider.slice(1);
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
     return new Error(
-      `${config.provider} did not answer within ${Math.round(config.timeoutMs / 1000)} s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again.`,
+      `${who} did not answer within ${Math.round(config.timeoutMs / 1000)} s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again.`,
     );
   }
   const causeCode = fetchCauseCode(e);
@@ -392,7 +395,7 @@ export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseU
     // Node's own fetch limit (5 minutes without response headers), not LLM_TIMEOUT_MS. The dev
     // server lifts it (vite.config.ts); other Node hosts need the same Agent settings.
     return new Error(
-      `${config.provider} took longer than Node's 5-minute fetch limit to start answering (it may be busy or still loading the model). Try again in a moment.`,
+      `${who} took longer than Node's 5-minute fetch limit to start answering (it may be busy or still loading the model). Try again in a moment.`,
     );
   }
   const status = errorStatus(e);
@@ -401,24 +404,24 @@ export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseU
       `Could not reach ${config.provider} at ${config.baseUrl}. Is it running? (For local Ollama: docker ps shows the Ollama container on port 11434.)`,
     );
   }
-  if (status === 429) return new Error(`${config.provider} rate limit reached. Please wait a moment and try again.`);
+  if (status === 429) return new Error(`${who} rate limit reached. Please wait a moment and try again.`);
   if (status === 401 || status === 403)
     return new Error(
       config.provider === "Hugging Face"
         ? "Hugging Face rejected the API key. Make sure HUGGINGFACE_API_KEY is valid and that you've accepted the Llama 3.1 license at https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct."
-        : `${config.provider} rejected the API key (LLM_API_KEY).`,
+        : `${who} rejected the API key (LLM_API_KEY).`,
     );
-  if (status === 402) return new Error(`${config.provider} credits exhausted for this token.`);
-  if (status === 404) return new Error(`${config.provider} does not serve the configured model (LLM_MODEL).`);
+  if (status === 402) return new Error(`${who} credits exhausted for this token.`);
+  if (status === 404) return new Error(`${who} does not serve the configured model (LLM_MODEL).`);
   if (status !== undefined) {
     // Every other HTTP status: a sentence with the provider's own message (never its raw body).
     const detail = e instanceof HttpStatusError ? e.detail : "";
     const code = `HTTP ${status}${detail ? `: ${detail}` : ""}`;
-    if (status === 413) return new Error(`${config.provider} refused the request as too large (${code}). Try a shorter message.`);
+    if (status === 413) return new Error(`${who} refused the request as too large (${code}). Try a shorter message.`);
     if (status >= 500) {
-      return new Error(`${config.provider} is not available right now (${code}). Try again in a moment.`);
+      return new Error(`${who} is not available right now (${code}). Try again in a moment.`);
     }
-    return new Error(`${config.provider} could not process the request (${code}).`);
+    return new Error(`${who} could not process the request (${code}).`);
   }
   return e instanceof Error ? e : new Error(String(e));
 }

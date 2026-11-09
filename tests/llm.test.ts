@@ -233,13 +233,13 @@ describe("provider errors are sentences, never raw provider JSON", () => {
     );
     const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
     await expect(failure).rejects.toThrow(
-      "the AI provider is not available right now (HTTP 503: QA double: model unavailable). Try again in a moment.",
+      "The AI provider is not available right now (HTTP 503: QA double: model unavailable). Try again in a moment.",
     );
     await expect(failure).rejects.not.toThrow(/[{}"]/);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })));
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
-      /^the AI provider is not available right now \(HTTP 500\)\. Try again in a moment\.$/,
+      /^The AI provider is not available right now \(HTTP 500\)\. Try again in a moment\.$/,
     );
   });
 
