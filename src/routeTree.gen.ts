@@ -14,6 +14,7 @@ import { Route as AppRouteImport } from './routes/app'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppCalendarRouteImport } from './routes/app.calendar'
+import { Route as AppDashboardRouteImport } from './routes/app.dashboard'
 import { Route as AppPlanRouteImport } from './routes/app.plan'
 import { Route as AppProfileRouteImport } from './routes/app.profile'
 import { Route as OnboardingConnectorsRouteImport } from './routes/onboarding.connectors'
@@ -44,6 +45,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
 const AppCalendarRoute = AppCalendarRouteImport.update({
   id: '/calendar',
   path: '/calendar',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppDashboardRoute = AppDashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
   getParentRoute: () => AppRoute,
 } as any)
 const AppPlanRoute = AppPlanRouteImport.update({
@@ -82,6 +88,7 @@ export interface FileRoutesByFullPath {
   '/app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
   '/app/calendar': typeof AppCalendarRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
   '/app/profile': typeof AppProfileRoute
   '/onboarding/connectors': typeof OnboardingConnectorsRoute
@@ -94,6 +101,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/app/calendar': typeof AppCalendarRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
   '/app/profile': typeof AppProfileRoute
   '/onboarding/connectors': typeof OnboardingConnectorsRoute
@@ -108,6 +116,7 @@ export interface FileRoutesById {
   '/app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
   '/app/calendar': typeof AppCalendarRoute
+  '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
   '/app/profile': typeof AppProfileRoute
   '/onboarding/connectors': typeof OnboardingConnectorsRoute
@@ -123,6 +132,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/login'
     | '/app/calendar'
+    | '/app/dashboard'
     | '/app/plan'
     | '/app/profile'
     | '/onboarding/connectors'
@@ -135,6 +145,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/app/calendar'
+    | '/app/dashboard'
     | '/app/plan'
     | '/app/profile'
     | '/onboarding/connectors'
@@ -148,6 +159,7 @@ export interface FileRouteTypes {
     | '/app'
     | '/login'
     | '/app/calendar'
+    | '/app/dashboard'
     | '/app/plan'
     | '/app/profile'
     | '/onboarding/connectors'
@@ -204,6 +216,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCalendarRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/dashboard': {
+      id: '/app/dashboard'
+      path: '/dashboard'
+      fullPath: '/app/dashboard'
+      preLoaderRoute: typeof AppDashboardRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/plan': {
       id: '/app/plan'
       path: '/plan'
@@ -251,6 +270,7 @@ declare module '@tanstack/react-router' {
 
 interface AppRouteChildren {
   AppCalendarRoute: typeof AppCalendarRoute
+  AppDashboardRoute: typeof AppDashboardRoute
   AppPlanRoute: typeof AppPlanRoute
   AppProfileRoute: typeof AppProfileRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -258,6 +278,7 @@ interface AppRouteChildren {
 
 const AppRouteChildren: AppRouteChildren = {
   AppCalendarRoute: AppCalendarRoute,
+  AppDashboardRoute: AppDashboardRoute,
   AppPlanRoute: AppPlanRoute,
   AppProfileRoute: AppProfileRoute,
   AppIndexRoute: AppIndexRoute,

@@ -23,6 +23,7 @@ function AppLayout() {
 
   const navItems = [
     { to: "/app", label: "Workspace" },
+    { to: "/app/dashboard", label: "Dashboard" },
     { to: "/app/plan", label: "Plan" },
     { to: "/app/calendar", label: "Calendar" },
     { to: "/app/profile", label: "Profile" },
