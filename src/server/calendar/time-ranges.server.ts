@@ -95,18 +95,34 @@ export function localTimeToISO(date: string, hhmm: string, timeZone?: string): s
   }
 }
 
-/** Free slots of at least `minMinutes` between `fromHour` and `toHour` local time. */
+const QUARTER_HOUR_MS = 15 * 60 * 1000;
+
+/** The next quarter hour at or after `ms` (plan items start on the quarter hour). */
+export function nextQuarterHourMs(ms: number): number {
+  return Math.ceil(ms / QUARTER_HOUR_MS) * QUARTER_HOUR_MS;
+}
+
+/**
+ * Free slots of at least `minMinutes` between `fromHour` and `toHour` local time.
+ * `notBeforeMs` (usually "now") removes the part of the day that is already over: a plan made
+ * at 15:08 offers today's time from 15:15 on, and a day that has passed has no free slots.
+ */
 export function computeFreeSlots(
   date: string,
   events: TimedEvent[],
   timeZone: string,
-  opts: { fromHour?: number; toHour?: number; minMinutes?: number } = {},
+  opts: { fromHour?: number; toHour?: number; minMinutes?: number; notBeforeMs?: number } = {},
 ): TimeSlot[] {
   const fromHour = opts.fromHour ?? 7;
   const toHour = opts.toHour ?? 22;
   const minMs = (opts.minMinutes ?? 30) * 60 * 1000;
-  const dayStartMs = toMs(zonedDateTimeToISO(date, { hour: fromHour }, timeZone));
+  const openingMs = toMs(zonedDateTimeToISO(date, { hour: fromHour }, timeZone));
+  const dayStartMs =
+    opts.notBeforeMs !== undefined && Number.isFinite(opts.notBeforeMs)
+      ? Math.max(openingMs, nextQuarterHourMs(opts.notBeforeMs))
+      : openingMs;
   const dayEndMs = toMs(zonedDateTimeToISO(date, { hour: toHour }, timeZone));
+  if (dayStartMs >= dayEndMs) return [];
 
   const busy = events
     .filter((event) => event.busy !== false)

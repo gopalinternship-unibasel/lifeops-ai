@@ -170,6 +170,7 @@ function PlanPage() {
         : "the whole week";
       const parts = [`Added ${r.created} event${r.created === 1 ? "" : "s"}`];
       if (r.skipped > 0) parts.push(`skipped ${r.skipped} already-existing event${r.skipped === 1 ? "" : "s"}`);
+      if (r.past > 0) parts.push(`skipped ${r.past} whose time has already passed`);
       if (r.conflicts > 0) {
         parts.push(`held back ${r.conflicts} that would overlap your calendar (${r.conflictTitles.join(", ")})`);
       }

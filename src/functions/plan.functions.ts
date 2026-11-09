@@ -176,13 +176,21 @@ async function buildBusyAndFree(
     throw new Error("Could not load the calendar. Plan generation was stopped to avoid scheduling conflicts.");
   }
 
+  // Time that is already over is never free: a plan made on Monday afternoon starts at the
+  // next quarter hour, and the days before today get no slots at all.
+  const nowMs = Date.now();
   const days = Array.from({ length: 7 }, (_, i) => {
     const date = dayDateString(monday, i);
     const { start, end } = dayBoundsISO(date, timeZone);
     const startMs = toMs(start);
     const endMs = toMs(end);
     const dayEvents = events.filter((ev) => toMs(ev.ends_at) > startMs && toMs(ev.starts_at) < endMs);
-    return { date, busy: dayEvents, free: computeFreeSlots(date, dayEvents, timeZone) };
+    return {
+      date,
+      busy: dayEvents,
+      free: computeFreeSlots(date, dayEvents, timeZone, { notBeforeMs: nowMs }),
+      past: endMs <= nowMs,
+    };
   });
 
   return { events, days, timeZone };
@@ -200,7 +208,7 @@ function dayLabel(date: string) {
 async function callPlanAI(opts: {
   monday: string;
   goals: string;
-  days: { date: string; busy: BusyEvent[]; free: TimeSlot[] }[];
+  days: { date: string; busy: BusyEvent[]; free: TimeSlot[]; past?: boolean }[];
   instructions?: string;
   history?: { role: "user" | "assistant"; content: string }[];
   currentPlan?: WeekPlan | null;
@@ -211,9 +219,11 @@ async function callPlanAI(opts: {
       const busyTxt = d.busy.length === 0
         ? "    busy: (none)"
         : `    busy: ${d.busy.map(b => `${b.title} ${fmtHHMM(b.starts_at, opts.timeZone)}-${fmtHHMM(b.ends_at, opts.timeZone)}`).join("; ")}`;
-      const freeTxt = d.free.length === 0
-        ? "    free: (no free time)"
-        : `    free slots: ${d.free.map(f => `${fmtHHMM(f.start, opts.timeZone)}-${fmtHHMM(f.end, opts.timeZone)}`).join(", ")}`;
+      const freeTxt = d.past
+        ? "    free: (this day is already over; plan nothing)"
+        : d.free.length === 0
+          ? "    free: (no free time left)"
+          : `    free slots: ${d.free.map(f => `${fmtHHMM(f.start, opts.timeZone)}-${fmtHHMM(f.end, opts.timeZone)}`).join(", ")}`;
       return `  ${dayLabel(d.date)} (date ${d.date})\n${busyTxt}\n${freeTxt}`;
     })
     .join("\n");
@@ -233,6 +243,7 @@ RULES — STRICT:
 - Schedule items ONLY inside the listed free slots for each day. NEVER overlap a busy event or another item.
 - "start" and "end" are local times "HH:MM" (24h) on that item's day, both inside a SINGLE free slot.
 - Each item must be ≥ 20 minutes and ≤ the slot length. Use times on the quarter hour.
+- Free slots start no earlier than the current time: never plan anything in the past.
 - If a day has zero free time, return an empty items[] for it and a headline like "Already booked — rest day".
 
 WEEKDAY DESIGN (Mon–Fri):
@@ -335,11 +346,15 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
     }
 
     items.sort((left, right) => toMs(left.starts_at) - toMs(right.starts_at));
-    const defaultHeadline = slot.free.length === 0 ? "Already booked — rest day" : "";
+    const defaultHeadline = slot.past
+      ? "Day already over"
+      : slot.free.length === 0
+        ? "Already booked — rest day"
+        : "";
     return {
       date: slot.date,
       headline:
-        typeof raw?.headline === "string"
+        typeof raw?.headline === "string" && !slot.past
           ? raw.headline.slice(0, 120)
           : defaultHeadline,
       items,
@@ -508,6 +523,9 @@ export const updatePlanItem = createServerFn({ method: "POST" })
     if (startMs < toMs(dayBounds.start) || endMs > toMs(dayBounds.end)) {
       throw new Error("Plan item must remain within its selected day");
     }
+    if ((data.starts_at || data.ends_at) && startMs < Date.now()) {
+      throw new Error("That time is already over. Pick a time later than now.");
+    }
 
     const candidate = { starts_at: nextStart, ends_at: nextEnd };
     const { events } = await buildBusyAndFree(supabase, userId, monday, timeZone);
@@ -553,7 +571,7 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
     if (planReadError) throw planReadError;
 
     if (!row?.payload) {
-      return { created: 0, skipped: 0, conflicts: 0, conflictTitles: [] as string[], failed: 0, eventIds: [] as string[] };
+      return { created: 0, skipped: 0, past: 0, conflicts: 0, conflictTitles: [] as string[], failed: 0, eventIds: [] as string[] };
     }
     const plan = row.payload as unknown as WeekPlan;
 
@@ -561,6 +579,7 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
 
     let created = 0;
     let skipped = 0;
+    let past = 0;
     let conflicts = 0;
     let failed = 0;
     const newIds: string[] = [];
@@ -587,9 +606,16 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
       }
     }
 
+    const nowMs = Date.now();
     for (const day of targetDays) {
       for (const item of day.items) {
         try {
+          // A plan made earlier (or before this fix) can hold items whose time has passed:
+          // never write an event into the past.
+          if (toMs(item.starts_at) < nowMs) {
+            past++;
+            continue;
+          }
           const input = {
             title: `${item.emoji} ${item.title}`.trim(),
             starts_at: item.starts_at,
@@ -627,5 +653,5 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
     }).eq("user_id", userId).eq("week_start", monday);
     if (approvalSaveError) throw approvalSaveError;
 
-    return { created, skipped, conflicts, conflictTitles, failed, eventIds: newIds };
+    return { created, skipped, past, conflicts, conflictTitles, failed, eventIds: newIds };
   });

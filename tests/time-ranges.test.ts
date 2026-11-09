@@ -66,6 +66,28 @@ describe("free-slot scheduling", () => {
     expect(fitsInFreeSlot("2026-11-10T08:30:00.000Z", "2026-11-10T09:30:00.000Z", free)).toBe(false);
   });
 
+  it("never offers time that is already over (plan made at 15:08 local)", () => {
+    const busy = [{ title: "Team sync", starts_at: "2026-11-09T18:00:00Z", ends_at: "2026-11-09T19:00:00Z" }]; // 19-20 local
+    const now = Date.parse("2026-11-09T14:08:00Z"); // Monday 15:08 in Zurich
+    const free = computeFreeSlots("2026-11-09", busy, ZRH, { notBeforeMs: now });
+    expect(free).toEqual([
+      { start: "2026-11-09T14:15:00.000Z", end: "2026-11-09T18:00:00.000Z" }, // 15:15-19:00 (next quarter hour)
+      { start: "2026-11-09T19:00:00.000Z", end: "2026-11-09T21:00:00.000Z" }, // 20:00-22:00
+    ]);
+    // The QA case: a 07:00-08:00 item on that Monday no longer fits.
+    expect(fitsInFreeSlot("2026-11-09T06:00:00.000Z", "2026-11-09T07:00:00.000Z", free)).toBe(false);
+  });
+
+  it("gives a past day no free slots and leaves future days untouched", () => {
+    const now = Date.parse("2026-11-11T10:00:00Z"); // Wednesday
+    expect(computeFreeSlots("2026-11-09", [], ZRH, { notBeforeMs: now })).toEqual([]);
+    expect(computeFreeSlots("2026-11-12", [], ZRH, { notBeforeMs: now })).toEqual([
+      { start: "2026-11-12T06:00:00.000Z", end: "2026-11-12T21:00:00.000Z" },
+    ]);
+    // After 21:45 local nothing of 30 minutes is left today.
+    expect(computeFreeSlots("2026-11-11", [], ZRH, { notBeforeMs: Date.parse("2026-11-11T20:40:00Z") })).toEqual([]);
+  });
+
   it("respects daylight-saving changes", () => {
     // 29 Mar 2026: Zurich switches from UTC+1 to UTC+2.
     expect(localTimeToISO("2026-03-28", "09:00", ZRH)).toBe("2026-03-28T08:00:00.000Z");

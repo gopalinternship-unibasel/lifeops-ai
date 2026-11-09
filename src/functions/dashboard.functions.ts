@@ -179,6 +179,10 @@ export const executeBackendAction = createServerFn({ method: "POST" })
         const startsAt = action.start_time ? parseUserDateTime(action.start_time, timeZone) : null;
         const endsAt = action.end_time ? parseUserDateTime(action.end_time, timeZone) : null;
         if (!startsAt || !endsAt) return { ok: false, message: "This calendar block has no valid time range." };
+        // The planner proposes blocks from now on; one whose time has passed is not written.
+        if (new Date(startsAt).getTime() < Date.now()) {
+          return { ok: false, message: "This block's start time has already passed. Plan it again for a later time." };
+        }
         const created = await createCalendarBlock({
           supabase,
           userId,
