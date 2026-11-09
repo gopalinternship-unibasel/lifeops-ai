@@ -24,6 +24,8 @@ const supabaseExe =
 //   --model <name>           LLM_MODEL in .env.local AND fastapi-backend/.env
 //   --set KEY=VALUE          any key in .env.local (repeatable)
 //   --backend-set KEY=VALUE  any key in fastapi-backend/.env (repeatable)
+const LOCAL_DEFAULT_MODEL = "qwen2.5:3b";
+
 const frontendOverrides = {};
 const backendOverrides = {};
 const args = process.argv.slice(2);
@@ -76,6 +78,7 @@ const keepIfSet = new Set([
   "LLM_MODEL",
   "LLM_TIMEOUT_MS",
   "LLM_MAX_TOKENS",
+  "LLM_MAX_TOKENS_PLAN",
   "LLM_STRUCTURED_OUTPUT",
   "LIFEOPS_BACKEND_URL",
   "LIFEOPS_BACKEND_TOKEN",
@@ -93,11 +96,17 @@ upsertEnvFile(
     SUPABASE_SECRET_KEY: secret,
     GOOGLE_OAUTH_STATE_SECRET: randomBytes(48).toString("base64url"),
     // Local, free, OpenAI-compatible model served by Ollama. See RUNNING.md to switch providers.
+    // The intended model is Llama 3.1 8B (llama3.1:8b here, meta-llama/Llama-3.1-8B-Instruct on
+    // Hugging Face). The local default is the smaller Qwen 2.5 3B because the shared, CPU-only
+    // Ollama on this PC is too slow for 8B answers; switch with --model llama3.1:8b.
     LLM_BASE_URL: "http://localhost:11434/v1",
     LLM_API_KEY: "ollama",
-    LLM_MODEL: "llama3.1:8b",
+    LLM_MODEL: LOCAL_DEFAULT_MODEL,
     LLM_TIMEOUT_MS: "900000",
     LLM_MAX_TOKENS: "1200",
+    // A 7-day plan is longer than a chat answer; 1500 prompt + 2400 answer tokens still fit
+    // Ollama's default 4096-token context.
+    LLM_MAX_TOKENS_PLAN: "2400",
     LLM_STRUCTURED_OUTPUT: "json_schema",
     LIFEOPS_BACKEND_URL: "http://127.0.0.1:8010",
     LIFEOPS_BACKEND_TOKEN: backendToken,
@@ -114,7 +123,7 @@ upsertEnvFile(
     ENV: "local",
     LLM_BASE_URL: "http://localhost:11434/v1",
     LLM_API_KEY: "ollama",
-    LLM_MODEL: "llama3.1:8b",
+    LLM_MODEL: LOCAL_DEFAULT_MODEL,
     LLM_TIMEOUT_SECONDS: "900",
     LLM_MAX_TOKENS: "1200",
     LIFEOPS_BACKEND_TOKEN: backendToken,

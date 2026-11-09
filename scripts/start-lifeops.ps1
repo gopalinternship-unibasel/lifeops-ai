@@ -91,17 +91,29 @@ try {
   if ($LASTEXITCODE -ne 0) { Fail "Could not create the local test user." }
 } finally { Pop-Location }
 
-Step "Checking the local AI model (Ollama on port 11434)"
-try {
-  $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 10
-  $names = @($tags.models | ForEach-Object { $_.name })
-  if ($names -notcontains "llama3.1:8b") {
-    Write-Host "WARNING: Ollama is up but llama3.1:8b is missing. Run: docker exec cvfix-ollama ollama pull llama3.1:8b" -ForegroundColor Yellow
-  } else {
-    Write-Host "Ollama has llama3.1:8b."
+# The model and provider the web app will use (from .env.local; values other than these two
+# are not read here).
+$llmBase = ""; $llmModel = ""
+foreach ($line in Get-Content (Join-Path $root ".env.local") -Encoding UTF8) {
+  $clean = $line.TrimStart([char]0xFEFF)
+  if ($clean -match '^\s*LLM_BASE_URL\s*=\s*(.*)$') { $llmBase = $Matches[1].Trim() }
+  if ($clean -match '^\s*LLM_MODEL\s*=\s*(.*)$') { $llmModel = $Matches[1].Trim() }
+}
+if ($llmBase -match '(localhost|127\.0\.0\.1):11434') {
+  Step "Checking the local AI model ($llmModel on Ollama, port 11434)"
+  try {
+    $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 10
+    $names = @($tags.models | ForEach-Object { $_.name })
+    if ($names -notcontains $llmModel) {
+      Write-Host "WARNING: Ollama is up but $llmModel is missing. Run: docker exec cvfix-ollama ollama pull $llmModel" -ForegroundColor Yellow
+    } else {
+      Write-Host "Ollama has $llmModel."
+    }
+  } catch {
+    Write-Host "WARNING: Ollama is not reachable on http://localhost:11434. AI answers will fail until it runs (the planner service falls back to its keyword planner)." -ForegroundColor Yellow
   }
-} catch {
-  Write-Host "WARNING: Ollama is not reachable on http://localhost:11434. AI answers will fail until it runs (the planner service falls back to its keyword planner)." -ForegroundColor Yellow
+} else {
+  Write-Host "AI provider: $llmBase (model $llmModel); not checked here."
 }
 
 Step "Starting the FastAPI planner on http://127.0.0.1:8010"
