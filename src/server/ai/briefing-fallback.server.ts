@@ -3,7 +3,10 @@
  * "check my emails" request (a CPU-only local model under load can take longer than the
  * timeout). It lists the inbox and today's calendar exactly as the model is asked to, and ranks
  * priorities with the same rule the model gets: today's events by length (longer first, then
- * earlier), then the tasks found in emails by importance. Everything is labelled as rule-based.
+ * earlier), then the tasks found in emails by importance. An email task about one of today's
+ * remaining events (the demo's "Team sync at 7 PM" email and the 7 PM team sync) is the same
+ * commitment: it is folded into that event's line instead of being ranked twice. Everything is
+ * labelled as rule-based.
  */
 import { formatTimeInZone, normalizeTimeZone } from "@/server/timezone.server";
 import type { PriorityRow } from "@/types/panel";
@@ -27,6 +30,56 @@ const IMPORTANCE_ORDER = { high: 0, medium: 1, low: 2 } as const;
 function oneLine(text: string, max: number): string {
   const clean = (text ?? "").replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+// Words that say nothing about WHICH commitment an email or event is about.
+const GENERIC_WORDS = new Set([
+  "the", "and", "for", "with", "from", "your", "you", "our", "this", "that", "are", "was", "will",
+  "today", "tonight", "tomorrow", "now", "moved", "move", "moving", "rescheduled", "reschedule",
+  "meeting", "call", "event", "about", "please", "prepare", "prep", "revise", "reply", "update",
+  "new", "time", "re", "fw", "fwd",
+]);
+
+/** The words that identify a commitment: lowercase, 3+ letters, generic words left out. */
+export function significantWords(text: string): Set<string> {
+  const words = (text ?? "").toLowerCase().normalize("NFKD").match(/[a-z][a-z0-9]{2,}/g) ?? [];
+  return new Set(words.filter((word) => !GENERIC_WORDS.has(word)));
+}
+
+/** Clock times written in a text ("7 PM", "7:30pm", "19:00"), as "HH:MM" on a 24-hour clock. */
+export function mentionedClockTimes(text: string): Set<string> {
+  const times = new Set<string>();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  for (const m of (text ?? "").matchAll(/\b(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*([ap])\.?\s?m\b\.?/gi)) {
+    const hour = (Number(m[1]) % 12) + (m[3].toLowerCase() === "p" ? 12 : 0);
+    times.add(`${pad(hour)}:${m[2] ?? "00"}`);
+  }
+  for (const m of (text ?? "").matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b/g)) times.add(`${pad(Number(m[1]))}:${m[2]}`);
+  return times;
+}
+
+function localClock(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(new Date(iso));
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("hour")}:${get("minute")}`;
+}
+
+/**
+ * True when an email (its extracted task, subject and snippet) is about this calendar event:
+ * at least two identifying words in common and, if the email names a clock time, the event
+ * starts at that time.
+ */
+export function isSameCommitment(event: BriefingEvent, email: BriefingEmail, timeZone: string): boolean {
+  const emailText = [email.extractedTask?.title ?? "", email.subject, email.snippet].join(" ");
+  const eventWords = significantWords(event.title);
+  let shared = 0;
+  for (const word of significantWords(`${email.extractedTask?.title ?? ""} ${email.subject}`)) {
+    if (eventWords.has(word)) shared++;
+  }
+  if (shared < 2) return false;
+  const times = mentionedClockTimes(emailText);
+  return times.size === 0 || times.has(localClock(event.starts_at, timeZone));
 }
 
 export function buildRuleBasedBriefing(opts: {
@@ -68,16 +121,24 @@ export function buildRuleBasedBriefing(opts: {
   const upcomingToday = events
     .filter((event) => Date.parse(event.ends_at) > nowMs)
     .sort((a, b) => minutes(b) - minutes(a) || Date.parse(a.starts_at) - Date.parse(b.starts_at));
-  for (const event of upcomingToday) {
-    candidates.push({
-      title: oneLine(event.title, 120),
-      reason: `${minutes(event)} min block today (${time(event.starts_at)}–${time(event.ends_at)}) — fixed commitment`,
-    });
-  }
   const tasks = opts.emails
     .filter((email) => email.extractedTask)
     .sort((a, b) => IMPORTANCE_ORDER[a.extractedTask!.importance] - IMPORTANCE_ORDER[b.extractedTask!.importance]);
+  // An email task about one of these events is the same commitment: one line, with the email noted.
+  const folded = new Set<BriefingEmail>();
+  for (const event of upcomingToday) {
+    const about = tasks.filter((email) => !folded.has(email) && isSameCommitment(event, email, timeZone));
+    for (const email of about) folded.add(email);
+    const fromEmails = about
+      .map((email) => `also in ${oneLine(email.from, 50)}'s email: ${oneLine(email.extractedTask!.title, 80)}`)
+      .join("; ");
+    candidates.push({
+      title: oneLine(event.title, 120),
+      reason: `${minutes(event)} min block today (${time(event.starts_at)}–${time(event.ends_at)}) — fixed commitment${fromEmails ? `; ${fromEmails}` : ""}`,
+    });
+  }
   for (const email of tasks) {
+    if (folded.has(email)) continue;
     candidates.push({
       title: oneLine(email.extractedTask!.title, 120),
       reason: `From ${oneLine(email.from, 50)}'s email — ${email.extractedTask!.importance} importance`,

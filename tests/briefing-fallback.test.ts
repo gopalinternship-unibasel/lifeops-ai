@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRuleBasedBriefing } from "@/server/ai/briefing-fallback.server";
+import { buildRuleBasedBriefing, isSameCommitment, mentionedClockTimes } from "@/server/ai/briefing-fallback.server";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 
 const ZRH = "Europe/Zurich";
@@ -27,13 +27,45 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
     const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(), unreadCount: 4, todayEvents, timeZone: ZRH, reason: "timeout", nowMs: now });
     expect(priorities.map((p) => p.title)).toEqual([
       "Deep work", // 120 min
-      "Team sync — demo walkthrough", // 60 min
+      "Team sync — demo walkthrough", // 60 min (Alicia's "Team sync at 7 PM" email is folded in)
       "Write research paper final draft", // high
       "Prepare for Acme onsite interview", // high
-      "Team sync at 7 PM (revise demo script)", // high
       "Lunch with Sam", // low
     ]);
     expect(priorities[0]).toMatchObject({ rank: 1, reason: expect.stringContaining("120 min block today") });
+  });
+
+  it("ranks the team sync once: the 7 PM event and Alicia's email about it are one commitment", () => {
+    // The demo calendar's only event today is the team sync (QA round 2 saw it ranked twice).
+    const demoToday = [todayEvents[0]];
+    const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(), unreadCount: 4, todayEvents: demoToday, timeZone: ZRH, reason: "timeout", nowMs: now });
+    expect(priorities.map((p) => p.title)).toEqual([
+      "Team sync — demo walkthrough",
+      "Write research paper final draft",
+      "Prepare for Acme onsite interview",
+      "Lunch with Sam",
+    ]);
+    expect(priorities.filter((p) => /team sync/i.test(p.title))).toHaveLength(1);
+    expect(priorities[0].reason).toBe(
+      "60 min block today (7:00 PM–8:00 PM) — fixed commitment; also in Alicia (manager)'s email: Team sync at 7 PM (revise demo script)",
+    );
+  });
+
+  it("keeps an email task that only looks similar: another time, or one shared word", () => {
+    const sync = todayEvents[0]; // 19:00 local
+    const at = (title: string, subject: string) => ({
+      from: "Alicia (manager)",
+      subject,
+      snippet: "",
+      unread: true,
+      extractedTask: { title, importance: "high" as const },
+    });
+    expect(isSameCommitment(sync, at("Team sync at 7 PM (revise demo script)", "Team sync moved to 7 PM today"), ZRH)).toBe(true);
+    expect(isSameCommitment(sync, at("Team sync at 19:00", "Team sync"), ZRH)).toBe(true);
+    expect(isSameCommitment(sync, at("Team sync at 9 AM", "Team sync tomorrow morning"), ZRH)).toBe(false); // other time
+    expect(isSameCommitment(sync, at("Team lunch", "Lunch with the team"), ZRH)).toBe(false); // only "team"
+    expect([...mentionedClockTimes("at 7 PM, or 7:30pm, else 19:45")].sort()).toEqual(["19:00", "19:30", "19:45"]);
+    expect([...mentionedClockTimes("12 am, 12:15 PM, 9.30 a.m.")].sort()).toEqual(["00:00", "09:30", "12:15"]);
   });
 
   it("turns unread Gmail messages into reply tasks when no tasks were extracted", () => {
