@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { replyStateOf } from "@/lib/reply-state";
 import { planRequestView } from "@/lib/plan-request";
-import { isFailedTurn, maxChatTurnMs } from "@/server/chat-turn.server";
+import { isFailedTurn, maxChatTurnMs, upcomingDates } from "@/server/chat-turn.server";
 
 const now = Date.parse("2026-11-09T18:00:00Z");
 const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
@@ -82,5 +82,15 @@ describe("stored plan requests (the dashboard's 'Plan it' survives a reload)", (
 
     const failed = planRequestView({ ...row, status: "failed", error: "Planner service: boom" }, now, FIFTEEN_MIN);
     expect(failed).toMatchObject({ status: "failed", error: "Planner service: boom", result: null });
+  });
+});
+
+describe("calendar dates in the chat prompt", () => {
+  it("spells out the next days with weekday names in the user's time zone", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-09T23:30:00Z")); // Tuesday 00:30 in Zurich, still Monday in UTC
+    expect(upcomingDates("Europe/Zurich", 3)).toBe("Tuesday 2026-11-10 (today), Wednesday 2026-11-11 (tomorrow), Thursday 2026-11-12");
+    expect(upcomingDates("UTC", 1)).toBe("Monday 2026-11-09 (today)");
+    vi.useRealTimers();
   });
 });

@@ -90,6 +90,10 @@ export function buildRuleBasedBriefing(opts: {
   reason: string;
   nowMs?: number;
   maxPriorities?: number;
+  /** First line instead of "The AI model did not answer (reason) ..." */
+  header?: string;
+  /** Say that the priorities on the right are ranked by rule (default true). */
+  prioritiesNote?: boolean;
 }): { reply: string; priorities: PriorityRow[] } {
   const timeZone = normalizeTimeZone(opts.timeZone);
   const nowMs = opts.nowMs ?? Date.now();
@@ -101,21 +105,24 @@ export function buildRuleBasedBriefing(opts: {
   const events = [...opts.todayEvents].sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
 
   const lines: string[] = [
-    `⚠️ The AI model did not answer (${oneLine(opts.reason, 160)}), so this briefing was put together by simple rules. Ask again later for the AI's own ranking.`,
+    opts.header ??
+      `⚠️ The AI model did not answer (${oneLine(opts.reason, 160)}), so this briefing was put together by simple rules. Ask again later for the AI's own ranking.`,
     "",
     `**📬 Inbox (${opts.unreadCount} unread)**`,
   ];
   if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
   for (const email of unread) {
-    lines.push(`• **${oneLine(email.from, 60)}** — *${oneLine(email.subject, 90)}* — ${oneLine(email.snippet, 120)}`);
+    lines.push(`- **${oneLine(email.from, 60)}** — *${oneLine(email.subject, 90)}* — ${oneLine(email.snippet, 120)}`);
   }
   lines.push("", "**📅 Today**");
   if (events.length === 0) lines.push("Nothing scheduled today.");
-  for (const event of events) lines.push(`• ${time(event.starts_at)} – ${time(event.ends_at)} ${oneLine(event.title, 90)}`);
-  lines.push(
-    "",
-    "Priorities are on the right, ranked by rule: today's remaining events by length, then the tasks in your emails by importance.",
-  );
+  for (const event of events) lines.push(`- ${time(event.starts_at)} – ${time(event.ends_at)} ${oneLine(event.title, 90)}`);
+  if (opts.prioritiesNote !== false) {
+    lines.push(
+      "",
+      "Priorities are on the right, ranked by rule: today's remaining events by length, then the tasks in your emails by importance.",
+    );
+  }
 
   const candidates: { title: string; reason: string }[] = [];
   const upcomingToday = events
@@ -161,4 +168,32 @@ export function buildRuleBasedBriefing(opts: {
     if (priorities.length >= (opts.maxPriorities ?? 6)) break;
   }
   return { reply: lines.join("\n"), priorities };
+}
+
+/** Lowercase letters and digits only, single spaces: "*Team sync — demo*" -> "team sync demo". */
+function plain(text: string): string {
+  return (text ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/**
+ * Does the model's briefing text cover the inbox and today's calendar? Every unread email's
+ * subject (its first three words) and every event of today (the first two words of its title)
+ * must appear, and it must not claim an empty inbox or an empty day when there is mail or
+ * an event. A small local model wrote "No unread emails — inbox is clear" next to four unread
+ * emails, and "Nothing scheduled today" on a day with an event (9 Nov 2026).
+ */
+export function briefingCoversInbox(opts: {
+  reply: string;
+  emails: BriefingEmail[];
+  unreadCount: number;
+  todayEvents: BriefingEvent[];
+}): boolean {
+  const text = plain(opts.reply);
+  const unread = opts.emails.filter((email) => email.unread);
+  if (opts.unreadCount > 0 && /no unread emails|inbox is clear/.test(text)) return false;
+  if (opts.todayEvents.length > 0 && /nothing scheduled today/.test(text)) return false;
+  const firstWords = (value: string, n: number) => plain(value).split(" ").slice(0, n).join(" ");
+  const subjectsCovered = unread.every((email) => text.includes(firstWords(email.subject, 3)));
+  const eventsCovered = opts.todayEvents.every((event) => text.includes(firstWords(event.title, 2)));
+  return subjectsCovered && eventsCovered;
 }

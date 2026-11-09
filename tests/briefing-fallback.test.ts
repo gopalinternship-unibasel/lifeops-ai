@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRuleBasedBriefing, isSameCommitment, mentionedClockTimes } from "@/server/ai/briefing-fallback.server";
+import { briefingCoversInbox, buildRuleBasedBriefing, isSameCommitment, mentionedClockTimes } from "@/server/ai/briefing-fallback.server";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 
 const ZRH = "Europe/Zurich";
@@ -79,5 +79,34 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
     });
     expect(reply).toContain("Nothing scheduled today.");
     expect(priorities).toEqual([{ rank: 1, title: "Reply to: Budget review", reason: "Unread email from Ana <ana@example.com>" }]);
+  });
+});
+
+describe("does the model's briefing cover the inbox and today? (first visit)", () => {
+  const emails = fetchMockEmails();
+  const today = [{ title: "Team sync — demo walkthrough", starts_at: "2026-11-09T18:00:00Z", ends_at: "2026-11-09T19:00:00Z" }];
+
+  it("accepts a briefing that lists every unread email and today's event", () => {
+    const reply =
+      "**📬 Inbox (4 unread)**\n• **Prof. Marlow** — *Research paper — final draft due Friday*\n• **Acme Recruiting** — *Onsite interview — next steps*\n" +
+      "• **Sam (friend)** — *Lunch this Saturday?*\n• **Alicia (manager)** — *Team sync moved to 7 PM today*\n**📅 Today**\n• 19:00 – 20:00 Team sync";
+    expect(briefingCoversInbox({ reply, emails, unreadCount: 4, todayEvents: today })).toBe(true);
+  });
+
+  it("rejects the real qwen2.5 3B answers of 9 Nov 2026: an email missing, or 'inbox is clear' next to 4 unread", () => {
+    const missedAlicia =
+      "Your inbox contains 4 unread emails. Here they are:\n\n• From Prof. Marlow — Research paper — final draft due Friday • From Acme Recruiting — Onsite interview — next steps • From Sam (friend) — Lunch this Saturday? • From Stripe — Your monthly summary";
+    const contradictory =
+      "Here's your inbox with 4 unread emails:\n\n• From — Subject — short snippet\n\n📅 Today\n\nNothing scheduled today.\n\nNo unread emails — inbox is clear.";
+    expect(briefingCoversInbox({ reply: missedAlicia, emails, unreadCount: 4, todayEvents: [] })).toBe(false);
+    expect(briefingCoversInbox({ reply: contradictory, emails, unreadCount: 4, todayEvents: today })).toBe(false);
+  });
+
+  it("the replacement lists the data with its own header and can leave the priorities line out", () => {
+    const { reply } = buildRuleBasedBriefing({ emails, unreadCount: 4, todayEvents: today, timeZone: ZRH, reason: "", header: "ℹ️ listed from your data", prioritiesNote: false });
+    expect(reply.startsWith("ℹ️ listed from your data")).toBe(true);
+    expect(reply).not.toContain("did not answer");
+    expect(reply).not.toContain("Priorities are on the right");
+    expect(briefingCoversInbox({ reply, emails, unreadCount: 4, todayEvents: today })).toBe(true);
   });
 });

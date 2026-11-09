@@ -15,7 +15,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, resolveLLMConfig, type AITool } from "@/server/ai/llm.server";
-import { buildRuleBasedBriefing } from "@/server/ai/briefing-fallback.server";
+import { briefingCoversInbox, buildRuleBasedBriefing } from "@/server/ai/briefing-fallback.server";
 import { listRecentMessages, listUnreadMessages, type GmailMsg } from "@/server/google/gmail.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
@@ -437,6 +437,7 @@ CURRENT CONTEXT (now = ${new Date().toISOString()}, user time zone = ${timeZone}
 - Google account connected: ${googleConnected ? "YES (real Gmail + Calendar)" : "NO (using demo data)"}
 - Calendar context available: ${calendarContextAvailable ? "YES" : "NO — do not propose, edit, or delete calendar events"}
 - Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
+- Calendar dates (use these for day names such as "Thursday"; a day name means the next such date): ${upcomingDates(timeZone)}
 
 - Today's calendar events (use the [event_id:...] when proposing edits/deletes):
 ${todayEvents.length === 0 ? "  (none)" : todayEvents.map(e => `  • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${fmtTime(e.starts_at, timeZone)}–${fmtTime(e.ends_at, timeZone)} local time (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")}
@@ -474,6 +475,18 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   const isFirst = !history || history.length <= 1;
   let parsed: RawRespondPayload;
   let ruleBased = false;
+  // Priorities ranked by rule (the briefing's fallback); "rules" is the tasks' source then.
+  let rulePriorities = false;
+  const briefingByRules = (reason: string) =>
+    buildRuleBasedBriefing({
+      emails: googleConnected
+        ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+        : mockEmails,
+      unreadCount: googleConnected ? unreadCount : demoUnreadCount,
+      todayEvents,
+      timeZone,
+      reason,
+    });
   try {
     const aiResp = await callAI({
       role: "chat",
@@ -493,18 +506,50 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     if (!(data.briefing && isFirst)) throw error;
     console.error("Briefing: the AI model failed; using the rule-based briefing", getErrorMessage(error));
     ruleBased = true;
-    parsed = buildRuleBasedBriefing({
-      emails: googleConnected
-        ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
-        : mockEmails,
-      unreadCount: googleConnected ? unreadCount : demoUnreadCount,
-      todayEvents,
-      timeZone,
-      reason: getErrorMessage(error, "no answer"),
-    });
+    rulePriorities = true;
+    parsed = briefingByRules(getErrorMessage(error, "no answer"));
   }
 
-  const normalizedPriorities = normalizePriorities(parsed.priorities);
+  let normalizedPriorities = normalizePriorities(parsed.priorities);
+  if (data.briefing && isFirst && !ruleBased) {
+    // The first visit is where the priority list is built. A small local model often answers the
+    // briefing without one (qwen2.5 3B did so three times on 9 Nov 2026); the list then comes
+    // from the same rule as the fallback, and the reply says so.
+    if (normalizedPriorities.length === 0) {
+      normalizedPriorities = briefingByRules("").priorities;
+      rulePriorities = normalizedPriorities.length > 0;
+    }
+    const prioritiesNote =
+      "_The AI model returned no priorities, so the ones on the right are ranked by simple rules: today's remaining events by length, then the tasks in your emails by importance._";
+    const briefingEmails = googleConnected
+      ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+      : mockEmails;
+    const covered = briefingCoversInbox({
+      reply: String(parsed.reply ?? ""),
+      emails: briefingEmails,
+      unreadCount: googleConnected ? unreadCount : demoUnreadCount,
+      todayEvents,
+    });
+    if (!covered) {
+      // The model's text left mail or events out, or claimed an empty inbox or day: list them
+      // from the data instead (the model's priorities, if any, are kept).
+      const listed = buildRuleBasedBriefing({
+        emails: briefingEmails,
+        unreadCount: googleConnected ? unreadCount : demoUnreadCount,
+        todayEvents,
+        timeZone,
+        reason: "",
+        header: "ℹ️ The AI model's summary left part of your inbox or today's calendar out, so this briefing lists them straight from your data.",
+        prioritiesNote: false,
+      });
+      parsed = { ...parsed, reply: [listed.reply, rulePriorities ? prioritiesNote : ""].filter(Boolean).join("\n\n") };
+    } else if (rulePriorities) {
+      parsed = { ...parsed, reply: [String(parsed.reply ?? "").trim(), prioritiesNote].filter(Boolean).join("\n\n") };
+    }
+    // The automatic briefing only reports; nobody asked for calendar changes or replies. A small
+    // model proposed today's existing events again (one on a wrong day) as new ones (9 Nov 2026).
+    parsed = { ...parsed, proposed_events: undefined, event_changes: undefined, email_reply: undefined };
+  }
   const attemptedProposedEvents = normalizeProposedEvents(parsed.proposed_events, timeZone);
   const attemptedEventChanges = parseJsonValue(parsed.event_changes);
   const blockedCalendarActions = !calendarContextAvailable && (
@@ -533,7 +578,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
         title: priority.title,
         priority_rank: priority.rank,
         reason: priority.reason,
-        source: ruleBased ? "rules" : "chat",
+        source: rulePriorities ? "rules" : "chat",
       })),
     );
     if (insertTasksError) throw insertTasksError;
@@ -659,6 +704,20 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   if (assistantMessageError) throw assistantMessageError;
 
   return { reply: replyText, panel };
+}
+
+/**
+ * "Monday 2026-11-09 (today), Tuesday 2026-11-10 (tomorrow), ..." for the next 8 days in the
+ * user's time zone. A small local model resolved "Thursday" to the wrong date (a Tuesday a week
+ * later) when it had only "now"; with the dates spelled out it does not have to count.
+ */
+export function upcomingDates(timeZone = "UTC", days = 8): string {
+  const today = todayInTimeZone(timeZone);
+  return Array.from({ length: days }, (_, i) => {
+    const date = addDaysISO(today, i);
+    const weekday = new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+    return `${weekday} ${date}${i === 0 ? " (today)" : i === 1 ? " (tomorrow)" : ""}`;
+  }).join(", ");
 }
 
 export function startOfToday(timeZone = "UTC") {
