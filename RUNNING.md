@@ -23,9 +23,10 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
   9 Nov 2026: the Ollama here is CPU only and shared with other projects, and the whole machine was
   under heavy load (load average about 20 on 8 cores). Under that load `llama3.1:8b` took 268 s just to
   load and then generated 0.06 tokens/s; `qwen2.5:3b` is 2.5 times smaller, is usually already loaded
-  by the other projects (no load time), and returned a valid structured answer (a correct calendar
-  proposal) to MONDAY's real chat prompt. Neither model is fast here: plan on many minutes per answer
-  (numbers under "Known limits").
+  by the other projects (no load time), and returned valid structured answers to MONDAY's real
+  prompts: a correct calendar proposal in the chat, and a valid plan (tasks plus a calendar block) from
+  the planner service. Neither model is fast here: plan on many minutes per answer (numbers under
+  "Known limits").
 - Switch to Llama 3.1 8B (or back) with one command, then restart:
   ```powershell
   node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5:3b
@@ -185,11 +186,16 @@ Results are appended to `lifeops-fix\results.jsonl`, screenshots go next to the 
 cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
 node lifeops-fix\auth.mjs         # sign-up, profile, connectors, Connect Google message, sign-in, anonymous demo
 node lifeops-fix\calendar.mjs     # demo calendar week view, profile, row-level security between two users
-node lifeops-fix\chat.mjs         # briefing + priorities, proposed block, conflict refusal, draft, move, history
+node lifeops-fix\chat.mjs         # briefing + priorities, proposed block, conflict refusal, draft, move, cancel, history
 node lifeops-fix\plan.mjs refine  # free-slot week plan, dropped invalid items, held-back conflict, approvals
 node lifeops-fix\dashboard.mjs    # planner service: tasks, approval gate, run, drafts only, execution log
 node lifeops-fix\dashboard.mjs offline   # with the planner stopped: in-app assistant fallback
 ```
+
+`chat.mjs` expects a user without chat history (the first visit starts the briefing); steps can be
+picked by name, for example `node lifeops-fix\chat.mjs block draft`. For the `offline` run, stop only the
+planner first (`taskkill /PID <fastapi id from .run\pids.json> /T /F`). `$env:E2E_MESSY` replaces the
+dashboard's messy input (a shorter one keeps a slow model's answer short).
 
 `$env:E2E_USER_FILE` picks another test user file (create one with
 `node scripts\create-test-user.mjs --new --file .run\e2e-user.json`). With the real local model the
@@ -252,6 +258,7 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   work on the PC (load average about 20 on 8 cores): one chat request ("Block 3–5 pm tomorrow ...",
   with history) to `qwen2.5:3b` had 2,900 prompt tokens, evaluated at 7.8 tokens/s (6 min), and a
   132-token answer generated at 0.07 tokens/s (33 min): 39 minutes in all, for a correct proposal.
+  The planner service's request (408 prompt tokens, a 250-token plan) took 58 minutes the same way.
   `llama3.1:8b` was slower still (0.8 tokens/s prompt, 0.06 tokens/s output, 268 s to load). On an idle
   machine the same models are many times faster. The default timeouts (15 minutes) are too short under
   such load: raise `LLM_TIMEOUT_MS` in `.env.local` and `LLM_TIMEOUT_SECONDS` in `fastapi-backend\.env`
