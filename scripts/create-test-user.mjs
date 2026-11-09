@@ -12,23 +12,15 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
+import { parseEnv, readEnvText } from "./env-file.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fileArg = process.argv.indexOf("--file");
 const credentialsFile =
   fileArg > 0 && process.argv[fileArg + 1] ? resolve(process.argv[fileArg + 1]) : join(root, ".local-test-user.json");
 
-function readEnv(path) {
-  const values = {};
-  if (!existsSync(path)) return values;
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
-    if (match) values[match[1]] = match[2].replace(/^"(.*)"$/, "$1");
-  }
-  return values;
-}
-
-const env = readEnv(join(root, ".env.local"));
+// Tolerates a UTF-8 byte-order mark (see env-file.mjs).
+const env = Object.fromEntries(parseEnv(readEnvText(join(root, ".env.local"))));
 const url = env.SUPABASE_URL;
 const secret = env.SUPABASE_SECRET_KEY;
 if (!url || !secret) {

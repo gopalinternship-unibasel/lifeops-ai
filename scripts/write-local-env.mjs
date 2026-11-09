@@ -8,9 +8,10 @@
 // Every other line already in .env.local is preserved, so hand-made changes survive.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseEnv, readEnvText, upsertEnvFile } from "./env-file.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const supabaseExe =
@@ -19,41 +20,29 @@ const supabaseExe =
     ? "C:/Users/gopal/tools/supabase/supabase.exe"
     : "supabase");
 
-function parseEnv(text) {
-  const values = new Map();
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
-    if (!match) continue;
-    let value = match[2];
-    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
-    values.set(match[1], value);
+// Optional changes on the command line (written without a BOM, unlike PowerShell 5.1):
+//   --model <name>           LLM_MODEL in .env.local AND fastapi-backend/.env
+//   --set KEY=VALUE          any key in .env.local (repeatable)
+//   --backend-set KEY=VALUE  any key in fastapi-backend/.env (repeatable)
+const frontendOverrides = {};
+const backendOverrides = {};
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  const flag = args[i];
+  const value = args[i + 1];
+  if (flag === "--model" && value) {
+    frontendOverrides.LLM_MODEL = value;
+    backendOverrides.LLM_MODEL = value;
+    i++;
+  } else if ((flag === "--set" || flag === "--backend-set") && value && /^[A-Za-z_][A-Za-z0-9_]*=/.test(value)) {
+    const eq = value.indexOf("=");
+    (flag === "--set" ? frontendOverrides : backendOverrides)[value.slice(0, eq)] = value.slice(eq + 1);
+    i++;
+  } else {
+    console.error(`Unknown or incomplete option: ${flag}`);
+    console.error("Usage: node scripts/write-local-env.mjs [--model NAME] [--set KEY=VALUE]... [--backend-set KEY=VALUE]...");
+    process.exit(2);
   }
-  return values;
-}
-
-/** Update KEY=value lines in place; append keys that are missing. */
-function upsertEnvFile(path, updates, { onlyIfMissing = new Set() } = {}) {
-  const original = existsSync(path) ? readFileSync(path, "utf8") : "";
-  const lines = original ? original.split(/\r?\n/) : [];
-  const existing = parseEnv(original);
-  const seen = new Set();
-  const out = lines.map((line) => {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-    if (!match || !(match[1] in updates)) return line;
-    const key = match[1];
-    seen.add(key);
-    if (onlyIfMissing.has(key) && existing.get(key)) return line;
-    return `${key}=${updates[key]}`;
-  });
-  const appended = Object.keys(updates).filter((key) => !seen.has(key));
-  if (appended.length > 0) {
-    if (out.length > 0 && out[out.length - 1] !== "") out.push("");
-    for (const key of appended) out.push(`${key}=${updates[key]}`);
-  }
-  let text = out.join("\n");
-  if (!text.endsWith("\n")) text += "\n";
-  writeFileSync(path, text, "utf8");
-  return { changed: Object.keys(updates), appended };
 }
 
 let statusText;
@@ -77,7 +66,7 @@ if (!apiUrl || !publishable || !secret) {
 }
 
 const envLocal = join(root, ".env.local");
-const existing = existsSync(envLocal) ? parseEnv(readFileSync(envLocal, "utf8")) : new Map();
+const existing = parseEnv(readEnvText(envLocal));
 const keepIfSet = new Set([
   "GOOGLE_OAUTH_STATE_SECRET",
   "VITE_ENABLE_ANONYMOUS_DEMO",
@@ -144,4 +133,11 @@ upsertEnvFile(
   },
 );
 
-console.log("Wrote .env.local and fastapi-backend/.env (values not shown).");
+// Explicit command-line changes win over everything above.
+if (Object.keys(frontendOverrides).length > 0) upsertEnvFile(envLocal, frontendOverrides);
+if (Object.keys(backendOverrides).length > 0) upsertEnvFile(backendEnv, backendOverrides);
+const changed = [...new Set([...Object.keys(frontendOverrides), ...Object.keys(backendOverrides)])];
+
+console.log(
+  `Wrote .env.local and fastapi-backend/.env (values not shown)${changed.length ? `; set ${changed.join(", ")}` : ""}.`,
+);

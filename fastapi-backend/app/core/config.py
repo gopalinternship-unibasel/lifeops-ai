@@ -44,7 +44,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_file_encoding="utf-8",
+        # "utf-8-sig" also reads files that start with a UTF-8 byte-order mark (Windows
+        # PowerShell 5.1 `Set-Content -Encoding utf8` writes one). With plain "utf-8" the BOM
+        # sticks to the first key, which is then silently ignored.
+        env_file_encoding="utf-8-sig",
         extra="ignore",
     )
 

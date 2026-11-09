@@ -250,3 +250,17 @@ def test_planner_mode_keyword_skips_a_configured_llm(client, fake_llm, use_setti
     assert plan["planner"] == "demo"
     assert "PLANNER_MODE=keyword" in plan["planner_note"]
     assert fake_llm.calls == []
+
+
+def test_env_file_with_a_byte_order_mark_is_read_completely():
+    # Windows PowerShell 5.1 writes UTF-8 files with a BOM; the first key must still count.
+    import tempfile
+    from pathlib import Path
+
+    from app.core.config import Settings
+
+    env_file = Path(tempfile.mkdtemp(prefix="lifeops-env-")) / ".env"
+    env_file.write_bytes(b"\xef\xbb\xbfFRONTEND_ORIGIN=http://bom.test\r\nLLM_MODEL=bom-model\r\n")
+    loaded = Settings(_env_file=env_file)
+    assert loaded.frontend_origin == "http://bom.test"
+    assert loaded.llm_model == "bom-model"
