@@ -100,7 +100,7 @@ export const fetchDashboard = createServerFn({ method: "POST" })
     }
 
     const [tasksResult, planResult, draftsResult, draftCountResult, messageCountResult, demoResult, planRequest] = await Promise.all([
-      supabase.from("tasks").select("title, priority_rank, reason").eq("user_id", userId).order("priority_rank", { ascending: true }),
+      supabase.from("tasks").select("title, priority_rank, reason, source").eq("user_id", userId).order("priority_rank", { ascending: true }),
       supabase.from("weekly_plans").select("payload, approved_event_ids").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
       supabase.from("email_drafts").select("to_address, subject, provider, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(3),
       supabase.from("email_drafts").select("id", { count: "exact", head: true }).eq("user_id", userId),

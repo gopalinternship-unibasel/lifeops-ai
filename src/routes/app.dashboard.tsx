@@ -13,6 +13,7 @@ import { EmailDraftCard, PendingEventCard } from "@/components/workspace/Context
 import type { PlanRequestView } from "@/lib/plan-request";
 import { getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
+import { prioritiesSubtitle } from "@/lib/priorities";
 
 export const Route = createFileRoute("/app/dashboard")({
   component: DashboardPage,
@@ -284,7 +285,11 @@ function DashboardPage() {
                           <Badge tone={statusTone(action.status)} testId="action-status">{action.status}</Badge>
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {action.start_time && action.end_time ? `${fmtNaive(action.start_time)} – ${fmtNaive(action.end_time, true)}` : null}
+                          {action.start_time
+                            ? action.end_time && action.end_time > action.start_time
+                              ? `${fmtNaive(action.start_time)} – ${fmtNaive(action.end_time, true)}`
+                              : fmtNaive(action.start_time)
+                            : null}
                           {action.email_to ? `Draft to ${action.email_to}: ${action.email_subject ?? ""}` : null}
                           {!action.start_time && !action.email_to ? action.description : null}
                         </div>
@@ -303,10 +308,17 @@ function DashboardPage() {
                           </>
                         )}
                         {action.status === "approved" && (
-                          <button onClick={() => run(action)} disabled={busyAction === action.id}
-                            className="inline-flex items-center gap-1 rounded-md bg-foreground px-2.5 py-1.5 text-xs font-medium text-background disabled:opacity-60">
-                            {busyAction === action.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />} Run
-                          </button>
+                          <>
+                            <button onClick={() => run(action)} disabled={busyAction === action.id}
+                              className="inline-flex items-center gap-1 rounded-md bg-foreground px-2.5 py-1.5 text-xs font-medium text-background disabled:opacity-60">
+                              {busyAction === action.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />} Run
+                            </button>
+                            {/* An approved action that cannot run (overlap, time passed) can still be turned down. */}
+                            <button onClick={() => decide(action, "reject")} disabled={busyAction === action.id}
+                              className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-60">
+                              <X className="h-3 w-3" /> Reject
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -332,7 +344,7 @@ function DashboardPage() {
         </div>
 
         <div className="space-y-6 min-w-0">
-          <Card title="Top priorities" subtitle="Ranked by the assistant from your inbox, calendar and chat.">
+          <Card title="Top priorities" subtitle={prioritiesSubtitle(ws.priorities.map((p) => p.source))} testId="priorities-card">
             {ws.priorities.length === 0 ? (
               <Empty icon={<Inbox className="h-6 w-6" />} text="Ask the Workspace chat to check your emails." />
             ) : (
@@ -341,7 +353,10 @@ function DashboardPage() {
                   <li key={`${p.priority_rank}-${p.title}`} className="flex gap-3">
                     <span className="shrink-0 h-6 w-6 rounded-md grid place-items-center text-[11px] font-mono font-semibold text-primary-foreground" style={{ background: "var(--gradient-brand)" }}>#{p.priority_rank ?? "?"}</span>
                     <div className="min-w-0">
-                      <div className="text-sm font-medium leading-snug">{p.title}</div>
+                      <div className="text-sm font-medium leading-snug">
+                        {p.title}
+                        {p.source === "rules" && <span className="ml-1.5 align-middle"><Badge tone="slate" testId="priority-by-rule">rule</Badge></span>}
+                      </div>
                       {p.reason && <div className="text-[11px] text-muted-foreground">{p.reason}</div>}
                     </div>
                   </li>
@@ -451,9 +466,9 @@ function fmtDayTime(iso: string) {
   return new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
 }
 
-function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+function Card({ title, subtitle, children, testId }: { title: string; subtitle?: string; children: React.ReactNode; testId?: string }) {
   return (
-    <section className="rounded-lg border border-border bg-card p-5">
+    <section className="rounded-lg border border-border bg-card p-5" data-testid={testId}>
       <h2 className="text-sm font-semibold">{title}</h2>
       {subtitle && <p className="text-xs text-muted-foreground mt-0.5">{subtitle}</p>}
       <div className="mt-4">{children}</div>
