@@ -33,13 +33,16 @@ class RiskLevel(str, Enum):
 
 
 class AppSettings(SQLModel, table=True):
-    id: Optional[int] = Field(default=1, primary_key=True)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # One settings row per workspace owner (the MONDAY user id, or "local").
+    owner: str = Field(default="local", index=True, unique=True)
     autonomous_mode: bool = False
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner: str = Field(default="local", index=True)
     title: str
     description: Optional[str] = None
     deadline: Optional[datetime] = None
@@ -53,6 +56,7 @@ class Task(SQLModel, table=True):
 
 class ActionProposal(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner: str = Field(default="local", index=True)
 
     action_type: ActionType
     title: str
@@ -83,7 +87,10 @@ class ActionProposal(SQLModel, table=True):
 
 class PlanRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner: str = Field(default="local", index=True)
     user_input: str
     summary: str
     autonomous_mode_used: bool = False
+    # "llm" when the configured model produced the plan, "demo" for the keyword planner.
+    planner: str = "demo"
     created_at: datetime = Field(default_factory=datetime.utcnow)

@@ -97,3 +97,24 @@ def apply_execution_result(action: ActionProposal, result: dict) -> ActionPropos
     action.execution_result = json.dumps(result.get("result", result), default=str)
 
     return action
+
+
+def record_external_execution(
+    action: ActionProposal,
+    provider: str,
+    external_id: str | None,
+    result: dict | str | None,
+) -> dict:
+    """Result dict for an approved action the caller carried out itself."""
+    if action.status == ActionStatus.executed:
+        return {
+            "status": "already_executed",
+            "provider": action.provider,
+            "external_id": action.external_id,
+        }
+    return {
+        "status": "executed",
+        "provider": provider,
+        "external_id": external_id,
+        "result": result if result is not None else {"mode": "external"},
+    }

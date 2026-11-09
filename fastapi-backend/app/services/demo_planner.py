@@ -3,12 +3,12 @@ from datetime import datetime, timedelta
 from app.schemas import PlannerAction, PlannerOutput, PlannerTask
 
 
-def build_demo_plan(user_input: str) -> PlannerOutput:
+def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutput:
     """Deterministic planner used when no LLM API key is configured.
 
     This makes the backend demoable immediately.
     """
-    now = datetime.now()
+    now = now or datetime.now()
     tomorrow_10 = (now + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
     tomorrow_14 = (now + timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
     day_after_9 = (now + timedelta(days=2)).replace(hour=9, minute=0, second=0, microsecond=0)
@@ -86,7 +86,7 @@ def build_demo_plan(user_input: str) -> PlannerOutput:
                 action_type="email_draft",
                 title="Draft meeting reschedule email",
                 description="Prepare a polite email asking to reschedule the meeting.",
-                email_to="demo.user@example.com",
+                email_to="meeting.organizer@example.com",
                 email_subject="Request to reschedule our meeting",
                 email_body=(
                     "Hi,\n\nI hope you are doing well. I have an important academic deadline "
