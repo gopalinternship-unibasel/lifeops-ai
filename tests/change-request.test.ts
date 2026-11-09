@@ -152,6 +152,12 @@ describe("checking the model's calendar answer against the request", () => {
     expect(fine.changeRequest).toBe(false);
   });
 
+  it("'change' without a new day or time, and no model change, is not a calendar change", () => {
+    const gym = { id: "gym", title: "Gym — push workout", starts_at: "2026-11-10T14:00:00.000Z", ends_at: "2026-11-10T16:00:00.000Z" };
+    const r = reconcileCalendarChanges({ ...base, events: [...EVENTS, gym], message: "Change my workout to legs", modelChanges: [], modelProposals: [] });
+    expect(r).toMatchObject({ changeRequest: false, changes: [], note: undefined });
+  });
+
   it("a proposal that repeats an existing event exactly is dropped; real new events stay", () => {
     const r = reconcileCalendarChanges({
       ...base,

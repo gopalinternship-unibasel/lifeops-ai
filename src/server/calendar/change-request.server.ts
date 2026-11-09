@@ -649,8 +649,9 @@ export function reconcileCalendarChanges(opts: {
     return null;
   };
 
-  if (!request) {
-    // No move/cancel request the rules can read. A new event with the title of an existing one,
+  /** No move/cancel request the rules can use: check the model's own changes and proposals. */
+  const withoutRequest = (): Reconciled => {
+    // A new event with the title of an existing one,
     // in a message that talks about moving, is that event moved (QA saw a "moved" dentist
     // appointment proposed as a second appointment).
     if (MOVE_WORD_ANYWHERE.test(text)) {
@@ -692,7 +693,8 @@ export function reconcileCalendarChanges(opts: {
       });
     }
     return { request, changeRequest: false, changes, proposals, note, log };
-  }
+  };
+  if (!request) return withoutRequest();
 
   // Which event: the rules first, then the one event the model pointed at.
   const match = matchEvent(request, events, timeZone);
@@ -735,6 +737,11 @@ export function reconcileCalendarChanges(opts: {
   const chosen = target;
   const modelUpdate = opts.modelChanges.find((c) => c.kind === "update" && c.event.id === chosen.id && (c.starts_at || c.ends_at));
   const modelProposal = proposals.find((p) => coversTitle(p.title, chosen.title) || sameTitle(p.title, chosen.title));
+  if (!request.day && !request.start && request.shiftMin === undefined && !request.vagueTime && !modelUpdate && !modelProposal) {
+    // "Change my workout to legs": no new day or time, and the model did not move the event
+    // either, so this is not a calendar change after all.
+    return withoutRequest();
+  }
   const lengthMs = Date.parse(chosen.ends_at) - Date.parse(chosen.starts_at);
   const suggestion = modelUpdate
     ? {
