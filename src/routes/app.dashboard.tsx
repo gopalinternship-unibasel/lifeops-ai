@@ -285,7 +285,8 @@ function DashboardPage() {
                           <Badge tone={statusTone(action.status)} testId="action-status">{action.status}</Badge>
                         </div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {action.start_time
+                          {/* An email draft has no meaningful time (a model gave one: "0:00Draft to ..."). */}
+                          {action.start_time && action.action_type !== "email_draft"
                             ? action.end_time && action.end_time > action.start_time
                               ? `${fmtNaive(action.start_time)} – ${fmtNaive(action.end_time, true)}`
                               : fmtNaive(action.start_time)
