@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { callAI, type AITool, type ChatMsg } from "@/server/ai/llm.server";
 import { listCalendarEvents, insertCalendarEvent } from "@/server/google/calendar.server";
@@ -369,11 +370,11 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
  * ============================================================ */
 export const generateWeekPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator(d => z.object({
+  .validator((d) => parseInput(z.object({
     weekStart: z.string().optional(),
     instructions: z.string().max(1000).optional(),
     timeZone: z.string().max(100).optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
@@ -412,10 +413,10 @@ export const generateWeekPlan = createServerFn({ method: "POST" })
  * ============================================================ */
 export const fetchWeekPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator(d => z.object({
+  .validator((d) => parseInput(z.object({
     weekStart: z.string().optional(),
     timeZone: z.string().max(100).optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
@@ -441,11 +442,11 @@ export const fetchWeekPlan = createServerFn({ method: "POST" })
  * ============================================================ */
 export const refineWeekPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator(d => z.object({
+  .validator((d) => parseInput(z.object({
     weekStart: z.string(),
     message: z.string().min(1).max(1500),
     timeZone: z.string().max(100).optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
@@ -485,7 +486,7 @@ export const refineWeekPlan = createServerFn({ method: "POST" })
  * ============================================================ */
 export const updatePlanItem = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator(d => z.object({
+  .validator((d) => parseInput(z.object({
     weekStart: z.string(),
     dayDate: z.string(),
     itemIndex: z.number().int().min(0),
@@ -493,7 +494,7 @@ export const updatePlanItem = createServerFn({ method: "POST" })
     ends_at: IsoDateTime.optional(),
     title: z.string().trim().min(1).max(80).optional(),
     timeZone: z.string().max(100).optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const monday = toMondayISO(data.weekStart);
@@ -555,10 +556,10 @@ export const updatePlanItem = createServerFn({ method: "POST" })
  * ============================================================ */
 export const approveWeekPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator(d => z.object({
+  .validator((d) => parseInput(z.object({
     weekStart: z.string(),
     dayDate: z.string().optional(), // YYYY-MM-DD; if omitted = whole week
-  }).parse(d))
+  }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const monday = toMondayISO(data.weekStart);

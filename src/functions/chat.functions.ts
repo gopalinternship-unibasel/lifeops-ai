@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Json } from "@/integrations/supabase/types";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
@@ -275,7 +276,7 @@ const ProcessChatInput = z.object({
 
 export const processChat = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((input) => ProcessChatInput.parse(input))
+  .validator((input) => parseInput(ProcessChatInput, input))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const { sessionId, message } = data;
@@ -625,7 +626,7 @@ export const ensureChatSession = createServerFn({ method: "POST" })
 
 export const fetchSessionHistory = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({ sessionId: z.string().uuid() }).parse(d))
+  .validator((d) => parseInput(z.object({ sessionId: z.string().uuid() }), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const { data: msgs, error: messagesError } = await supabase
@@ -665,11 +666,11 @@ export const clearChatHistory = createServerFn({ method: "POST" })
  * ============================================================ */
 export const fetchCalendar = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({
+  .validator((d) => parseInput(z.object({
     from: z.string().optional(),
     to: z.string().optional(),
     timeZone: z.string().max(100).optional(),
-  }).optional().parse(d))
+  }).optional(), d))
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data?.timeZone);

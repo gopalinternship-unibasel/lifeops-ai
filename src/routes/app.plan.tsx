@@ -311,6 +311,7 @@ function PlanPage() {
               : "Type 'Please create this week's plan for me' to get started…"
           }
           hint="Type 'approve' to add the whole week, or 'approve Saturday' for one day."
+          maxLength={1500}
         />
       </div>
     </div>

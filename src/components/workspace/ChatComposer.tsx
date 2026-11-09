@@ -8,8 +8,11 @@ const DEFAULT_SUGGESTIONS = [
   "What about my evening?",
 ];
 
+/** The workspace chat accepts 4,000 characters per message (processChat). */
+export const CHAT_MESSAGE_MAX = 4000;
+
 export function ChatComposer({
-  onSend, busy, showSuggestions, suggestions, placeholder, hint,
+  onSend, busy, showSuggestions, suggestions, placeholder, hint, maxLength = CHAT_MESSAGE_MAX,
 }: {
   onSend: (text: string) => void;
   busy: boolean;
@@ -17,13 +20,18 @@ export function ChatComposer({
   suggestions?: string[];
   placeholder?: string;
   hint?: string;
+  /** Longest message the server accepts; the box stops there and shows a counter near it. */
+  maxLength?: number;
 }) {
   const [value, setValue] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
 
+  const tooLong = value.length > maxLength;
+  const nearLimit = value.length >= maxLength * 0.9;
+
   const submit = (text?: string) => {
     const t = (text ?? value).trim();
-    if (!t || busy) return;
+    if (!t || busy || t.length > maxLength) return;
     onSend(t);
     setValue("");
   };
@@ -70,13 +78,15 @@ export function ChatComposer({
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKey}
             disabled={busy}
+            maxLength={maxLength}
+            aria-describedby="composer-limit"
             rows={1}
             className="w-full resize-none bg-transparent px-4 py-3 pr-14 text-sm focus:outline-none max-h-40"
             placeholder={placeholder ?? "Ask MONDAY anything — schedule a block, reorder priorities, plan a meal…"}
           />
           <button
             type="submit"
-            disabled={busy || !value.trim()}
+            disabled={busy || !value.trim() || tooLong}
             className="absolute right-2 bottom-2 h-8 w-8 grid place-items-center rounded-md text-primary-foreground transition disabled:opacity-40"
             style={{ background: "var(--gradient-brand)" }}
             aria-label="Send"
@@ -86,6 +96,11 @@ export function ChatComposer({
         </div>
         <p className="mt-2 text-[11px] text-muted-foreground text-center">
           {hint ?? "MONDAY uses simulated Gmail and Calendar data in demo mode."}
+          {nearLimit && (
+            <span id="composer-limit" data-testid="composer-limit" className={`ml-2 font-mono ${tooLong ? "text-red-600" : "text-amber-700"}`}>
+              {value.length.toLocaleString("en-US")}/{maxLength.toLocaleString("en-US")} characters
+            </span>
+          )}
         </p>
       </form>
     </div>

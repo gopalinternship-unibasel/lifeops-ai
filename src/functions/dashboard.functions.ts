@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { getErrorMessage } from "@/lib/errors";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
@@ -37,7 +38,7 @@ function localNow(timeZone: string): string {
  * ============================================================ */
 export const fetchDashboard = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => TimeZoneInput.optional().parse(d))
+  .validator((d) => parseInput(TimeZoneInput.optional(), d))
   .handler(async ({ context, data }) => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data?.timeZone);
@@ -113,9 +114,7 @@ export const fetchDashboard = createServerFn({ method: "POST" })
  * ============================================================ */
 export const runChaosPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) =>
-    z.object({ input: z.string().trim().min(3).max(4000), timeZone: z.string().max(100).optional() }).parse(d),
-  )
+  .validator((d) => parseInput(z.object({ input: z.string().trim().min(3).max(4000), timeZone: z.string().max(100).optional() }), d))
   .handler(
     async ({
       context,
@@ -141,7 +140,7 @@ export const runChaosPlan = createServerFn({ method: "POST" })
  * ============================================================ */
 export const decideBackendAction = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({ id: z.number().int().positive(), decision: z.enum(["approve", "reject"]) }).parse(d))
+  .validator((d) => parseInput(z.object({ id: z.number().int().positive(), decision: z.enum(["approve", "reject"]) }), d))
   .handler(async ({ context, data }) => {
     const action =
       data.decision === "approve"
@@ -152,7 +151,7 @@ export const decideBackendAction = createServerFn({ method: "POST" })
 
 export const completeBackendTask = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({ id: z.number().int().positive() }).parse(d))
+  .validator((d) => parseInput(z.object({ id: z.number().int().positive() }), d))
   .handler(async ({ context, data }) => ({ task: await backend.completeTask(context.userId, data.id) }));
 
 /**
@@ -162,7 +161,7 @@ export const completeBackendTask = createServerFn({ method: "POST" })
  */
 export const executeBackendAction = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({ id: z.number().int().positive(), timeZone: z.string().max(100).optional() }).parse(d))
+  .validator((d) => parseInput(z.object({ id: z.number().int().positive(), timeZone: z.string().max(100).optional() }), d))
   .handler(async ({ context, data }): Promise<{ ok: boolean; message: string; action?: BackendAction }> => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);

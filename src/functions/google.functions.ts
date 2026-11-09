@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 import { z } from "zod";
+import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { listCalendarEvents, patchCalendarEvent, deleteCalendarEvent } from "@/server/google/calendar.server";
 import { listRecentMessages, getMessage } from "@/server/google/gmail.server";
@@ -67,9 +68,9 @@ const CalendarEventUpdateSchema = z.object({
 /* -------------------- OAuth start -------------------- */
 export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({
+  .validator((d) => parseInput(z.object({
     returnTo: z.string().max(500).optional(),
-  }).optional().parse(d))
+  }).optional(), d))
   .handler(async ({ context, data }) => {
     // Fail with a clear message (not a broken Google page) when no OAuth client is configured.
     assertGoogleOAuthConfigured();
@@ -163,10 +164,10 @@ export const disconnectGoogle = createServerFn({ method: "POST" })
 /* -------------------- Calendar -------------------- */
 export const listMyCalendar = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({
+  .validator((d) => parseInput(z.object({
     timeMin: z.string().optional(),
     timeMax: z.string().optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ context, data }) => {
     const now = new Date();
     const start = data.timeMin ?? new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
@@ -278,7 +279,7 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     messageId: z.string().min(1),
     instruction: z.string().max(500).optional(),
     save: z.boolean().optional(),
-  }).parse(d))
+  }), d))
   .handler(async ({ context, data }) => {
     const connected = await isGoogleConnected(context.userId);
     const demoEmail = connected ? null : getMockEmail(data.messageId);
@@ -337,7 +338,7 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
  */
 export const saveGmailDraft = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({
+  .validator((d) => parseInput(z.object({
     messageId: z.string().min(1),
     replyBody: z.string().trim().min(1).max(10000),
   }).parse(d))
