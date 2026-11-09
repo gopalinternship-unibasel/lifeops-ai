@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState, type FormEvent, useEffect } from "react";
+import { useState, type FormEvent, useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth-context";
 import { GeometricBackdrop } from "@/components/GeometricBackdrop";
@@ -20,14 +20,20 @@ function LoginPage() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const demoEnabled = import.meta.env.VITE_ENABLE_ANONYMOUS_DEMO === "true";
+  // Supabase "Sign in with Google" needs the Google provider enabled in Supabase Auth.
+  const googleSignInEnabled = import.meta.env.VITE_ENABLE_GOOGLE_SIGNIN === "true";
+  // While this page drives navigation itself (sign-up → onboarding), do not also redirect
+  // to /app when the new session appears; that race used to skip profile onboarding.
+  const navigatingRef = useRef(false);
 
   useEffect(() => {
-    if (!authLoading && user) navigate({ to: "/app" });
+    if (!authLoading && user && !navigatingRef.current) navigate({ to: "/app" });
   }, [user, authLoading, navigate]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
+    navigatingRef.current = true;
     try {
       if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({
@@ -49,6 +55,7 @@ function LoginPage() {
         navigate({ to: "/app" });
       }
     } catch (err: unknown) {
+      navigatingRef.current = false;
       toast.error(getErrorMessage(err, "Something went wrong"));
     } finally {
       setBusy(false);
@@ -57,6 +64,7 @@ function LoginPage() {
 
   const handleDemo = async () => {
     setBusy(true);
+    navigatingRef.current = true;
     try {
       const { error } = await supabase.auth.signInAnonymously({
         options: { data: { name: "Demo User" } },
@@ -125,17 +133,23 @@ function LoginPage() {
             </button>
           )}
 
-          <button
-            onClick={handleGoogle}
-            disabled={busy}
-            className={`${demoEnabled ? "mt-3" : "mt-8"} w-full inline-flex items-center justify-center gap-3 rounded-md border border-border bg-card px-4 py-2.5 text-sm font-medium hover:bg-muted transition disabled:opacity-60`}
-          >
-            <GoogleIcon /> Continue with Google
-          </button>
+          {googleSignInEnabled && (
+            <button
+              onClick={handleGoogle}
+              disabled={busy}
+              className={`${demoEnabled ? "mt-3" : "mt-8"} w-full inline-flex items-center justify-center gap-3 rounded-md border border-border bg-card px-4 py-2.5 text-sm font-medium hover:bg-muted transition disabled:opacity-60`}
+            >
+              <GoogleIcon /> Continue with Google
+            </button>
+          )}
 
-          <div className="my-6 flex items-center gap-3 text-[11px] uppercase tracking-wider text-muted-foreground">
-            <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
-          </div>
+          {(demoEnabled || googleSignInEnabled) ? (
+            <div className="my-6 flex items-center gap-3 text-[11px] uppercase tracking-wider text-muted-foreground">
+              <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
+            </div>
+          ) : (
+            <div className="mt-8" />
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>

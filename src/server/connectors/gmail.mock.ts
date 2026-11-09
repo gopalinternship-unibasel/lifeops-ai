@@ -1,6 +1,6 @@
 /**
- * Mock Gmail connector. Returns realistic seeded emails.
- * Future: replace with Google Gmail API while keeping the same interface.
+ * Mock Gmail connector. Returns realistic seeded emails for users who have not connected Google
+ * (demo mode). Replies to these emails can be drafted and saved as demo drafts; nothing is sent.
  */
 export interface MockEmail {
   id: string;
@@ -62,4 +62,9 @@ export function fetchMockEmails(): MockEmail[] {
       extractedTask: { title: "Team sync at 7 PM (revise demo script)", deadline: now.toISOString(), importance: "high" },
     },
   ];
+}
+
+/** Look up one demo email by id (e1…e5). The body is the snippet: demo emails are short. */
+export function getMockEmail(id: string): MockEmail | null {
+  return fetchMockEmails().find((email) => email.id === id) ?? null;
 }

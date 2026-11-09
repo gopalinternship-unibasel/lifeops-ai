@@ -4,7 +4,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Json } from "@/integrations/supabase/types";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
-import { callAI, type AITool } from "@/server/ai/lovable-ai.server";
+import { callAI, type AITool } from "@/server/ai/llm.server";
 import {
   listRecentMessages,
   listUnreadMessages,
@@ -20,6 +20,7 @@ import {
   todayInTimeZone,
   zonedDateTimeToISO,
 } from "@/server/timezone.server";
+import { parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
 
 /* ============================================================
  * Types
@@ -207,7 +208,7 @@ function normalizePriorities(value: unknown): PriorityRow[] {
     .filter((priority) => priority.title.length > 0);
 }
 
-function normalizeProposedEvents(value: unknown): ScheduleBlock[] {
+function normalizeProposedEvents(value: unknown, timeZone: string): ScheduleBlock[] {
   const parsed = parseJsonValue(value);
   if (!Array.isArray(parsed)) return [];
   return parsed.filter(isRecord).flatMap((event) => {
@@ -218,8 +219,11 @@ function normalizeProposedEvents(value: unknown): ScheduleBlock[] {
     ) {
       return [];
     }
-    const startMs = new Date(event.starts_at).getTime();
-    const endMs = new Date(event.ends_at).getTime();
+    // Times without an offset are the user's local wall-clock time.
+    const startIso = parseUserDateTime(event.starts_at, timeZone);
+    const endIso = parseUserDateTime(event.ends_at, timeZone);
+    const startMs = startIso ? toMs(startIso) : Number.NaN;
+    const endMs = endIso ? toMs(endIso) : Number.NaN;
     const title = event.title.trim();
     if (!title || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
       return [];
@@ -343,8 +347,8 @@ export const processChat = createServerFn({ method: "POST" })
         const weekEnd = endOfDaysFromNow(7, timeZone);
         const evs = await listCalendarEvents(userId, weekStart, weekEnd);
         upcomingEvents = evs.map(e => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at, notes: e.notes }));
-        const todayEnd = endOfToday(timeZone);
-        todayEvents = upcomingEvents.filter(e => e.starts_at <= todayEnd);
+        const todayEndMs = toMs(endOfToday(timeZone));
+        todayEvents = upcomingEvents.filter((e) => toMs(e.starts_at) <= todayEndMs);
       } catch (e) {
         calendarContextAvailable = false;
         console.error("Calendar fetch failed", e);
@@ -356,12 +360,13 @@ export const processChat = createServerFn({ method: "POST" })
     }
 
     const mockEmails = googleConnected ? [] : fetchMockEmails();
+    const demoUnreadCount = mockEmails.filter((mail) => mail.unread).length;
 
     // 4. System prompt
     const trim = (s: string, n = 140) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
     const emailsForPrompt = googleConnected
       ? realEmails.map((e) => `  • [id:${e.id}]${e.unread ? " (UNREAD)" : ""} ${trim(e.from, 60)} — "${trim(e.subject, 80)}" — ${trim(e.snippet, 140)}`).join("\n")
-      : mockEmails.map((e) => `  • From ${e.from}: "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? `  [task: ${e.extractedTask.title}, importance ${e.extractedTask.importance}]` : ""}`).join("\n");
+      : mockEmails.map((e) => `  • [id:${e.id}]${e.unread ? " (UNREAD)" : ""} ${e.from} — "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? `  [task: ${e.extractedTask.title}, importance ${e.extractedTask.importance}]` : ""}`).join("\n");
 
     const sys = `You are MONDAY, an AI Chief of Staff. You orchestrate the user's day via conversation.
 
@@ -375,7 +380,7 @@ USER PROFILE:
 CURRENT CONTEXT (now = ${new Date().toISOString()}, user time zone = ${timeZone}, local time = ${new Date().toLocaleString("en-US", { timeZone })}):
 - Google account connected: ${googleConnected ? "YES (real Gmail + Calendar)" : "NO (using demo data)"}
 - Calendar context available: ${calendarContextAvailable ? "YES" : "NO — do not propose, edit, or delete calendar events"}
-${googleConnected ? `- Unread emails in inbox: ${unreadCount}` : ""}
+- Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
 
 - Today's calendar events (use the [event_id:...] when proposing edits/deletes):
 ${todayEvents.length === 0 ? "  (none)" : todayEvents.map(e => `  • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${e.starts_at} → ${e.ends_at} (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")}
@@ -413,8 +418,8 @@ INSTRUCTIONS:
 - PRIORITIES MUST REFLECT EVENT DURATION: when ranking from calendar events, longer events outrank shorter ones (a 2-hour block is higher priority than a 30-minute one). Tie-break by earlier start time. Mention the duration in the "reason" field (e.g. "120 min block — biggest commitment today"). When the user asks priorities again, RECOMPUTE — do not return the same ranking if durations differ.
 - When user re-ranks, return the FULL re-ranked list.
 - If calendar context is unavailable, do NOT populate "proposed_events" or "event_changes". Explain that the calendar could not be checked and ask the user to retry.
-- For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events" with ISO timestamps. They are PROPOSED — never claim they're saved. Tell user to click Save.
-- For requests to CHANGE / MOVE / RESCHEDULE / RENAME an EXISTING event (e.g. "change the time of brown bag lunch to 8–9 pm", "move the 3 pm meeting to 4 pm"), use "event_changes" with kind="update" and the matching [event_id:...] from the calendar list above; include the new starts_at/ends_at (and title if changed). Match the user's reference fuzzily against the event titles.
+- For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events". Write times as the user's LOCAL time without an offset, e.g. "2026-05-02T15:00:00". They are PROPOSED — never claim they're saved. Tell user to click Save. Do not propose times that overlap events listed above.
+- For requests to CHANGE / MOVE / RESCHEDULE / RENAME an EXISTING event (e.g. "change the time of brown bag lunch to 8–9 pm", "move the 3 pm meeting to 4 pm"), use "event_changes" with kind="update" and the matching [event_id:...] from the calendar list above; include the new starts_at/ends_at as local times without an offset (and title if changed). Match the user's reference fuzzily against the event titles.
 - For requests to CANCEL / DELETE an event, use "event_changes" with kind="delete" and the event_id.
 - ALWAYS write a "reply" describing the proposed change so the user has confirmation in the chat.
 - For workouts → insight kind="workout" with sets/reps/rest. Meals → "meal" with ingredients + steps. Meeting prep → "meeting_prep".
@@ -433,6 +438,7 @@ INSTRUCTIONS:
     ];
 
     const aiResp = await callAI({
+      role: "chat",
       messages: messagesPayload,
       tools: [TOOL],
       toolChoice: { type: "function", function: { name: "respond" } },
@@ -446,7 +452,7 @@ INSTRUCTIONS:
     );
 
     const normalizedPriorities = normalizePriorities(parsed.priorities);
-    const attemptedProposedEvents = normalizeProposedEvents(parsed.proposed_events);
+    const attemptedProposedEvents = normalizeProposedEvents(parsed.proposed_events, timeZone);
     const attemptedEventChanges = parseJsonValue(parsed.event_changes);
     const blockedCalendarActions = !calendarContextAvailable && (
       attemptedProposedEvents.length > 0 ||
@@ -494,20 +500,25 @@ INSTRUCTIONS:
         if (!isRecord(c)) continue;
         if (c.kind !== "update" && c.kind !== "delete") continue;
         if (!c.event_id) continue;
-        const orig = todayEvents.find(e => e.id === c.event_id);
+        const orig = upcomingEvents.find(e => e.id === c.event_id);
         if (!orig) continue; // ignore hallucinated ids
         let next: PendingEventChange["next"] = undefined;
         if (c.kind === "update") {
-          const startsAt = typeof c.starts_at === "string" ? c.starts_at : orig.starts_at;
-          const endsAt = typeof c.ends_at === "string" ? c.ends_at : orig.ends_at;
-          const startMs = new Date(startsAt).getTime();
-          const endMs = new Date(endsAt).getTime();
+          const origStartMs = toMs(orig.starts_at);
+          const origEndMs = toMs(orig.ends_at);
+          const durationMs = origEndMs - origStartMs;
+          const requestedStart = typeof c.starts_at === "string" ? parseUserDateTime(c.starts_at, timeZone) : null;
+          const requestedEnd = typeof c.ends_at === "string" ? parseUserDateTime(c.ends_at, timeZone) : null;
+          // A new start alone keeps the duration; a new end alone keeps the start.
+          const startMs = requestedStart ? toMs(requestedStart) : origStartMs;
+          const endMs = requestedEnd ? toMs(requestedEnd) : requestedStart ? startMs + durationMs : origEndMs;
           if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+          const timeChanged = startMs !== origStartMs || endMs !== origEndMs;
           const nextTitle = typeof c.title === "string" ? c.title.trim().slice(0, 200) : undefined;
           next = {
-            title: nextTitle || undefined,
-            starts_at: typeof c.starts_at === "string" ? new Date(startMs).toISOString() : undefined,
-            ends_at: typeof c.ends_at === "string" ? new Date(endMs).toISOString() : undefined,
+            title: nextTitle && nextTitle !== orig.title ? nextTitle : undefined,
+            starts_at: timeChanged ? new Date(startMs).toISOString() : undefined,
+            ends_at: timeChanged ? new Date(endMs).toISOString() : undefined,
           };
           if (!next.title && !next.starts_at && !next.ends_at) continue;
         }
@@ -528,13 +539,17 @@ INSTRUCTIONS:
       typeof rawEmailReply.message_id === "string" &&
       typeof rawEmailReply.body === "string"
     ) {
-      const orig = realEmails.find((mail) => mail.id === rawEmailReply.message_id);
-      if (orig) {
+      const messageId = rawEmailReply.message_id.replace(/^id:/, "").trim();
+      const orig =
+        realEmails.find((mail) => mail.id === messageId) ??
+        mockEmails.find((mail) => mail.id === messageId);
+      const body = rawEmailReply.body.trim().slice(0, 10000);
+      if (orig && body) {
         emailDraft = {
           messageId: orig.id,
           to: orig.from,
           subject: orig.subject,
-          body: rawEmailReply.body.trim().slice(0, 10000),
+          body,
           saved: false,
           draftId: null,
         };
@@ -548,9 +563,9 @@ INSTRUCTIONS:
       panel.inbox = {
         emails: googleConnected
           ? realEmails.map(e => ({ id: e.id, from: e.from, subject: e.subject, snippet: e.snippet, unread: e.unread }))
-          : mockEmails.map(e => ({ from: e.from, subject: e.subject, snippet: e.snippet, importance: e.extractedTask?.importance })),
+          : mockEmails.map(e => ({ id: e.id, from: e.from, subject: e.subject, snippet: e.snippet, importance: e.extractedTask?.importance, unread: e.unread })),
         todayEvents: todayEvents.map(e => ({ title: e.title, starts_at: e.starts_at, ends_at: e.ends_at })),
-        unreadCount: googleConnected ? unreadCount : undefined,
+        unreadCount: googleConnected ? unreadCount : demoUnreadCount,
       };
     }
     if (priorities) panel.priorities = priorities;

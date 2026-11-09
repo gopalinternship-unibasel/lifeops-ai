@@ -40,9 +40,9 @@ function Workspace() {
     bootstrapped.current = true;
     (async () => {
       try {
-        // Make sure user has connected Google. If not, push them through onboarding.
+        // Make sure the user has connected Google or chosen the demo data. If not, onboarding.
         const status = await getGoogleConnectionStatus();
-        if (!status.connected && !user.is_anonymous) {
+        if (!status.connected && !status.demoMode && !user.is_anonymous) {
           navigate({ to: "/onboarding/connectors" });
           return;
         }

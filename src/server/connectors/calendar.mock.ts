@@ -4,6 +4,8 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  addDaysISO,
+  mondayOfISODate,
   normalizeTimeZone,
   todayInTimeZone,
   zonedDateTimeToISO,
@@ -48,17 +50,40 @@ export async function ensureSeedEvents(
 
   const timeZone = normalizeTimeZone(requestedTimeZone);
   const today = todayInTimeZone(timeZone);
-  const startsAt = zonedDateTimeToISO(today, { hour: 19 }, timeZone);
-  const endsAt = zonedDateTimeToISO(today, { hour: 20 }, timeZone);
+  const at = (date: string, hour: number, minute = 0) => zonedDateTimeToISO(date, { hour, minute }, timeZone);
+  // A few fixed commitments across the coming week so free-slot planning has something to
+  // work around. They match the demo inbox (team sync tonight, Acme interview on Monday).
+  const nextMonday = mondayOfISODate(addDaysISO(today, 7));
+  const seed = [
+    {
+      title: "Team sync — demo walkthrough",
+      starts_at: at(today, 19),
+      ends_at: at(today, 20),
+      notes: "Team meeting (from Alicia's email). You have a script ready.",
+    },
+    {
+      title: "Lecture — Distributed Systems",
+      starts_at: at(addDaysISO(today, 1), 10),
+      ends_at: at(addDaysISO(today, 1), 12),
+      notes: null,
+    },
+    {
+      title: "Dentist appointment",
+      starts_at: at(addDaysISO(today, 2), 14),
+      ends_at: at(addDaysISO(today, 2), 15, 30),
+      notes: null,
+    },
+    {
+      title: "Acme onsite interview",
+      starts_at: at(nextMonday, 10),
+      ends_at: at(nextMonday, 12),
+      notes: "20-minute system design presentation (from Acme Recruiting).",
+    },
+  ];
 
-  const { error } = await supabase.from("calendar_events").insert({
-    user_id: userId,
-    title: "Team sync — demo walkthrough",
-    starts_at: startsAt,
-    ends_at: endsAt,
-    notes: "Team meeting (from Alicia's email). You have a script ready.",
-    source: "calendar",
-  });
+  const { error } = await supabase.from("calendar_events").insert(
+    seed.map((event) => ({ ...event, user_id: userId, source: "calendar" })),
+  );
   if (error) throw error;
 }
 

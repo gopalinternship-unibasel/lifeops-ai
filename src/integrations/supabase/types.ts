@@ -124,6 +124,42 @@ export type Database = {
         }
         Relationships: []
       }
+      email_drafts: {
+        Row: {
+          body: string
+          created_at: string
+          external_draft_id: string | null
+          id: string
+          message_id: string
+          provider: string
+          subject: string
+          to_address: string
+          user_id: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          external_draft_id?: string | null
+          id?: string
+          message_id: string
+          provider: string
+          subject: string
+          to_address: string
+          user_id: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          external_draft_id?: string | null
+          id?: string
+          message_id?: string
+          provider?: string
+          subject?: string
+          to_address?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       google_oauth_tokens: {
         Row: {
           access_token: string

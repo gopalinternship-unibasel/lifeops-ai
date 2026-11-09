@@ -25,6 +25,36 @@ type OAuthStatePayload = {
   nonce: string;
 };
 
+export const GOOGLE_OAUTH_ENV = [
+  "GOOGLE_OAUTH_CLIENT_ID",
+  "GOOGLE_OAUTH_CLIENT_SECRET",
+  "GOOGLE_OAUTH_STATE_SECRET",
+] as const;
+
+/** Thrown when the server has no Google OAuth client; the UI shows the message as-is. */
+export class GoogleOAuthNotConfiguredError extends Error {
+  constructor(readonly missing: string[]) {
+    super(
+      `Google connection is not set up on this server (missing ${missing.join(", ")}). ` +
+        "Ask the app owner to create a Google OAuth client (see RUNNING.md), or continue with the demo inbox and calendar.",
+    );
+    this.name = "GoogleOAuthNotConfiguredError";
+  }
+}
+
+/** Which Google OAuth settings are present. Never returns the values. */
+export function googleOAuthConfigStatus(env: Record<string, string | undefined> = process.env) {
+  const missing: string[] = GOOGLE_OAUTH_ENV.filter((name) => !env[name]?.trim());
+  const secret = env.GOOGLE_OAUTH_STATE_SECRET?.trim() ?? "";
+  if (secret && secret.length < 32) missing.push("GOOGLE_OAUTH_STATE_SECRET (at least 32 characters)");
+  return { configured: missing.length === 0, missing };
+}
+
+export function assertGoogleOAuthConfigured() {
+  const status = googleOAuthConfigStatus();
+  if (!status.configured) throw new GoogleOAuthNotConfiguredError(status.missing);
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is not configured`);
@@ -130,8 +160,14 @@ export async function verifySignedOAuthState(state: string): Promise<OAuthStateP
   }
 }
 
+/**
+ * The OAuth redirect URI. Defaults to this server's own callback route; set
+ * GOOGLE_OAUTH_REDIRECT_URI when the app runs behind a proxy with a different public URL.
+ * It must match one of the "Authorised redirect URIs" of the Google OAuth client exactly.
+ */
 export function getRedirectUri(origin: string) {
-  return `${origin}/api/public/google/callback`;
+  const override = process.env.GOOGLE_OAUTH_REDIRECT_URI?.trim();
+  return override || `${origin}/api/public/google/callback`;
 }
 
 export function buildAuthUrl(params: { origin: string; state: string }) {

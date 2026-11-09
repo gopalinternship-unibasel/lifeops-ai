@@ -4,9 +4,9 @@ import { useAuth } from "@/lib/auth-context";
 import { GeometricBackdrop } from "@/components/GeometricBackdrop";
 import { MondayMark } from "@/components/MondayMark";
 import { Stepper } from "./onboarding.profile";
-import { ArrowRight, Check, Loader2, Mail, Calendar, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, FlaskConical, Loader2, Mail, Calendar, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
-import { getGoogleConnectionStatus, disconnectGoogle, getGoogleOAuthUrl } from "@/functions/google.functions";
+import { chooseDemoData, getGoogleConnectionStatus, disconnectGoogle, getGoogleOAuthUrl } from "@/functions/google.functions";
 import { getErrorMessage } from "@/lib/errors";
 
 export const Route = createFileRoute("/onboarding/connectors")({
@@ -18,6 +18,9 @@ function ConnectorsOnboarding() {
   const navigate = useNavigate();
   const [connected, setConnected] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
+  const [demoMode, setDemoMode] = useState(false);
+  const [oauthConfigured, setOauthConfigured] = useState(true);
+  const [oauthError, setOauthError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
 
@@ -26,6 +29,8 @@ function ConnectorsOnboarding() {
       const r = await getGoogleConnectionStatus();
       setConnected(r.connected);
       setEmail(r.email);
+      setDemoMode(r.demoMode);
+      setOauthConfigured(r.oauthConfigured);
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, "Could not check Google connection"));
     } finally {
@@ -55,7 +60,21 @@ function ConnectorsOnboarding() {
       });
       window.location.assign(url);
     } catch (error: unknown) {
-      toast.error(getErrorMessage(error, "Could not start Google connection"));
+      const message = getErrorMessage(error, "Could not start Google connection");
+      setOauthError(message);
+      toast.error(message);
+      setBusy(false);
+    }
+  }
+
+  async function startDemo() {
+    setBusy(true);
+    try {
+      await chooseDemoData();
+      toast.success("Using the demo inbox and calendar");
+      navigate({ to: "/app" });
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Could not switch to demo data"));
       setBusy(false);
     }
   }
@@ -110,23 +129,54 @@ function ConnectorsOnboarding() {
               </button>
             </div>
           ) : (
-            <button onClick={startOAuth} disabled={busy}
-              className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60">
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <GoogleLogo />}
-              Connect Google
-            </button>
+            <>
+              {(!oauthConfigured || oauthError) && (
+                <div role="alert" data-testid="google-not-configured"
+                  className="mb-4 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700" />
+                  <span>
+                    {oauthError ??
+                      "Google connection is not set up on this server yet (no Google OAuth client configured). You can use the demo inbox and calendar below; everything else works the same."}
+                  </span>
+                </div>
+              )}
+              <button onClick={startOAuth} disabled={busy}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60">
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <GoogleLogo />}
+                Connect Google
+              </button>
+            </>
           )}
         </div>
 
+        {!connected && (
+          <div className="mt-6 rounded-lg border border-border bg-card p-5">
+            <div className="flex items-start gap-3">
+              <FlaskConical className="h-5 w-5 text-primary shrink-0" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">Use demo data instead</div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  A sample inbox and a demo calendar stored in your account. Saving events, approving plans and
+                  saving reply drafts all work; nothing leaves MONDAY. You can connect Google later from your profile.
+                </p>
+              </div>
+            </div>
+            <button onClick={startDemo} disabled={busy}
+              className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-md border border-border bg-background px-4 py-2.5 text-sm font-medium hover:bg-muted transition disabled:opacity-60">
+              {demoMode ? "Continue with demo data" : "Use demo inbox & calendar"}
+            </button>
+          </div>
+        )}
+
         <button
-          disabled={!connected}
+          disabled={!connected && !demoMode}
           onClick={() => navigate({ to: "/app" })}
           className="mt-8 w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Enter AI Workspace <ArrowRight className="h-4 w-4" />
         </button>
-        {!connected && (
-          <p className="mt-3 text-center text-xs text-muted-foreground">Connect Google to continue.</p>
+        {!connected && !demoMode && (
+          <p className="mt-3 text-center text-xs text-muted-foreground">Connect Google or choose demo data to continue.</p>
         )}
       </main>
     </div>

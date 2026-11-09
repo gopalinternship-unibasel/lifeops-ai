@@ -158,7 +158,7 @@ function PlanPage() {
         { data: { weekStart: monday, dayDate } } as Parameters<typeof approveWeekPlan>[0],
       );
       const targets = dayDate ? [dayDate] : (plan?.days.map(d => d.date) ?? []);
-      if (r.failed === 0) {
+      if (r.failed === 0 && r.conflicts === 0) {
         setApprovedDates((prev) => {
           const next = new Set(prev);
           for (const date of targets) next.add(date);
@@ -170,6 +170,9 @@ function PlanPage() {
         : "the whole week";
       const parts = [`Added ${r.created} event${r.created === 1 ? "" : "s"}`];
       if (r.skipped > 0) parts.push(`skipped ${r.skipped} already-existing event${r.skipped === 1 ? "" : "s"}`);
+      if (r.conflicts > 0) {
+        parts.push(`held back ${r.conflicts} that would overlap your calendar (${r.conflictTitles.join(", ")})`);
+      }
       if (r.failed > 0) parts.push(`${r.failed} failed`);
       const summary = `${parts.join(", ")} for ${niceDay}.`;
       toast.success(summary);

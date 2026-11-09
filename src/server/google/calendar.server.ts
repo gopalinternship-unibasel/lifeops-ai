@@ -14,6 +14,7 @@ interface GoogleCalendarEventApi {
   htmlLink?: string;
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
+  transparency?: string;
 }
 
 type CalendarPatchBody = {
@@ -30,6 +31,12 @@ export interface GCalEvent {
   ends_at: string;
   notes?: string | null;
   htmlLink?: string;
+  /** False for all-day and "show as free" events, which do not block time. */
+  busy?: boolean;
+}
+
+function isBusy(event: GoogleCalendarEventApi): boolean {
+  return !!event.start?.dateTime && event.transparency !== "transparent";
 }
 
 function toIso(date?: { dateTime?: string; date?: string }) {
@@ -58,6 +65,7 @@ export async function listCalendarEvents(userId: string, timeMin: string, timeMa
     ends_at: toIso(event.end),
     notes: event.description ?? null,
     htmlLink: event.htmlLink,
+    busy: isBusy(event),
   }));
 }
 

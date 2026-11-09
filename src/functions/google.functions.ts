@@ -2,17 +2,29 @@ import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { listCalendarEvents, insertCalendarEvent, patchCalendarEvent, deleteCalendarEvent } from "@/server/google/calendar.server";
-import { listRecentMessages, createDraftReply, getMessage } from "@/server/google/gmail.server";
-import { callAI } from "@/server/ai/lovable-ai.server";
+import { listCalendarEvents, patchCalendarEvent, deleteCalendarEvent } from "@/server/google/calendar.server";
+import { listRecentMessages, getMessage } from "@/server/google/gmail.server";
+import { callAI } from "@/server/ai/llm.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { buildAuthUrl, createSignedOAuthState, revokeGoogleToken } from "@/server/google/oauth.server";
+import {
+  assertGoogleOAuthConfigured,
+  buildAuthUrl,
+  createSignedOAuthState,
+  googleOAuthConfigStatus,
+  revokeGoogleToken,
+} from "@/server/google/oauth.server";
 import { getErrorMessage } from "@/lib/errors";
 import {
-  createEvent as createMockCalendarEvent,
   deleteEvent as deleteMockCalendarEvent,
   updateEvent as updateMockCalendarEvent,
 } from "@/server/connectors/calendar.mock";
+import { getMockEmail } from "@/server/connectors/gmail.mock";
+import {
+  assertNoCalendarConflict,
+  createCalendarBlock,
+  isGoogleConnected,
+  saveReplyDraft,
+} from "@/server/workspace.server";
 
 const IsoDateTime = z.string().refine(
   (value) => Number.isFinite(new Date(value).getTime()),
@@ -24,6 +36,7 @@ const CalendarEventSchema = z.object({
   starts_at: IsoDateTime,
   ends_at: IsoDateTime,
   notes: z.string().max(2000).optional().nullable(),
+  timeZone: z.string().max(100).optional(),
 }).superRefine((value, ctx) => {
   if (new Date(value.ends_at).getTime() <= new Date(value.starts_at).getTime()) {
     ctx.addIssue({
@@ -40,6 +53,7 @@ const CalendarEventUpdateSchema = z.object({
   starts_at: IsoDateTime.optional(),
   ends_at: IsoDateTime.optional(),
   notes: z.string().max(2000).optional().nullable(),
+  timeZone: z.string().max(100).optional(),
 }).superRefine((value, ctx) => {
   if (value.starts_at && value.ends_at && new Date(value.ends_at).getTime() <= new Date(value.starts_at).getTime()) {
     ctx.addIssue({
@@ -50,16 +64,6 @@ const CalendarEventUpdateSchema = z.object({
   }
 });
 
-async function isGoogleConnected(userId: string): Promise<boolean> {
-  const { data, error } = await supabaseAdmin
-    .from("google_oauth_tokens")
-    .select("user_id")
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (error) throw error;
-  return !!data;
-}
-
 /* -------------------- OAuth start -------------------- */
 export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -67,6 +71,8 @@ export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
     returnTo: z.string().max(500).optional(),
   }).optional().parse(d))
   .handler(async ({ context, data }) => {
+    // Fail with a clear message (not a broken Google page) when no OAuth client is configured.
+    assertGoogleOAuthConfigured();
     const request = getRequest();
     if (!request) throw new Error("Request context is unavailable");
     const origin = new URL(request.url).origin;
@@ -87,11 +93,37 @@ export const getGoogleConnectionStatus = createServerFn({ method: "GET" })
       .eq("user_id", context.userId)
       .maybeSingle();
     if (error) throw error;
+    const { data: demoRow, error: demoError } = await context.supabase
+      .from("connector_status")
+      .select("id")
+      .eq("user_id", context.userId)
+      .eq("provider", "demo")
+      .maybeSingle();
+    if (demoError) throw demoError;
+    const oauth = googleOAuthConfigStatus();
     return {
       connected: !!data,
       email: data?.google_email ?? null,
       scopes: data?.scope ?? null,
+      /** The user chose the built-in demo inbox and calendar instead of connecting Google. */
+      demoMode: !data && !!demoRow,
+      oauthConfigured: oauth.configured,
+      oauthMissing: oauth.missing,
     };
+  });
+
+/** Use the built-in demo inbox and calendar until Google is connected. */
+export const chooseDemoData = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { error } = await context.supabase
+      .from("connector_status")
+      .upsert(
+        { user_id: context.userId, provider: "demo" },
+        { onConflict: "user_id,provider", ignoreDuplicates: true },
+      );
+    if (error) throw error;
+    return { ok: true };
   });
 
 export const disconnectGoogle = createServerFn({ method: "POST" })
@@ -122,7 +154,8 @@ export const disconnectGoogle = createServerFn({ method: "POST" })
     const { error: statusError } = await supabaseAdmin
       .from("connector_status")
       .delete()
-      .eq("user_id", context.userId);
+      .eq("user_id", context.userId)
+      .in("provider", ["gmail", "google_calendar"]);
     if (statusError) throw statusError;
     return { ok: true };
   });
@@ -154,16 +187,20 @@ export const saveCalendarEvent = createServerFn({ method: "POST" })
   .validator((d) => CalendarEventSchema.parse(d))
   .handler(async ({ context, data }) => {
     try {
-      const connected = await isGoogleConnected(context.userId);
-      const input = {
-        title: data.title,
-        starts_at: data.starts_at,
-        ends_at: data.ends_at,
-        notes: data.notes ?? null,
-      };
-      const ev = connected
-        ? await insertCalendarEvent(context.userId, input)
-        : await createMockCalendarEvent(context.supabase, context.userId, { ...input, source: "chat" });
+      // Approval gate: this only runs when the user clicks Save on a proposal.
+      // createCalendarBlock refuses times that overlap an existing event.
+      const ev = await createCalendarBlock({
+        supabase: context.supabase,
+        userId: context.userId,
+        event: {
+          title: data.title,
+          starts_at: new Date(data.starts_at).toISOString(),
+          ends_at: new Date(data.ends_at).toISOString(),
+          notes: data.notes ?? null,
+        },
+        source: "chat",
+        timeZone: data.timeZone,
+      });
       return { ok: true, event: ev, error: null };
     } catch (e: unknown) {
       return { ok: false, event: null, error: String(getErrorMessage(e)) };
@@ -178,10 +215,24 @@ export const updateCalendarEvent = createServerFn({ method: "POST" })
       const connected = await isGoogleConnected(context.userId);
       const patch = {
         title: data.title,
-        starts_at: data.starts_at,
-        ends_at: data.ends_at,
+        starts_at: data.starts_at ? new Date(data.starts_at).toISOString() : undefined,
+        ends_at: data.ends_at ? new Date(data.ends_at).toISOString() : undefined,
         notes: data.notes,
       };
+      if (patch.starts_at && patch.ends_at) {
+        // A moved event must not double-book the calendar (its own slot does not count).
+        await assertNoCalendarConflict({
+          supabase: context.supabase,
+          userId: context.userId,
+          connected,
+          startsAt: patch.starts_at,
+          endsAt: patch.ends_at,
+          ignoreEventId: data.eventId,
+          timeZone: data.timeZone,
+        });
+      } else if (patch.starts_at || patch.ends_at) {
+        throw new Error("Moving an event needs both a new start and a new end time.");
+      }
       const ev = connected
         ? await patchCalendarEvent(context.userId, data.eventId, patch)
         : await updateMockCalendarEvent(context.supabase, context.userId, data.eventId, patch);
@@ -229,7 +280,11 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     save: z.boolean().optional(),
   }).parse(d))
   .handler(async ({ context, data }) => {
-    const msg = await getMessage(context.userId, data.messageId);
+    const connected = await isGoogleConnected(context.userId);
+    const demoEmail = connected ? null : getMockEmail(data.messageId);
+    const msg = connected
+      ? await getMessage(context.userId, data.messageId)
+      : demoEmail && { from: demoEmail.from, subject: demoEmail.subject, bodyText: demoEmail.snippet };
     if (!msg) return { ok: false, error: "Message not found", suggestion: null, draft: null };
 
     // Get the user's name for sign-off
@@ -246,6 +301,7 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     let suggestion = "";
     try {
       const ai = await callAI({
+        role: "draft",
         messages: [
           { role: "system", content: sys },
           { role: "user", content: userPrompt },
@@ -257,10 +313,15 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     }
     if (!suggestion) return { ok: false, error: "Empty AI response", suggestion: null, draft: null };
 
-    let draft = null as null | { draftId: string; subject: string; to: string };
+    let draft = null as null | { draftId: string; subject: string; to: string; provider: "gmail" | "demo" };
     if (data.save) {
       try {
-        draft = await createDraftReply(context.userId, { messageId: data.messageId, replyBody: suggestion });
+        draft = await saveReplyDraft({
+          supabase: context.supabase,
+          userId: context.userId,
+          messageId: data.messageId,
+          replyBody: suggestion,
+        });
       } catch (e: unknown) {
         return { ok: false, error: `Draft save failed: ${getErrorMessage(e)}`, suggestion, draft: null };
       }
@@ -270,7 +331,10 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
   });
 
 
-/** Save the user's reviewed reply body verbatim as a Gmail draft. Never sends. */
+/**
+ * Save the user's reviewed reply body verbatim as a draft (Gmail when connected, the demo
+ * mailbox otherwise). Never sends: there is no send path anywhere in MONDAY.
+ */
 export const saveGmailDraft = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => z.object({
@@ -279,7 +343,9 @@ export const saveGmailDraft = createServerFn({ method: "POST" })
   }).parse(d))
   .handler(async ({ context, data }) => {
     try {
-      const draft = await createDraftReply(context.userId, {
+      const draft = await saveReplyDraft({
+        supabase: context.supabase,
+        userId: context.userId,
         messageId: data.messageId,
         replyBody: data.replyBody,
       });

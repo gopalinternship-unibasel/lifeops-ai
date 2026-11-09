@@ -4,6 +4,7 @@ import { fetchCalendar } from "@/functions/chat.functions";
 import { ChevronLeft, ChevronRight, Calendar as CalIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getBrowserTimeZone } from "@/lib/date";
+import { getErrorMessage } from "@/lib/errors";
 
 export const Route = createFileRoute("/app/calendar")({
   component: CalendarPage,
@@ -46,6 +47,7 @@ function CalendarPage() {
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<"google" | "mock">("mock");
   const [weekStart, setWeekStart] = useState<Date>(() => startOfWeek(new Date()));
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -58,8 +60,11 @@ function CalendarPage() {
     ).then((result: Awaited<ReturnType<typeof fetchCalendar>>) => {
       setEvents((result.events ?? []) as Ev[]);
       setSource(result.source ?? "mock");
-      setLoading(false);
-    });
+      setError("error" in result && result.error ? String(result.error) : null);
+    }).catch((e: unknown) => {
+      setEvents([]);
+      setError(getErrorMessage(e, "Could not load the calendar"));
+    }).finally(() => setLoading(false));
   }, [weekStart]);
 
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
@@ -97,6 +102,9 @@ function CalendarPage() {
         </div>
       </div>
 
+      {error && (
+        <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">{error}</div>
+      )}
       {loading ? (
         <div className="text-sm text-muted-foreground py-24 text-center">Loading…</div>
       ) : (

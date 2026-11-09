@@ -141,7 +141,7 @@ export async function listUnreadMessages(userId: string, maxResults = 50): Promi
 
 export async function getMessage(userId: string, messageId: string): Promise<GmailMsg | null> {
   const { accessToken } = await getValidAccessToken(userId);
-  const r = await fetch(`${BASE}/users/me/messages/${messageId}?format=full`, {
+  const r = await fetch(`${BASE}/users/me/messages/${encodeURIComponent(messageId)}?format=full`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: googleApiSignal(),
   });
@@ -173,9 +173,9 @@ function safeHeaderValue(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
 
-function buildRawReply(opts: { to: string; subject: string; body: string; inReplyTo?: string; references?: string }) {
+function buildRawReply(opts: { to: string; subject: string; body: string; inReplyTo?: string; references?: string; isReply?: boolean }) {
   const cleanSubject = safeHeaderValue(opts.subject);
-  const subj = cleanSubject.toLowerCase().startsWith("re:") ? cleanSubject : `Re: ${cleanSubject}`;
+  const subj = opts.isReply === false || cleanSubject.toLowerCase().startsWith("re:") ? cleanSubject : `Re: ${cleanSubject}`;
   const lines = [
     `To: ${safeHeaderValue(opts.to)}`,
     `Subject: ${subj}`,
@@ -191,7 +191,7 @@ function buildRawReply(opts: { to: string; subject: string; body: string; inRepl
 export async function createDraftReply(userId: string, params: { messageId: string; replyBody: string }): Promise<{ draftId: string; subject: string; to: string }> {
   const { accessToken } = await getValidAccessToken(userId);
   // Fetch original to copy thread + headers
-  const origRes = await fetch(`${BASE}/users/me/messages/${params.messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`, {
+  const origRes = await fetch(`${BASE}/users/me/messages/${encodeURIComponent(params.messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`, {
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: googleApiSignal(),
   });
@@ -220,4 +220,26 @@ export async function createDraftReply(userId: string, params: { messageId: stri
   const draft = (await draftRes.json()) as GmailDraftApiResponse;
   if (!draft.id) throw new Error("Gmail returned a draft without an ID");
   return { draftId: draft.id, subject, to: from };
+}
+
+/**
+ * Create a new Gmail DRAFT (not a reply). Only the drafts endpoint is used: MONDAY never
+ * calls messages.send or drafts.send, so nothing is ever sent on the user's behalf.
+ */
+export async function createDraft(
+  userId: string,
+  params: { to: string; subject: string; body: string },
+): Promise<{ draftId: string }> {
+  const { accessToken } = await getValidAccessToken(userId);
+  const raw = buildRawReply({ to: params.to, subject: params.subject, body: params.body, isReply: false });
+  const draftRes = await fetch(`${BASE}/users/me/drafts`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ message: { raw } }),
+    signal: googleApiSignal(),
+  });
+  if (!draftRes.ok) throw new Error(`Draft create failed: ${draftRes.status} ${await draftRes.text()}`);
+  const draft = (await draftRes.json()) as GmailDraftApiResponse;
+  if (!draft.id) throw new Error("Gmail returned a draft without an ID");
+  return { draftId: draft.id };
 }

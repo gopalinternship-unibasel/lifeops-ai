@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/integrations/supabase/client";
@@ -78,6 +78,16 @@ function ProfilePage() {
           {saving && <Loader2 className="h-4 w-4 animate-spin" />} Save changes
         </button>
       </form>
+
+      <div className="mt-10 rounded-lg border border-border bg-card p-5">
+        <h2 className="text-sm font-semibold">Connections</h2>
+        <p className="text-xs text-muted-foreground mt-1">
+          Connect Gmail and Google Calendar, or keep using the demo inbox and calendar.
+        </p>
+        <Link to="/onboarding/connectors" className="mt-3 inline-flex text-sm font-medium text-primary hover:underline">
+          Manage Google connection →
+        </Link>
+      </div>
     </div>
   );
 }

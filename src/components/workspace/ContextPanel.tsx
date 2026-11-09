@@ -5,6 +5,7 @@ import type { PanelPayload, PriorityRow, ScheduleBlock, PendingEvent, PendingEve
 import { saveCalendarEvent, saveGmailDraft, updateCalendarEvent, removeCalendarEvent } from "@/functions/google.functions";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/lib/errors";
+import { getBrowserTimeZone } from "@/lib/date";
 
 type Tab = "priorities" | "schedule" | "insights";
 
@@ -201,6 +202,7 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
           title: change.next?.title,
           starts_at: change.next?.starts_at,
           ends_at: change.next?.ends_at,
+          timeZone: getBrowserTimeZone(),
         } });
         if (!r.ok) { toast.error(r.error ?? "Could not update event"); setBusy(false); return; }
         toast.success("Event updated");
@@ -241,14 +243,14 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
   );
 }
 
-function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent; onSaved: (id: string, ev: ScheduleBlock) => void; onDismiss: (id: string) => void }) {
+export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent; onSaved: (id: string, ev: ScheduleBlock) => void; onDismiss: (id: string) => void }) {
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
     try {
-      const r = await saveCalendarEvent({ data: { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes ?? undefined } });
+      const r = await saveCalendarEvent({ data: { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes ?? undefined, timeZone: getBrowserTimeZone() } });
       if (!r.ok) { toast.error(r.error ?? "Save failed"); setBusy(false); return; }
-      toast.success("Added to Google Calendar");
+      toast.success("Added to your calendar");
       onSaved(ev.id, { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes });
     } catch (e: unknown) { toast.error(getErrorMessage(e, "Save failed")); setBusy(false); }
   }
@@ -317,7 +319,7 @@ function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { in
   );
 }
 
-function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSaved: (draftId: string) => void }) {
+export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSaved: (draftId: string) => void }) {
   const [body, setBody] = useState(draft.body);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(!!draft.saved);
@@ -327,7 +329,7 @@ function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSav
     try {
       const r = await saveGmailDraft({ data: { messageId: draft.messageId, replyBody: body } });
       if (!r.ok || !r.draft) { toast.error(r.error ?? "Could not save draft"); setBusy(false); return; }
-      toast.success("Draft saved to Gmail (not sent)");
+      toast.success(r.draft.provider === "gmail" ? "Draft saved to Gmail (not sent)" : "Draft saved to the demo mailbox (not sent)");
       setSaved(true);
       onSaved(r.draft.draftId);
     } catch (e: unknown) { toast.error(getErrorMessage(e, "Failed")); }
@@ -346,10 +348,10 @@ function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSav
           rows={7}
           className="w-full text-sm rounded-md border border-blue-200 bg-card p-2.5 focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:opacity-70 resize-none" />
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] text-blue-900/70">Saved as draft only — not sent. Open Gmail to send.</p>
+          <p className="text-[10px] text-blue-900/70">Saved as a draft only — MONDAY never sends email.</p>
           <button onClick={saveDraft} disabled={busy || saved}
             className="inline-flex items-center gap-1.5 rounded-md bg-gradient-brand px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60">
-            {saved ? <><Check className="h-3 w-3" /> Draft saved</> : busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Save className="h-3 w-3" /> Save to Gmail</>}
+            {saved ? <><Check className="h-3 w-3" /> Draft saved</> : busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Save className="h-3 w-3" /> Save as draft</>}
           </button>
         </div>
       </div>
