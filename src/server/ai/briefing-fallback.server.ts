@@ -5,8 +5,8 @@
  * priorities with the same rule the model gets: today's events by length (longer first, then
  * earlier), then the tasks found in emails by importance. An email task about one of today's
  * remaining events (the demo's "Team sync at 7 PM" email and the 7 PM team sync) is the same
- * commitment: it is folded into that event's line instead of being ranked twice. Everything is
- * labelled as rule-based.
+ * commitment: it is folded into that event's line instead of being ranked twice, and once that
+ * event is over the email task is not ranked at all. Everything is labelled as rule-based.
  */
 import { formatTimeInZone, normalizeTimeZone } from "@/server/timezone.server";
 import type { PriorityRow } from "@/types/panel";
@@ -133,6 +133,11 @@ export function buildRuleBasedBriefing(opts: {
     .sort((a, b) => IMPORTANCE_ORDER[a.extractedTask!.importance] - IMPORTANCE_ORDER[b.extractedTask!.importance]);
   // An email task about one of these events is the same commitment: one line, with the email noted.
   const folded = new Set<BriefingEmail>();
+  // An email task about one of today's events that is already over is done with the event: it is
+  // not ranked on its own (QA saw "Team sync at 7 PM" ranked at 21:33, after the 19:00 sync).
+  for (const event of events.filter((e) => Date.parse(e.ends_at) <= nowMs)) {
+    for (const email of tasks) if (isSameCommitment(event, email, timeZone)) folded.add(email);
+  }
   for (const event of upcomingToday) {
     const about = tasks.filter((email) => !folded.has(email) && isSameCommitment(event, email, timeZone));
     for (const email of about) folded.add(email);
