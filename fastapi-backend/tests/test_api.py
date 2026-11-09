@@ -244,6 +244,23 @@ def test_llm_failure_falls_back_to_keyword_planner(client, fake_llm):
     assert plan["tasks_created"] == 4
 
 
+def test_model_http_error_note_is_a_sentence_without_the_raw_body(client, fake_llm):
+    import httpx
+    from openai import APIStatusError
+
+    request = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
+    response = httpx.Response(503, request=request)
+    fake_llm.error = APIStatusError(
+        "Error code: 503 - {'error': {'message': 'QA double: model unavailable'}}",
+        response=response,
+        body={"error": {"message": "QA double: model unavailable"}},
+    )
+    plan = make_plan(client)
+    assert plan["planner"] == "demo"
+    assert "the model service answered HTTP 503: QA double: model unavailable" in plan["planner_note"]
+    assert "{" not in plan["planner_note"] and "'error'" not in plan["planner_note"]
+
+
 def test_planner_mode_keyword_skips_a_configured_llm(client, fake_llm, use_settings):
     use_settings(planner_mode="keyword")
     plan = make_plan(client)

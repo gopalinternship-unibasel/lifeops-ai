@@ -47,10 +47,45 @@ class HttpStatusError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The provider's own error text, one readable line (never raw JSON), or "". */
+    readonly detail: string = "",
   ) {
     super(message);
     this.name = "HttpStatusError";
   }
+}
+
+/** The first message-like string in a parsed error body ({"error":{"message":...}} and similar). */
+function findErrorText(value: unknown, depth = 0): string | undefined {
+  if (depth > 4) return undefined;
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value)) return findErrorText(value[0], depth + 1);
+  if (isRecord(value)) {
+    for (const key of ["message", "error", "detail", "error_description", "msg", "title"]) {
+      const found = findErrorText(value[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The provider's error text from an error response body, as one short readable line: the
+ * message inside a JSON error object, or plain text. JSON without a message, HTML error pages
+ * and anything that still looks like JSON give "" so users never see a raw provider body.
+ */
+export function providerErrorDetail(body: string, max = 160): string {
+  const text = (body ?? "").trim();
+  if (!text) return "";
+  let detail: string | undefined;
+  try {
+    detail = findErrorText(JSON.parse(text) as unknown) ?? "";
+  } catch {
+    detail = text;
+  }
+  const line = detail.replace(/\s+/g, " ").trim();
+  if (!line || /^[[{<]/.test(line)) return "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
 function errorStatus(error: unknown): number | undefined {
@@ -281,12 +316,24 @@ async function singleCall(opts: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new HttpStatusError(`${opts.config.provider} ${res.status}: ${text.slice(0, 240)}`, res.status);
+    // The raw body goes to the server log only; users get a sentence from friendly().
+    console.error(`[llm] ${opts.config.provider} ${opts.model}: HTTP ${res.status}: ${text.slice(0, 500)}`);
+    const detail = providerErrorDetail(text);
+    throw new HttpStatusError(
+      `${opts.config.provider} answered HTTP ${res.status}${detail ? `: ${detail}` : ""}`,
+      res.status,
+      detail,
+    );
   }
 
-  const completion = (await res.json()) as AIChatCompletion & {
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
+  const responseText = await res.text();
+  let completion: AIChatCompletion & { usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  try {
+    completion = JSON.parse(responseText) as typeof completion;
+  } catch {
+    console.error(`[llm] ${opts.config.provider} ${opts.model}: answer is not JSON: ${responseText.slice(0, 300)}`);
+    throw new Error(`${opts.config.provider} sent an answer that is not valid JSON. Try again in a moment.`);
+  }
   console.info(
     `[llm] ${opts.config.provider} ${opts.model}: ${completion.usage?.prompt_tokens ?? "?"} prompt + ${completion.usage?.completion_tokens ?? "?"} completion tokens in ${((Date.now() - startedAt) / 1000).toFixed(1)} s`,
   );
@@ -363,5 +410,15 @@ export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseU
     );
   if (status === 402) return new Error(`${config.provider} credits exhausted for this token.`);
   if (status === 404) return new Error(`${config.provider} does not serve the configured model (LLM_MODEL).`);
+  if (status !== undefined) {
+    // Every other HTTP status: a sentence with the provider's own message (never its raw body).
+    const detail = e instanceof HttpStatusError ? e.detail : "";
+    const code = `HTTP ${status}${detail ? `: ${detail}` : ""}`;
+    if (status === 413) return new Error(`${config.provider} refused the request as too large (${code}). Try a shorter message.`);
+    if (status >= 500) {
+      return new Error(`${config.provider} is not available right now (${code}). Try again in a moment.`);
+    }
+    return new Error(`${config.provider} could not process the request (${code}).`);
+  }
   return e instanceof Error ? e : new Error(String(e));
 }

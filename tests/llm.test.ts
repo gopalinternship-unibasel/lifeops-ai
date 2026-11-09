@@ -4,6 +4,7 @@ import {
   callAI,
   extractJsonObject,
   normalizeToolCompletion,
+  providerErrorDetail,
   resolveLLMConfig,
   type AITool,
 } from "@/server/ai/llm.server";
@@ -208,5 +209,54 @@ describe("callAI", () => {
     const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
     await expect(failure).rejects.toThrow(/Node's 5-minute fetch limit/);
     await expect(failure).rejects.not.toThrow(/Could not reach/);
+  });
+});
+
+describe("provider errors are sentences, never raw provider JSON", () => {
+  it("providerErrorDetail keeps the message inside a JSON error body and drops everything else", () => {
+    expect(providerErrorDetail('{"error":{"message":"QA double: model unavailable"}}')).toBe("QA double: model unavailable");
+    expect(providerErrorDetail(`{"error":"model 'x' not found"}`)).toBe("model 'x' not found");
+    expect(providerErrorDetail('{"detail":[{"msg":"field required"}]}')).toBe("field required");
+    expect(providerErrorDetail("Service Unavailable")).toBe("Service Unavailable");
+    expect(providerErrorDetail('{"code":503,"retry":true}')).toBe(""); // JSON without a message
+    expect(providerErrorDetail("<html><body>502 Bad Gateway</body></html>")).toBe("");
+    expect(providerErrorDetail("")).toBe("");
+    expect(providerErrorDetail("x".repeat(400)).length).toBeLessThanOrEqual(160);
+  });
+
+  it("HTTP 503 and 500 from the model read as 'not available right now' with the provider's message", async () => {
+    setEnv({ LLM_BASE_URL: "http://127.0.0.1:55328/v1", LLM_MODEL: "test" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"error":{"message":"QA double: model unavailable"}}', { status: 503 })),
+    );
+    const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
+    await expect(failure).rejects.toThrow(
+      "the AI provider is not available right now (HTTP 503: QA double: model unavailable). Try again in a moment.",
+    );
+    await expect(failure).rejects.not.toThrow(/[{}"]/);
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })));
+    await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      /^the AI provider is not available right now \(HTTP 500\)\. Try again in a moment\.$/,
+    );
+  });
+
+  it("a 400 from Ollama and an answer that is not JSON are sentences too", async () => {
+    setEnv({});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"error":{"message":"invalid response_format","type":"invalid_request_error"}}', { status: 400 })),
+    );
+    await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      "Ollama could not process the request (HTTP 400: invalid response_format).",
+    );
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>proxy error</html>", { status: 200 })));
+    await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      "Ollama sent an answer that is not valid JSON. Try again in a moment.",
+    );
   });
 });

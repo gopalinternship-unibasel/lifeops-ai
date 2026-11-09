@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
+from openai import APIStatusError, APITimeoutError, OpenAI
 from pydantic import ValidationError
 
 from app.core.config import settings
@@ -177,6 +177,34 @@ def _response_format() -> dict[str, Any]:
     }
 
 
+def _error_text(body: Any) -> str | None:
+    """The first message-like string in a provider's error body ({"error": {"message": ...}})."""
+    if isinstance(body, str):
+        return body.strip() or None
+    if isinstance(body, list) and body:
+        return _error_text(body[0])
+    if isinstance(body, dict):
+        for key in ("message", "error", "detail", "msg"):
+            found = _error_text(body.get(key))
+            if found:
+                return found
+    return None
+
+
+def readable_failure(error: Exception) -> str:
+    """One readable line for a failed model call; the provider's raw JSON body never reaches the UI."""
+    if isinstance(error, APITimeoutError):
+        return f"the model did not answer within {settings.llm_timeout_seconds:g} s"
+    if isinstance(error, APIStatusError):
+        detail = _error_text(error.body)
+        line = " ".join(detail.split())[:160] if detail else ""
+        if line.startswith(("{", "[", "<")):
+            line = ""
+        return f"the model service answered HTTP {error.status_code}" + (f": {line}" if line else "")
+    text = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
+    return text
+
+
 def create_plan(
     user_input: str,
     now: datetime | None = None,
@@ -218,7 +246,7 @@ def create_plan(
         return plan, "llm", " ".join(notes) or None
     except Exception as error:  # noqa: BLE001 - any failure falls back so the demo stays alive
         logger.warning("LLM planner failed, using the keyword planner: %s", error)
-        reason = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
+        reason = readable_failure(error)
         return (
             build_demo_plan(user_input, now),
             "demo",
