@@ -294,8 +294,8 @@ function DashboardPage() {
               <Empty icon={<Calendar className="h-6 w-6" />} text="Nothing scheduled." />
             ) : (
               <ul className="space-y-1.5 text-sm" data-testid="upcoming-list">
-                {ws.upcoming.map((e) => (
-                  <li key={`${e.title}-${e.starts_at}`} className="flex justify-between gap-3">
+                {ws.upcoming.map((e, index) => (
+                  <li key={`${index}-${e.title}-${e.starts_at}`} className="flex justify-between gap-3">
                     <span className="truncate">{e.title}</span>
                     <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{fmtDayTime(e.starts_at)}</span>
                   </li>

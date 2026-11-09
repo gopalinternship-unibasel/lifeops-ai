@@ -1,6 +1,11 @@
+### Set token to LIFEOPS_BACKEND_TOKEN from fastapi-backend/.env (omit the header if it is empty)
+@base = http://127.0.0.1:8010
+@token = paste-the-token-here
+
 ### Create a LifeOps plan
-POST http://localhost:8000/api/plan
+POST {{base}}/api/plan
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "user_input": "I have exams next week, 2 assignments, and a meeting tomorrow",
@@ -8,10 +13,13 @@ Content-Type: application/json
 }
 
 ### Dashboard
-GET http://localhost:8000/api/dashboard
+GET {{base}}/api/dashboard
+Authorization: Bearer {{token}}
 
 ### List actions
-GET http://localhost:8000/api/actions
+GET {{base}}/api/actions
+Authorization: Bearer {{token}}
 
 ### Execute all safe actions
-POST http://localhost:8000/api/actions/execute-safe
+POST {{base}}/api/actions/execute-safe
+Authorization: Bearer {{token}}

@@ -18,8 +18,11 @@ The backend is designed for a frontend dashboard with:
 
 ## Quick start
 
+In this repository the service is started together with the MONDAY web app by
+`scripts/start-lifeops.ps1` (see `../RUNNING.md`). To run it on its own:
+
 ```bash
-cd lifeops_backend
+cd fastapi-backend
 python -m venv .venv
 
 # Windows PowerShell
@@ -28,15 +31,17 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+pip install -r requirements-dev.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 Open:
 
 ```text
-http://localhost:8000/docs
+http://127.0.0.1:8010/docs
 ```
+
+Run the tests with `python -m pytest` (13 tests; they use a temporary SQLite file and a fake LLM).
 
 ## Core demo flow
 
@@ -96,9 +101,32 @@ The MVP only creates drafts and calendar proposals. Sending emails is intentiona
 
 ## LLM behavior
 
-If `OPENAI_API_KEY` is not set, the backend uses a deterministic demo planner so the project works immediately.
+The planner calls any OpenAI-compatible chat-completions API (settings in `.env`, see `.env.example`):
 
-If `OPENAI_API_KEY` is set, it uses the LLM planner and asks the model for strict JSON.
+| Setting | Meaning |
+| --- | --- |
+| `LLM_BASE_URL` | e.g. `http://localhost:11434/v1` (local Ollama), `https://router.huggingface.co/v1`, `https://api.openai.com/v1` |
+| `LLM_API_KEY` | key for hosted providers (any value for Ollama) |
+| `LLM_MODEL` | e.g. `llama3.1:8b` |
+| `LLM_RESPONSE_FORMAT` | `json_schema` (constrained output) or `json_object` |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS` | limits per call |
+
+If no LLM is configured (`LLM_BASE_URL` and `OPENAI_API_KEY` unset), or the model call fails or returns
+nothing usable, the deterministic keyword planner runs so the demo always works. Each plan response says
+which one ran (`planner: "llm" | "demo"`, plus `planner_note`). The model's answer is validated item by
+item: unknown action types are dropped (there is no "send email" action), calendar blocks need a valid
+time range, and medium/high risk actions always require approval.
+
+## Users and the shared secret
+
+Every `/api` request may carry `X-LifeOps-User: <id>`; tasks, actions, plan runs and settings are kept per
+user (requests without the header share the `local` workspace). When `LIFEOPS_BACKEND_TOKEN` is set,
+`/api` requests must also send `Authorization: Bearer <token>` (or `X-LifeOps-Token`). The MONDAY app's
+server sends both; the browser never calls this service directly.
+
+`POST /api/actions/{id}/execute` optionally takes `{"provider", "external_id", "result"}`: the caller
+already carried out the approved action (the MONDAY app writes calendar blocks to the user's calendar
+and saves drafts) and the service records the outcome instead of running its mock adapters.
 
 ## Frontend contract
 
@@ -123,6 +151,3 @@ GET /api/settings
 - `/dashboard` after-state dashboard
 - `/actions` approval center
 - `/tasks` task board
-=======
-# Bobathon
->>>>>>> 38def9de72ca3748c07c9f6aec1d1157b500f019

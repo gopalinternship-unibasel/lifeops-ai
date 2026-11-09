@@ -34,6 +34,8 @@ export function ChatThread({ messages, pending }: { messages: ChatTurn[]; pendin
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.18 }}
+            data-testid="chat-message"
+            data-role={m.role}
             className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {m.role === "assistant" && <Avatar role="assistant" />}
@@ -57,7 +59,7 @@ export function ChatThread({ messages, pending }: { messages: ChatTurn[]; pendin
           </motion.div>
         ))}
         {pending && (
-          <div className="flex gap-3 justify-start">
+          <div className="flex gap-3 justify-start" data-testid="chat-pending">
             <Avatar role="assistant" />
             <div className="bg-card border border-border rounded-lg px-4 py-3 inline-flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

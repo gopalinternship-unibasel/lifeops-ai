@@ -1,5 +1,10 @@
 # Frontend contract
 
+> In this repository the MONDAY web app implements this contract from its server side
+> (`src/server/lifeops-backend.server.ts`, page `/app/dashboard`). The service runs on
+> http://127.0.0.1:8010; calls carry `X-LifeOps-User` and, when `LIFEOPS_BACKEND_TOKEN` is set,
+> `Authorization: Bearer <token>`. The examples below are the original hackathon contract.
+
 ## 1. Create plan
 
 ```ts

@@ -271,6 +271,7 @@ async function singleCall(opts: {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (opts.config.apiKey) headers.Authorization = `Bearer ${opts.config.apiKey}`;
 
+  const startedAt = Date.now();
   const res = await fetch(`${opts.config.baseUrl}/chat/completions`, {
     method: "POST",
     headers,
@@ -283,7 +284,12 @@ async function singleCall(opts: {
     throw new HttpStatusError(`${opts.config.provider} ${res.status}: ${text.slice(0, 240)}`, res.status);
   }
 
-  const completion = (await res.json()) as AIChatCompletion;
+  const completion = (await res.json()) as AIChatCompletion & {
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  console.info(
+    `[llm] ${opts.config.provider} ${opts.model}: ${completion.usage?.prompt_tokens ?? "?"} prompt + ${completion.usage?.completion_tokens ?? "?"} completion tokens in ${((Date.now() - startedAt) / 1000).toFixed(1)} s`,
+  );
   const toolName = forcedToolName(opts.tools, opts.toolChoice);
   return toolName ? normalizeToolCompletion(completion, toolName) : completion;
 }

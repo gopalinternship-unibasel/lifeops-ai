@@ -166,7 +166,7 @@ def create_plan(
     """Return (plan, planner, note). planner is "llm" or "demo"."""
     endpoint = settings.llm_endpoint()
     if endpoint is None:
-        return build_demo_plan(user_input, now), "demo", "No LLM configured (LLM_BASE_URL unset): keyword planner used."
+        return build_demo_plan(user_input, now), "demo", "No LLM configured (LLM_BASE_URL unset or PLANNER_MODE=keyword): keyword planner used."
 
     base_url, api_key, model = endpoint
     now = now or datetime.now()

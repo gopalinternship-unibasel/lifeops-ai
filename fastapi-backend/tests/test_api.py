@@ -242,3 +242,11 @@ def test_llm_failure_falls_back_to_keyword_planner(client, fake_llm):
     assert plan["planner"] == "demo"
     assert "connection refused" in plan["planner_note"]
     assert plan["tasks_created"] == 4
+
+
+def test_planner_mode_keyword_skips_a_configured_llm(client, fake_llm, use_settings):
+    use_settings(planner_mode="keyword")
+    plan = make_plan(client)
+    assert plan["planner"] == "demo"
+    assert "PLANNER_MODE=keyword" in plan["planner_note"]
+    assert fake_llm.calls == []
