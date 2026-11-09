@@ -197,4 +197,16 @@ describe("callAI", () => {
       /Could not reach Ollama at http:\/\/localhost:11434\/v1/,
     );
   });
+
+  it("names Node's 5-minute fetch limit instead of claiming the provider is down", async () => {
+    // This is what Node's fetch throws when response headers take more than 300 s.
+    setEnv({});
+    const headersTimeout = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(headersTimeout)));
+    const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
+    await expect(failure).rejects.toThrow(/Node's 5-minute fetch limit/);
+    await expect(failure).rejects.not.toThrow(/Could not reach/);
+  });
 });

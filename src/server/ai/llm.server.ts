@@ -328,10 +328,24 @@ export async function callAI(opts: {
   }
 }
 
+/** Error code of a failed fetch (Node/undici put it on `cause`), e.g. "UND_ERR_HEADERS_TIMEOUT". */
+function fetchCauseCode(e: unknown): string | undefined {
+  const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined;
+  return isRecord(cause) && typeof cause.code === "string" ? cause.code : undefined;
+}
+
 export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseUrl" | "timeoutMs">): Error {
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
     return new Error(
       `${config.provider} did not answer within ${Math.round(config.timeoutMs / 1000)} s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again.`,
+    );
+  }
+  const causeCode = fetchCauseCode(e);
+  if (causeCode === "UND_ERR_HEADERS_TIMEOUT" || causeCode === "UND_ERR_BODY_TIMEOUT") {
+    // Node's own fetch limit (5 minutes without response headers), not LLM_TIMEOUT_MS. The dev
+    // server lifts it (vite.config.ts); other Node hosts need the same Agent settings.
+    return new Error(
+      `${config.provider} took longer than Node's 5-minute fetch limit to start answering (it may be busy or still loading the model). Try again in a moment.`,
     );
   }
   const status = errorStatus(e);
