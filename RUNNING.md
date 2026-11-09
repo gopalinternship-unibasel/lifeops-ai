@@ -22,9 +22,10 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 - **Local default on this PC: `qwen2.5:3b`** (Qwen 2.5 3B Instruct in Ollama). Reason, measured on
   9 Nov 2026: the Ollama here is CPU only and shared with other projects, and the whole machine was
   under heavy load (load average about 20 on 8 cores). Under that load `llama3.1:8b` took 268 s just to
-  load and then generated 0.06 tokens/s; `qwen2.5:3b` is 2.5 times smaller, is usually already loaded,
-  and produced valid structured answers for MONDAY's prompts (see "Known limits" for its numbers).
-  Neither model is fast here: plan on minutes per answer.
+  load and then generated 0.06 tokens/s; `qwen2.5:3b` is 2.5 times smaller, is usually already loaded
+  by the other projects (no load time), and returned a valid structured answer (a correct calendar
+  proposal) to MONDAY's real chat prompt. Neither model is fast here: plan on many minutes per answer
+  (numbers under "Known limits").
 - Switch to Llama 3.1 8B (or back) with one command, then restart:
   ```powershell
   node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5:3b
@@ -248,11 +249,14 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
 ## Known limits
 
 - **Speed of the local model.** Measured on 9 Nov 2026 with the shared Ollama under heavy load from other
-  work on the PC: `qwen2.5:3b` evaluated MONDAY's chat prompt (about 1,900 to 2,900 tokens) at about
-  10 tokens/s and then generated well under 1 token/s, so one answer took many minutes; `llama3.1:8b`
-  was slower still (0.8 tokens/s prompt, 0.06 tokens/s output, 268 s to load). On an idle machine the
-  same models are far faster. If answers time out, raise `LLM_TIMEOUT_MS` (and
-  `LLM_TIMEOUT_SECONDS` for the planner), or use a hosted provider.
+  work on the PC (load average about 20 on 8 cores): one chat request ("Block 3–5 pm tomorrow ...",
+  with history) to `qwen2.5:3b` had 2,900 prompt tokens, evaluated at 7.8 tokens/s (6 min), and a
+  132-token answer generated at 0.07 tokens/s (33 min): 39 minutes in all, for a correct proposal.
+  `llama3.1:8b` was slower still (0.8 tokens/s prompt, 0.06 tokens/s output, 268 s to load). On an idle
+  machine the same models are many times faster. The default timeouts (15 minutes) are too short under
+  such load: raise `LLM_TIMEOUT_MS` in `.env.local` and `LLM_TIMEOUT_SECONDS` in `fastapi-backend\.env`
+  (for example `node scripts\write-local-env.mjs --set LLM_TIMEOUT_MS=3600000 --backend-set LLM_TIMEOUT_SECONDS=3600`),
+  or use a hosted provider.
 - **Ollama's context is 4096 tokens** (its default for OpenAI-compatible requests). A long chat history
   makes the prompt grow; Ollama then drops the oldest messages first.
 - **Node's 5-minute fetch limit.** Node's built-in fetch gives up when response headers take longer than
