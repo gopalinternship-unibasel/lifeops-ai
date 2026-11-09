@@ -53,8 +53,9 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 9 migrations in `supabase/migrations`
-   (the first start downloads the Supabase images, several minutes),
+1. starts the local Supabase stack and applies the 10 migrations in `supabase/migrations`
+   (the first start downloads the Supabase images, several minutes); on every later run
+   `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
    printed; a random `GOOGLE_OAUTH_STATE_SECRET` and a shared `LIFEOPS_BACKEND_TOKEN` are generated),
 3. runs `npm install` and creates `fastapi-backend\.venv` with `requirements-dev.txt` if they are missing,
@@ -76,6 +77,12 @@ It takes about 1.5 minutes when Supabase is already set up and ends with the URL
 servers answer. Logs: `.run\web.log`, `.run\web.err.log`, `.run\fastapi.log`, `.run\fastapi.err.log`.
 Process ids (the `cmd.exe` wrappers of the two servers): `.run\pids.json`. The script returns even when
 its output is piped (for example `| Tee-Object start.log`).
+
+It waits up to 600 s for each server (`-WaitSeconds 1200` for more) and prints a "still waiting" line
+every 30 s: a first start (fresh virtualenv, Vite's first dependency scan) on a busy PC is slow, the
+FastAPI planner once needed 158 s. If a server stops on its own or does not answer in time, the script
+prints the end of its log, stops the two servers it started (Supabase stays up) and exits with 1, so
+running it again works without calling the stop script first.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\stop-lifeops.ps1               # web app, FastAPI and Supabase
@@ -111,12 +118,27 @@ shows "Thinking..." meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_
      reply; edit it and click **Save as draft**. It is stored as a draft (demo mailbox, or Gmail drafts
      when Google is connected). MONDAY has no send function at all.
    - "Move my dentist appointment to start at 4 pm the same day." → **Save changes** applies it.
-     Changes for event ids that are not in your calendar are ignored.
-   Reloading the page restores the chat history.
+     Changes for event ids that are not in your calendar are ignored. Replies and cards show times in
+     your local time with the day ("Tomorrow 3:00 PM–5:00 PM", "Wed, Nov 11, 4:00 PM – 5:30 PM").
+   Reloading the page restores the chat history. Cards you saved, applied or dismissed stay that way
+   (stored in the `chat_card_actions` table): they are not offered again after a reload or in another
+   tab, and a second **Save** of the same card, from a tab that still shows it, is refused ("This
+   proposal was already saved.", "This reply is already saved as a draft (not sent)."), so no second
+   event or draft is written. A saved reply comes back read-only with the text you saved.
+   *Today's schedule* lists only today; an event saved for another day is in the calendar.
+   Messages are limited to 4,000 characters (the box stops there and shows a counter near the limit);
+   if anything still sends a longer one, the answer is one sentence, not a JSON error.
+   If the model does not answer the automatic first-visit briefing (timeout, Ollama unreachable), the
+   briefing is put together by rules instead and says so: unread emails, today's events, and
+   priorities ranked by the same rule the model is given (stored as tasks with source `rules`). Every
+   other request shows the model's error.
 2. **Plan** (`/app/plan`): **Create plan** fills only the free slots (07:00–22:00 minus your events) of
-   the week; items the model places outside a free slot or on top of an event are dropped. **Approve** a
-   day or **Approve entire week**, or type "approve Saturday". Approving twice skips existing events;
-   items that now overlap an event (the calendar changed since the plan was made) are held back and named.
+   the week that are still ahead: today's slots start at the next quarter hour, days that are over get
+   none ("Day already over"). Items the model places outside a free slot, in the past or on top of an
+   event are dropped. **Approve** a day or **Approve entire week**, or type "approve Saturday". Approving
+   twice skips existing events; items whose time has passed (in a plan made earlier) are skipped and
+   counted; items that now overlap an event (the calendar changed since the plan was made) are held back
+   and named. Moving a plan item into the past is refused.
 3. **Calendar** (`/app/calendar`): week view of the demo calendar (badge "Demo data") or Google Calendar.
 4. **Dashboard** (`/app/dashboard`): productivity numbers, top priorities, next 7 days, recent drafts, and
    the planner service: paste messy text into *From chaos to plan* → tasks and proposed actions appear in
@@ -166,7 +188,8 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 39 unit tests (vitest): LLM gateway, time ranges and conflicts, Google OAuth offline, env files
+npm test                 # 54 unit tests (vitest): LLM gateway, time ranges, conflicts and free slots from now on,
+                         # Google OAuth offline, env files, readable input errors, workspace card state, rule-based briefing
 npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
@@ -217,6 +240,27 @@ node scripts\write-local-env.mjs --set LLM_BASE_URL=http://127.0.0.1:55326/v1 --
 node scripts\write-local-env.mjs --set LLM_BASE_URL=http://localhost:11434/v1 --backend-set LLM_BASE_URL=http://localhost:11434/v1
 ```
 
+**Round-3 checks** (9 Nov 2026, the fixes after the first QA pass) live in `..\_e2e\lifeops-fix3\`. They
+use `fake-llm.mjs`, a copy of QA's independent test double (127.0.0.1:55328) that also puts a 07:00 item
+on every plan day and answers HTTP 503 to users whose profile name contains "Fallback".
+`start-fake.ps1` runs this project's own start script with process environment overrides (fake model,
+separate planner SQLite file), so no env file changes. Each script takes the suffix of a user file
+`.run\fix3-user-<suffix>.json` (create one with `node scripts\create-test-user.mjs --new --file .run\fix3-user-x.json`);
+results go to `lifeops-fix3\results.jsonl`, screenshots to `lifeops-fix3\shots\`.
+
+```powershell
+cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+powershell -ExecutionPolicy Bypass -File lifeops-fix3\start-fake.ps1
+node lifeops-fix3\chat.mjs c     # handled cards after reload and in a stale tab, Today = today only, local times, length limit
+node lifeops-fix3\plan.mjs p     # no plan items in the past, approval skips past items
+node lifeops-fix3\fallback.mjs f # rule-based first-visit briefing when the model fails
+node lifeops-fix3\dash.mjs d online   # planner service (copy of QA's check)
+node lifeops-fix3\dash.mjs d offline  # with the planner stopped: fallback card saved once
+node lifeops-fix3\favicon.mjs c  # favicon served, no 404 in the console
+node lifeops-fix3\rls.mjs p f    # row-level security of chat_card_actions between two users
+node lifeops-fix3\real-briefing.mjs r   # with the DEFAULT config (real model): model answer or rule-based fallback
+```
+
 ## What only Gopal can do: connect real Gmail and Google Calendar
 
 The code path is in place and tested against mocked Google endpoints, but it needs an OAuth client in
@@ -260,7 +304,12 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   132-token answer generated at 0.07 tokens/s (33 min): 39 minutes in all, for a correct proposal.
   The planner service's request (408 prompt tokens, a 250-token plan) took 58 minutes the same way.
   `llama3.1:8b` was slower still (0.8 tokens/s prompt, 0.06 tokens/s output, 268 s to load). On an idle
-  machine the same models are many times faster. The default timeouts (15 minutes) are too short under
+  machine the same models are many times faster. Later the same afternoon it was worse: a probe asking
+  `qwen2.5:3b` for one word (36 prompt tokens, 8 answer tokens at most) waited 28 minutes for the model
+  to be loaded, because the shared Ollama was busy unloading another project's model, then ran at
+  1.1 tokens/s (prompt) and 0.07 tokens/s (answer): 29 minutes in all (Docker VM load average 11-17 on
+  8 CPUs, Ollama at about 400% CPU, Windows CPU at 100%). The first-visit briefing then hit the
+  15-minute timeout after 905 s and came back rule-based; no real-model answer was seen that day. The default timeouts (15 minutes) are too short under
   such load: raise `LLM_TIMEOUT_MS` in `.env.local` and `LLM_TIMEOUT_SECONDS` in `fastapi-backend\.env`
   (for example `node scripts\write-local-env.mjs --set LLM_TIMEOUT_MS=3600000 --backend-set LLM_TIMEOUT_SECONDS=3600`),
   or use a hosted provider.
@@ -274,7 +323,9 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   event ids), so bad answers are dropped, not saved.
 - Real Gmail and Google Calendar were never exercised on this PC (no OAuth client); only the demo data and
   the mocked-endpoint tests.
-- The first workspace visit always sends one briefing request to the model.
+- The first workspace visit always sends one briefing request to the model. When the model does not
+  answer it (for example the 15-minute timeout under load), the briefing is rule-based and says so;
+  the priorities then come from simple rules, not from the model.
 - Success toasts appear over the top-right header buttons for a few seconds (they pause while the mouse is
   over them).
 - The planner service keeps its data in SQLite and creates tables at start-up without migrations; after
