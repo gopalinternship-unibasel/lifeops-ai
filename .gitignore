@@ -36,3 +36,11 @@ dist-ssr
 .env.*
 !.env.example
 .vercel/
+
+# Local run state (start/stop scripts), test user credentials, Python env and data
+.run/
+.local-test-user.json
+fastapi-backend/.venv/
+fastapi-backend/lifeops.db
+__pycache__/
+.pytest_cache/

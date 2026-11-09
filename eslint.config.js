@@ -12,6 +12,8 @@ export default tseslint.config(
       ".vinxi",
       "node_modules",
       "src/routeTree.gen.ts",
+      // Separate projects with their own tooling (FastAPI service and its old Next.js demo).
+      "fastapi-backend",
     ],
   },
   {
