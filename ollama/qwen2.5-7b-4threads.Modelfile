@@ -1,0 +1,16 @@
+# Qwen 2.5 7B Instruct (the qwen2.5:7b weights) with 4 CPU threads and an 8192-token context.
+# LifeOps' local default model since 10 Nov 2026 (see RUNNING.md, "The AI model"). Create it once:
+#   docker exec cvfix-ollama ollama pull qwen2.5:7b
+#   Get-Content ollama\qwen2.5-7b-4threads.Modelfile | docker exec -i cvfix-ollama sh -c "cat > /tmp/Modelfile && ollama create qwen2.5-7b-4threads -f /tmp/Modelfile"
+# (with a native Ollama: ollama create qwen2.5-7b-4threads -f ollama/qwen2.5-7b-4threads.Modelfile)
+#
+# Why this model: replaying MONDAY's real briefing, move and planner requests on 9 Nov 2026 with
+# the same settings, qwen2.5:7b answered 6 of 6 correctly (priorities with the whole inbox, the
+# dentist moved to 16:00-17:30 the same day, a Thursday 14:00-16:00 calendar block), Qwen 2.5 3B
+# 0 of 6 by the same strict check, Llama 3.1 8B failed the briefing. Why 4 threads: this 8-core
+# PC has 4 performance and 4 low-power cores; llama.cpp with all 8 threads was about ten times
+# slower for the 3B model. Why 8192: the chat prompt is about 2,000 tokens and a week plan answer
+# up to 2,400.
+FROM qwen2.5:7b
+PARAMETER num_thread 4
+PARAMETER num_ctx 8192

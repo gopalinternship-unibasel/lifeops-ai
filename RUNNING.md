@@ -10,7 +10,7 @@ MONDAY is the July 2026 TanStack Start rework of the Bobathon LifeOps AI project
 | Supabase Postgres | 127.0.0.1:55322 | user `postgres` (local dev password, see `supabase status`) |
 | Supabase Studio (database browser) | http://127.0.0.1:55323 | |
 | Mailpit (auth emails) | http://127.0.0.1:55324 | local sign-ups need no email confirmation |
-| Ollama (local LLM, shared) | http://localhost:11434/v1 | container `cvfix-ollama`; local default model `qwen2.5-3b-4threads` |
+| Ollama (local LLM, shared) | http://localhost:11434/v1 | container `cvfix-ollama`; local default model `qwen2.5-7b-4threads` |
 
 Reserved but switched off in `supabase/config.toml` (the app does not use them): shadow DB 55320,
 analytics 55327, pooler 55329, edge-function inspector 8084.
@@ -19,26 +19,46 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 - **Intended model: Llama 3.1 8B**, as in the hackathon build: `meta-llama/Llama-3.1-8B-Instruct` on the
   Hugging Face router (fallback `meta-llama/Meta-Llama-3-8B-Instruct`), or `llama3.1:8b` in Ollama.
-- **Local default on this PC: `qwen2.5-3b-4threads`**: the Qwen 2.5 3B Instruct weights of
-  `qwen2.5:3b`, run with 4 CPU threads and an 8192-token context
-  (`ollama/qwen2.5-3b-4threads.Modelfile`). Why a 3B model: the Ollama here is CPU only and shared
-  with other projects; under load `llama3.1:8b` took 268 s to load and then generated 0.06 tokens/s,
-  while Qwen 2.5 3B returned valid structured answers to MONDAY's real prompts (a calendar proposal in
-  the chat, a plan with tasks and a calendar block from the planner service). Why 4 threads, measured
-  in the Ollama log on 9 Nov 2026: `qwen2.5:3b` with Ollama's default (all 8 threads, on a CPU with 4
-  performance and 4 low-power cores, while other work kept the PC busy) generated **0.45 tokens/s**;
-  the same weights with 4 threads generated **4.2 to 5.6 tokens/s** in the same hour. And why exactly
-  these settings: Ollama keeps one runner per weights file, so `qwen2.5:3b` (defaults) and another
-  project's `qwen2.5-3b-4threads` kept unloading each other, each waiting for the other's running
-  request first (QA saw a 9-minute wait before MONDAY's model even started). With the same name and
-  settings both projects share one loaded runner. If the model is missing, the start script prints
-  how to create it from the Modelfile (two commands, no download beyond `qwen2.5:3b`).
-- Switch to Llama 3.1 8B (or back) with one command, then restart:
+- **Local default on this PC: `qwen2.5-7b-4threads`** (since 10 Nov 2026): the Qwen 2.5 7B Instruct
+  weights of `qwen2.5:7b`, run with 4 CPU threads and an 8192-token context
+  (`ollama/qwen2.5-7b-4threads.Modelfile`). It was chosen on correctness, not speed. On 9 Nov 2026
+  MONDAY's real requests (the first-visit briefing, "Move my dentist appointment to start at 4 pm the
+  same day.", and the planner service's "Block Thursday 2-4 pm for deep work ..., and draft an email to
+  Sam ...") were captured from the app and replayed against the shared Ollama with each model, with the
+  same messages, JSON schema and temperature, 4 threads, an 8192-token context and small output limits
+  (`..\_e2e\lifeops-fix5\measure.mjs`, raw answers in `model-measure.jsonl`). Raw model answers, before
+  any of the app's checks:
+
+  | Model | Briefing (priorities, all 4 unread emails, no "inbox is clear") | Move (dentist to 16:00-17:30 the same day) | Planner (Thursday 14:00-16:00 block + draft to Sam) | Seconds per answer |
+  | --- | --- | --- | --- | --- |
+  | `qwen2.5-3b-4threads` (old default) | 0 of 2 (priorities, but "inbox is clear" next to 4 unread) | 0 of 2 (14:00-16:00; "16:00" without a date) | 0 of 2 (no block) | 33-212 |
+  | **`qwen2.5:7b`, 4 threads** | **2 of 2** | **2 of 2** | **2 of 2** | 94-223 |
+  | `llama3.1:8b`, 4 threads | 0 of 1 (no priorities, no emails) | 1 of 1 | 1 of 1 | 172-549 (*) |
+
+  The 3B and 7B runs had the Ollama to themselves (no other project's requests, Docker VM load average
+  5-9 from these runs). (*) Another project started using the shared Ollama during the Llama run, so its
+  times are not comparable, and its second run was stopped to spare the machine. Speeds seen: Qwen 7B
+  evaluates the prompt at about 8 tokens/s (the ~1,800-token chat prompt in about 3.5 minutes when
+  nothing is cached; the instructions at its start are cached after the first request) and writes
+  1.4-3.1 tokens/s; Qwen 3B 19 and 4-5.6 tokens/s; Llama 8B 7.6 and 0.7-0.9 tokens/s under that load.
+  The app does not depend on the model for moves any more (see "What to try"), but the briefing,
+  the planner's calendar blocks and the chat's own proposals do.
+- **Why 4 threads**, measured in the Ollama log on 9 Nov 2026: this CPU has 4 performance and 4
+  low-power cores; `qwen2.5:3b` with Ollama's default (all 8 threads) generated 0.45 tokens/s while
+  other work kept the PC busy, the same weights with 4 threads 4.2-5.6 tokens/s in the same hour.
+  Ollama keeps one runner per weights file: another project that uses `qwen2.5:7b` with its default
+  settings at the same moment unloads MONDAY's runner (and the other way round). Today the other
+  project used `qwen2.5:7b` once; it mainly uses `qwen2.5-3b-4threads`, which is a separate runner.
+  Both runners fit in memory together (2.4 GB + 5.5 GB).
+- If the model is missing, the start script prints how to create it from the Modelfile (two commands,
+  no download beyond `qwen2.5:7b`).
+- Switch models with one command, then restart:
   ```powershell
-  node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5-3b-4threads, --model qwen2.5:3b
+  node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5-7b-4threads, --model qwen2.5-3b-4threads
   ```
   It sets `LLM_MODEL` in both `.env.local` and `fastapi-backend\.env`. A hosted provider is one more
-  setting away (see "Switching the AI provider").
+  setting away (see "Switching the AI provider"); with credits, the Hugging Face router runs the intended
+  Llama 3.1 8B in seconds.
 
 ## Prerequisites
 
@@ -50,10 +70,10 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 - **Python 3.13** as `python` on PATH (for the FastAPI virtualenv).
 - **Supabase CLI v3.** The scripts use `C:\Users\gopal\tools\supabase\supabase.exe` if it exists,
   otherwise `supabase` from PATH, or whatever `$env:SUPABASE_CLI` points to.
-- **Ollama with the model in `.env.local`** (default `qwen2.5-3b-4threads`) on port 11434. Check with
+- **Ollama with the model in `.env.local`** (default `qwen2.5-7b-4threads`) on port 11434. Check with
   `docker exec cvfix-ollama ollama list`; the start script warns if the model is missing and prints the
-  `ollama pull` command, or for `qwen2.5-3b-4threads` the two commands that create it from
-  `ollama\qwen2.5-3b-4threads.Modelfile`. Without Ollama the app still starts; AI answers then fail with a clear
+  `ollama pull` command, or for a variant with a Modelfile in `ollama\` (`qwen2.5-7b-4threads`,
+  `qwen2.5-3b-4threads`) the two commands that create it. Without Ollama the app still starts; AI answers then fail with a clear
   "Could not reach Ollama" message and the planner service falls back to its keyword planner.
 
 ## One-time setup
@@ -103,7 +123,8 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-lifeops.ps1 -KeepSupabase 
 ## Signing in
 
 - **Test user:** open http://localhost:5190/login and sign in with the `email` and `password` in
-  `.local-test-user.json`. Its profile is filled in and it uses the demo inbox and calendar, so it lands
+  `.local-test-user.json`. (On a cold dev server **Sign in** shows a spinner and stays disabled for a
+  moment until the page has loaded its scripts; what you typed meanwhile is kept.) Its profile is filled in and it uses the demo inbox and calendar, so it lands
   in the workspace. `node scripts\create-test-user.mjs --new` makes another one (and overwrites the file).
 - **New account:** "Create account" on the login page. Locally there is no email confirmation; you go
   through *Profile* then *Connectors*. On *Connectors* choose **Use demo inbox & calendar** (Google is not
@@ -126,9 +147,27 @@ meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_MS`).
    - "Draft a reply to Sam's email about lunch on Saturday: yes, 1 pm works." → *Insights* shows the
      reply; edit it and click **Save as draft**. It is stored as a draft (demo mailbox, or Gmail drafts
      when Google is connected). MONDAY has no send function at all.
-   - "Move my dentist appointment to start at 4 pm the same day." → **Save changes** applies it.
-     Changes for event ids that are not in your calendar are ignored. Replies and cards show times in
-     your local time with the day ("Tomorrow 3:00 PM–5:00 PM", "Wed, Nov 11, 4:00 PM – 5:30 PM").
+   - "Move my dentist appointment to start at 4 pm the same day." → an *Update event* card
+     "Dentist appointment: Wed 14:00–15:30 → Wed 16:00–17:30" and the reply "Ready to move **Dentist
+     appointment** from Wed, Nov 11, 2:00 PM – 3:30 PM to Wed, Nov 11, 4:00 PM – 5:30 PM. Nothing changes
+     until you click **Save changes**"; **Save changes** applies it. How a move or cancel is checked
+     (`src/server/calendar/change-request.server.ts`): the app reads the event, day and time the
+     request names by rule where that is unambiguous ("the same day", "today", "tomorrow", weekdays,
+     "Nov 13", "4 pm", "16:00", "4:00-5:30 pm", "for an hour", "an hour later", "Cancel my team sync")
+     and applies that, whatever the model returned; where the request leaves a choice ("to 3": 3 AM or
+     3 PM? "Monday" on a Monday?) the model's answer is used only if it is one of the readings, else
+     MONDAY asks. Two matching events ("the dentist" with *Dentist appointment* and *Prepare for
+     dentist*) get a question, an event that is not in the calendar a refusal, and in both cases no card.
+     A new event the model proposes with the title of the event you asked to move becomes a move of
+     that event (QA saw a second dentist appointment instead of a move), a model time before 06:00 is
+     refused unless you asked for the early hours, and a time in the past is refused. Changes for event
+     ids that are not in your calendar are ignored.
+     **The reply always matches the cards**: for a move or cancel it is written from the validated card
+     only; with other proposals the model's sentences that name a day or time are replaced by one line
+     per card with the card's own times, and a conflict is named ("overlaps … Save will be refused").
+     Internal ids, prompt template lines and claims like "has been moved" or "I sent" are removed from
+     every reply. Replies show times in your local time with the day ("Wed, Nov 11, 4:00 PM – 5:30 PM");
+     cards use your browser's format ("Tomorrow 3:00 PM–5:00 PM" or "Wed, 11 Nov 16:00–17:30").
    Reloading the page restores the chat history. Cards you saved, applied or dismissed stay that way
    (stored in the `chat_card_actions` table): they are not offered again after a reload or in another
    tab, and a second **Save** of the same card, from a tab that still shows it, is refused ("This
@@ -158,14 +197,23 @@ meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_MS`).
    event are dropped. **Approve** a day or **Approve entire week**, or type "approve Saturday". Approving
    twice skips existing events; items whose time has passed (in a plan made earlier) are skipped and
    counted; items that now overlap an event (the calendar changed since the plan was made) are held back
-   and named. Moving a plan item into the past is refused.
+   and named. Moving a plan item into the past is refused. Which items are approved is read from the
+   calendar, so after a reload (or in another tab) an approved item is listed once, marked
+   "in calendar", and a day whose items are all in the calendar reads **Added** instead of Approve.
 3. **Calendar** (`/app/calendar`): week view of the demo calendar (badge "Demo data") or Google Calendar.
+   The grid shows 06:00 to midnight and starts earlier when an event of the week does (an event at
+   04:00 is drawn, not hidden); an event that runs past midnight shows on both days.
 4. **Dashboard** (`/app/dashboard`): productivity numbers, top priorities, next 7 days, recent drafts, and
    the planner service: paste messy text into *From chaos to plan* → tasks and proposed actions appear in
    the *Action approval center* → **Approve** → **Run**. Calendar blocks are written to your calendar after
    the same conflict check, email actions become drafts only, actions the model invents (for example
-   "send_email") are dropped, and the *Execution log* shows where each action went. If the planner
-   service is stopped, the page says so and the same text goes to the in-app assistant instead.
+   "send_email") are dropped, and the *Execution log* shows where each action went. An approved action
+   whose **Run** is refused (it overlaps an event, or its time has passed) can still be **Reject**ed.
+   Reminders and tasks show one time (a point in time), not "17:45 – 17:45". *Top priorities* says who
+   ranked them: "Ranked by the AI assistant ..." or, when the model returned no ranking and the
+   rule-based fallback did it (`tasks.source = rules`), "Ranked by simple rules ..." with a "rule" mark
+   per row. If the planner service is stopped, the page says so and the same text goes to the in-app
+   assistant instead.
    Each **Plan it** is stored (table `planner_requests`) and runs to the end on the server, the
    in-app assistant included, so a reload while it runs shows "Still planning ..." (Plan it disabled)
    and then the result; the last result stays on the page with its time. A failed or cut-off request
@@ -189,7 +237,7 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
 
 | Provider | `LLM_BASE_URL` | `LLM_MODEL` (example) | `LLM_API_KEY` |
 | --- | --- | --- | --- |
-| Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-3b-4threads` (default), `qwen2.5:3b`, `llama3.1:8b` (intended) | any (`ollama`) |
+| Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended) | any (`ollama`) |
 | Hugging Face router (original) | `https://router.huggingface.co/v1` | `meta-llama/Llama-3.1-8B-Instruct` | `hf_...` token with inference credits |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `sk-...` |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` | Gemini API key |
@@ -212,15 +260,18 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 70 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # 95 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
-                         # workspace card state, rule-based briefing (one line per commitment, inbox coverage),
-                         # reply and plan-request state, dates in the chat prompt
+                         # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
+                         # meetings already over), reply and plan-request state, dates in the chat prompt,
+                         # move/cancel requests checked against the model's answer (QA's three wrong moves),
+                         # replies cleaned and written from the cards, priorities label, calendar grid hours,
+                         # plan approval state after a reload
 npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
 cd fastapi-backend
-.venv\Scripts\python.exe -m pytest     # 16 API tests with a temporary SQLite file and a fake LLM
+.venv\Scripts\python.exe -m pytest     # 18 API tests with a temporary SQLite file and a fake LLM
 ```
 
 `npm run check` runs lint, typecheck, unit tests and build in one go. The Google tests never touch the
@@ -307,6 +358,31 @@ node lifeops-fix4\reload.mjs dash-offline s2   # reload while the in-app assista
 node lifeops-fix4\inapp-card-after-reload.mjs d  # after dash.mjs d offline: the saved card does not come back
 # with the DEFAULT config (start-lifeops.ps1, real local model):
 node lifeops-fix4\real.mjs briefing x       # first-visit briefing; also: real.mjs chat x, real.mjs plan x
+```
+
+**Round-5 checks** (9-10 Nov 2026, the fixes after the third QA pass) live in `..\_e2e\lifeops-fix5\`, same
+layout (`start-fake.ps1`, user files `.run\fix5-user-<suffix>.json`, `results.jsonl`, `shots\`). Its
+`fake-llm.mjs` reads the new chat prompt and answers moves wrong in exactly the three ways the real model
+did in QA round 3 (an update to 04:00 the next day with "4:00 PM today" in the reply; a new Saturday
+"Dentist appointment" with event ids and the prompt's template line in the reply; a duplicate new event
+the same day), plus an ambiguous "dentist", a hallucinated id, an am/pm choice, a move the model does not
+answer, a cancel, and false "I've scheduled"/"I sent" claims. It also saves every request body in
+`captures\` for the model measurement.
+
+```powershell
+cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+powershell -ExecutionPolicy Bypass -File lifeops-fix5\start-fake.ps1
+node lifeops-fix5\move.mjs m          # QA's three wrong moves corrected, card and reply agree, saved move, ambiguous, unknown, cancel
+node lifeops-fix5\regress.mjs g       # conflict named and refused, saved cards stay handled after a reload
+node lifeops-fix5\regress.mjs h fallback   # readable 503 error (profile renamed "Fallback ...")
+node lifeops-fix5\minor.mjs login n   # Sign in disabled until hydrated, an immediate click signs in
+node lifeops-fix5\minor.mjs label f   # "Ranked by simple rules" (user renamed "Fallback Tester" first); label m: "by the AI assistant"
+node lifeops-fix5\minor.mjs reject r  # approved action whose Run is refused can be rejected; reminder shows one time
+node lifeops-fix5\minor.mjs calendar n  # an event at 04:00-05:30 is drawn
+node lifeops-fix5\minor.mjs plan p    # after Approve entire week and a reload: items once, days Added
+node lifeops-fix5\capture.mjs c       # save the briefing, move and planner request bodies (captures\)
+# with the stack stopped and the shared Ollama idle:
+node lifeops-fix5\measure.mjs 2 qwen2.5-3b-4threads qwen2.5:7b llama3.1:8b   # model measurement (model-measure.jsonl)
 ```
 
 ## What only Gopal can do: connect real Gmail and Google Calendar
