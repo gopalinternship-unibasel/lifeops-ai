@@ -105,16 +105,26 @@ try {
 }
 
 Step "Starting the FastAPI planner on http://127.0.0.1:8010"
-$fastapi = Start-Process -FilePath $python `
-  -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8010") `
-  -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput (Join-Path $runDir "fastapi.log") -RedirectStandardError (Join-Path $runDir "fastapi.err.log")
+# Start a server in the background with its output in .run\*.log. It goes through cmd.exe and
+# Start-Process WITHOUT -Redirect* switches, because with them PowerShell 5.1 starts the
+# process with handle inheritance: the server then holds this script's own stdout open, and
+# anything that reads this script's output through a pipe (`| Tee-Object`, CI, an agent)
+# waits until the servers stop. The returned PID is cmd.exe; stop-lifeops.ps1 ends its tree.
+function Start-Background($exe, [string[]]$arguments, $workDir, $logName) {
+  $quoted = (@($exe) + $arguments | ForEach-Object { "`"$_`"" }) -join " "
+  $out = Join-Path $runDir "$logName.log"
+  $err = Join-Path $runDir "$logName.err.log"
+  $commandLine = "/d /s /c `"$quoted > `"$out`" 2> `"$err`"`""
+  Start-Process -FilePath "cmd.exe" -ArgumentList $commandLine -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
+}
+
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $node) { Fail "node is not on PATH." }
+
+$fastapi = Start-Background $python @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8010") $backendDir "fastapi"
 
 Step "Starting the web app on http://localhost:5190"
-$vite = Start-Process -FilePath "node" `
-  -ArgumentList @("`"$root\node_modules\vite\bin\vite.js`"", "dev") `
-  -WorkingDirectory $root -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput (Join-Path $runDir "web.log") -RedirectStandardError (Join-Path $runDir "web.err.log")
+$vite = Start-Background $node @("$root\node_modules\vite\bin\vite.js", "dev") $root "web"
 
 @{ fastapi = $fastapi.Id; web = $vite.Id; started = (Get-Date).ToString("s") } |
   ConvertTo-Json | Set-Content -Encoding ascii (Join-Path $runDir "pids.json")
