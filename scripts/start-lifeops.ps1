@@ -14,11 +14,18 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\start-lifeops.ps1
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts\start-lifeops.ps1 -WaitSeconds 1200
 #>
 [CmdletBinding()]
 param(
   # Skip `npm install` / `pip install` even when node_modules or the venv are missing.
-  [switch]$SkipInstall
+  [switch]$SkipInstall,
+  # How long to wait for EACH server to answer. A first start (fresh virtualenv, Vite's first
+  # dependency scan) on a busy PC took 158 s for FastAPI alone, so the default is generous.
+  # The wait ends early when a server process exits.
+  [ValidateRange(30, 7200)]
+  [int]$WaitSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -146,20 +153,55 @@ $vite = Start-Background $node @("$root\node_modules\vite\bin\vite.js", "dev") $
 @{ fastapi = $fastapi.Id; web = $vite.Id; started = (Get-Date).ToString("s") } |
   ConvertTo-Json | Set-Content -Encoding ascii (Join-Path $runDir "pids.json")
 
-function Wait-Http($url, $seconds) {
-  $deadline = (Get-Date).AddSeconds($seconds)
+# Wait until $url answers, the server process exits, or $seconds pass. Returns "up", "exited"
+# or "timeout" and prints a progress line every 30 s, so a slow first start does not look hung.
+function Wait-Server($name, $url, $process, [int]$seconds) {
+  $started = Get-Date
+  $deadline = $started.AddSeconds($seconds)
+  $nextNote = $started.AddSeconds(30)
   while ((Get-Date) -lt $deadline) {
+    if ($process.HasExited) { return "exited" }
     try {
       $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-      if ($response.StatusCode -lt 500) { return $true }
+      if ($response.StatusCode -lt 500) {
+        Write-Host ("    {0} is up after {1:N0} s" -f $name, ((Get-Date) - $started).TotalSeconds)
+        return "up"
+      }
     } catch { Start-Sleep -Seconds 2 }
+    if ((Get-Date) -ge $nextNote) {
+      Write-Host ("    still waiting for {0} ({1:N0} s of at most {2} s)" -f $name, ((Get-Date) - $started).TotalSeconds, $seconds)
+      $nextNote = (Get-Date).AddSeconds(30)
+    }
   }
-  return $false
+  return "timeout"
 }
 
-Step "Waiting for both servers"
-if (-not (Wait-Http "http://127.0.0.1:8010/" 90)) { Fail "FastAPI did not come up. See .run\fastapi.err.log" }
-if (-not (Wait-Http "http://localhost:5190/login" 180)) { Fail "The web app did not come up. See .run\web.log and .run\web.err.log" }
+# On failure, stop what this run started (Supabase keeps running), so the next run is not
+# refused with "port already in use", and show the end of the server's logs.
+function Fail-Server($name, $state, [string[]]$logs) {
+  Write-Host ""
+  foreach ($log in $logs) {
+    $path = Join-Path $runDir $log
+    if (Test-Path $path) {
+      Write-Host "--- last lines of .run\$log ---" -ForegroundColor Yellow
+      Get-Content $path -Tail 15 | ForEach-Object { Write-Host "    $_" }
+    }
+  }
+  Write-Host "Stopping the servers this run started (Supabase stays up)..." -ForegroundColor Yellow
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "stop-lifeops.ps1") -KeepSupabase | Out-Host
+  if ($state -eq "exited") {
+    $why = "stopped on its own"
+  } else {
+    $why = "did not answer within $WaitSeconds s (on a very busy PC rerun with -WaitSeconds 1200)"
+  }
+  Fail "$name $why. See .run\$($logs[0])"
+}
+
+Step "Waiting for both servers (up to $WaitSeconds s each)"
+$state = Wait-Server "FastAPI planner" "http://127.0.0.1:8010/" $fastapi $WaitSeconds
+if ($state -ne "up") { Fail-Server "The FastAPI planner" $state @("fastapi.err.log", "fastapi.log") }
+$state = Wait-Server "web app" "http://localhost:5190/login" $vite $WaitSeconds
+if ($state -ne "up") { Fail-Server "The web app" $state @("web.err.log", "web.log") }
 
 Write-Host ""
 Write-Host "LifeOps AI is running:" -ForegroundColor Green
