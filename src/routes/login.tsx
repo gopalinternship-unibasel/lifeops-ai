@@ -16,8 +16,8 @@ function LoginPage() {
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [emailState, setEmail] = useState("");
+  const [passwordState, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const demoEnabled = import.meta.env.VITE_ENABLE_ANONYMOUS_DEMO === "true";
   // Supabase "Sign in with Google" needs the Google provider enabled in Supabase Auth.
@@ -25,6 +25,18 @@ function LoginPage() {
   // While this page drives navigation itself (sign-up → onboarding), do not also redirect
   // to /app when the new session appears; that race used to skip profile onboarding.
   const navigatingRef = useRef(false);
+  // Until React has taken over the server-rendered page, a click on "Sign in" would submit the
+  // plain HTML form (a GET to /login that clears the fields, with no message: QA saw this on a
+  // cold dev server). The button stays disabled until then, and text typed before is kept.
+  const [hydrated, setHydrated] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (emailRef.current?.value) setEmail(emailRef.current.value);
+    if (passwordRef.current?.value) setPassword(passwordRef.current.value);
+    setHydrated(true);
+  }, []);
 
   useEffect(() => {
     if (!authLoading && user && !navigatingRef.current) navigate({ to: "/app" });
@@ -32,6 +44,9 @@ function LoginPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!hydrated) return;
+    const email = emailState || emailRef.current?.value || "";
+    const password = passwordState || passwordRef.current?.value || "";
     setBusy(true);
     navigatingRef.current = true;
     try {
@@ -151,13 +166,15 @@ function LoginPage() {
             <div className="mt-8" />
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} method="post" className="space-y-4" data-hydrated={hydrated ? "true" : "false"}>
             <div>
               <label className="block text-xs font-medium mb-1.5">Email</label>
               <input
+                ref={emailRef}
                 type="email"
                 required
-                value={email}
+                autoComplete="email"
+                value={emailState}
                 onChange={(e) => setEmail(e.target.value)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
                 placeholder="you@work.com"
@@ -166,10 +183,12 @@ function LoginPage() {
             <div>
               <label className="block text-xs font-medium mb-1.5">Password</label>
               <input
+                ref={passwordRef}
                 type="password"
                 required
                 minLength={6}
-                value={password}
+                autoComplete={mode === "signin" ? "current-password" : "new-password"}
+                value={passwordState}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
                 placeholder="••••••••"
@@ -177,10 +196,11 @@ function LoginPage() {
             </div>
             <button
               type="submit"
-              disabled={busy}
+              disabled={busy || !hydrated}
+              aria-busy={!hydrated}
               className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-2.5 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60"
             >
-              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {(busy || !hydrated) && <Loader2 className="h-4 w-4 animate-spin" />}
               {mode === "signin" ? "Sign in" : "Create account"}
             </button>
           </form>
