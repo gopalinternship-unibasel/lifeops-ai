@@ -307,3 +307,34 @@ def test_model_times_with_an_offset_are_read_as_local_wall_clock(client, fake_ll
     assert action["end_time"] == "2026-11-10T19:00:00"
     assert plan["plan"]["tasks"][0]["deadline"] == "2026-11-13T17:00:00"
     assert "local times" in plan["planner_note"]
+
+
+def test_request_lists_the_dates_of_the_coming_days(client, fake_llm):
+    # QA round 3: "Block Thursday 2-4 pm" became a deadline on Tuesday; the model now gets the dates.
+    fake_llm.answer = json.dumps({"summary": "ok", "tasks": [{"title": "Deep work"}], "actions": []})
+    response = client.post(
+        "/api/plan",
+        json={"user_input": "Block Thursday 2-4 pm for deep work", "current_datetime": "2026-11-09T21:54:54", "timezone": "Europe/Zurich"},
+        headers=ALICE,
+    )
+    assert response.status_code == 200
+    content = fake_llm.calls[-1]["request"]["messages"][1]["content"]
+    assert "Monday 2026-11-09 (today), Tuesday 2026-11-10 (tomorrow), Wednesday 2026-11-11, Thursday 2026-11-12" in content
+    assert "calendar_block" in fake_llm.calls[-1]["request"]["messages"][0]["content"]
+
+
+def test_reminder_with_an_empty_range_keeps_only_its_start(client, fake_llm):
+    # QA round 3: "Call Mom reminder Tue, 10 Nov, 17:45 - 17:45".
+    fake_llm.answer = json.dumps(
+        {
+            "summary": "Call mom",
+            "tasks": [{"title": "Call mom"}],
+            "actions": [
+                {"action_type": "reminder", "title": "Call Mom", "start_time": "2026-11-10T17:45:00", "end_time": "2026-11-10T17:45:00", "risk_level": "low"}
+            ],
+        }
+    )
+    plan = make_plan(client, text="call mom tomorrow")
+    action = plan["plan"]["actions"][0]
+    assert action["start_time"] == "2026-11-10T17:45:00"
+    assert action["end_time"] is None

@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from openai import APIStatusError, APITimeoutError, OpenAI
@@ -52,6 +52,9 @@ Schema:
 
 Rules:
 - Use the current datetime given by the backend. Write all times as local times without an offset.
+- Day names ("Thursday", "tomorrow") are the dates in the "Dates" list of the request; use that list, do not count days yourself.
+- When the input names a time for something ("gym tomorrow at 6 pm for an hour", "block Thursday 2-4 pm"), add a "calendar_block" action with start_time and end_time on that date. end_time is after start_time: the stated length, else 60 minutes.
+- A "reminder" has only a start_time (end_time null). A "task" has no start_time; put its due date in the task's "deadline".
 - If the date is vague, make a reasonable schedule and explain it in the description.
 - Do not send emails.
 - Email actions must only be drafts.
@@ -60,6 +63,17 @@ Rules:
 - Priorities: 5 = most important, 1 = least important.
 - Keep it short: at most 5 tasks and 5 actions.
 """
+
+def upcoming_dates(now: datetime, days: int = 8) -> str:
+    """ "Monday 2026-11-09 (today), Tuesday 2026-11-10 (tomorrow), ..." for the request: a small
+    model put "Thursday" on a Tuesday when it had to count days itself (QA round 3)."""
+    labels = []
+    for offset in range(days):
+        day = (now + timedelta(days=offset)).date()
+        suffix = " (today)" if offset == 0 else " (tomorrow)" if offset == 1 else ""
+        labels.append(f"{day.strftime('%A')} {day.isoformat()}{suffix}")
+    return ", ".join(labels)
+
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 _ACTION_TYPES = {"task", "calendar_block", "email_draft", "reminder"}
@@ -153,6 +167,9 @@ def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
             if not action.start_time or not action.end_time or action.end_time <= action.start_time:
                 notes.append(f"Dropped calendar block '{action.title}' without a valid time range.")
                 continue
+        elif action.end_time is not None and (action.start_time is None or action.end_time <= action.start_time):
+            # A reminder or task is a point in time: "17:45 - 17:45" is not a range.
+            action.end_time = None
         actions.append(action)
 
     if had_offsets:
@@ -232,7 +249,8 @@ def create_plan(
                 {
                     "role": "user",
                     "content": (
-                        f"Current local datetime{zone}: {now.replace(microsecond=0).isoformat()}\n\n"
+                        f"Current local datetime{zone}: {now.replace(microsecond=0).isoformat()}\n"
+                        f"Dates: {upcoming_dates(now)}\n\n"
                         f"User input:\n{user_input}"
                     ),
                 },
