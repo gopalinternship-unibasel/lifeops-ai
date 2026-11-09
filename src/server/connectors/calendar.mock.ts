@@ -56,24 +56,28 @@ export async function ensureSeedEvents(
   const nextMonday = mondayOfISODate(addDaysISO(today, 7));
   const seed = [
     {
+      seed_key: "team-sync",
       title: "Team sync — demo walkthrough",
       starts_at: at(today, 19),
       ends_at: at(today, 20),
       notes: "Team meeting (from Alicia's email). You have a script ready.",
     },
     {
+      seed_key: "lecture",
       title: "Lecture — Distributed Systems",
       starts_at: at(addDaysISO(today, 1), 10),
       ends_at: at(addDaysISO(today, 1), 12),
       notes: null,
     },
     {
+      seed_key: "dentist",
       title: "Dentist appointment",
       starts_at: at(addDaysISO(today, 2), 14),
       ends_at: at(addDaysISO(today, 2), 15, 30),
       notes: null,
     },
     {
+      seed_key: "acme-interview",
       title: "Acme onsite interview",
       starts_at: at(nextMonday, 10),
       ends_at: at(nextMonday, 12),
@@ -81,8 +85,11 @@ export async function ensureSeedEvents(
     },
   ];
 
-  const { error } = await supabase.from("calendar_events").insert(
+  // Two pages can seed at the same moment; the (user_id, seed_key) constraint makes the
+  // second insert a no-op instead of duplicating every demo event.
+  const { error } = await supabase.from("calendar_events").upsert(
     seed.map((event) => ({ ...event, user_id: userId, source: "calendar" })),
+    { onConflict: "user_id,seed_key", ignoreDuplicates: true },
   );
   if (error) throw error;
 }

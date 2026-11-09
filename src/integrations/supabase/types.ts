@@ -20,6 +20,7 @@ export type Database = {
           ends_at: string
           id: string
           notes: string | null
+          seed_key: string | null
           source: string
           starts_at: string
           title: string
@@ -30,6 +31,7 @@ export type Database = {
           ends_at: string
           id?: string
           notes?: string | null
+          seed_key?: string | null
           source?: string
           starts_at: string
           title: string
@@ -40,6 +42,7 @@ export type Database = {
           ends_at?: string
           id?: string
           notes?: string | null
+          seed_key?: string | null
           source?: string
           starts_at?: string
           title?: string
