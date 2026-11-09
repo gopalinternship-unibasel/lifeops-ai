@@ -10,7 +10,7 @@ MONDAY is the July 2026 TanStack Start rework of the Bobathon LifeOps AI project
 | Supabase Postgres | 127.0.0.1:55322 | user `postgres` (local dev password, see `supabase status`) |
 | Supabase Studio (database browser) | http://127.0.0.1:55323 | |
 | Mailpit (auth emails) | http://127.0.0.1:55324 | local sign-ups need no email confirmation |
-| Ollama (local LLM, shared) | http://localhost:11434/v1 | container `cvfix-ollama`; local default model `qwen2.5:3b` |
+| Ollama (local LLM, shared) | http://localhost:11434/v1 | container `cvfix-ollama`; local default model `qwen2.5-3b-4threads` |
 
 Reserved but switched off in `supabase/config.toml` (the app does not use them): shadow DB 55320,
 analytics 55327, pooler 55329, edge-function inspector 8084.
@@ -19,17 +19,23 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 - **Intended model: Llama 3.1 8B**, as in the hackathon build: `meta-llama/Llama-3.1-8B-Instruct` on the
   Hugging Face router (fallback `meta-llama/Meta-Llama-3-8B-Instruct`), or `llama3.1:8b` in Ollama.
-- **Local default on this PC: `qwen2.5:3b`** (Qwen 2.5 3B Instruct in Ollama). Reason, measured on
-  9 Nov 2026: the Ollama here is CPU only and shared with other projects, and the whole machine was
-  under heavy load (load average about 20 on 8 cores). Under that load `llama3.1:8b` took 268 s just to
-  load and then generated 0.06 tokens/s; `qwen2.5:3b` is 2.5 times smaller, is usually already loaded
-  by the other projects (no load time), and returned valid structured answers to MONDAY's real
-  prompts: a correct calendar proposal in the chat, and a valid plan (tasks plus a calendar block) from
-  the planner service. Neither model is fast here: plan on many minutes per answer (numbers under
-  "Known limits").
+- **Local default on this PC: `qwen2.5-3b-4threads`**: the Qwen 2.5 3B Instruct weights of
+  `qwen2.5:3b`, run with 4 CPU threads and an 8192-token context
+  (`ollama/qwen2.5-3b-4threads.Modelfile`). Why a 3B model: the Ollama here is CPU only and shared
+  with other projects; under load `llama3.1:8b` took 268 s to load and then generated 0.06 tokens/s,
+  while Qwen 2.5 3B returned valid structured answers to MONDAY's real prompts (a calendar proposal in
+  the chat, a plan with tasks and a calendar block from the planner service). Why 4 threads, measured
+  in the Ollama log on 9 Nov 2026: `qwen2.5:3b` with Ollama's default (all 8 threads, on a CPU with 4
+  performance and 4 low-power cores, while other work kept the PC busy) generated **0.45 tokens/s**;
+  the same weights with 4 threads generated **4.2 to 5.6 tokens/s** in the same hour. And why exactly
+  these settings: Ollama keeps one runner per weights file, so `qwen2.5:3b` (defaults) and another
+  project's `qwen2.5-3b-4threads` kept unloading each other, each waiting for the other's running
+  request first (QA saw a 9-minute wait before MONDAY's model even started). With the same name and
+  settings both projects share one loaded runner. If the model is missing, the start script prints
+  how to create it from the Modelfile (two commands, no download beyond `qwen2.5:3b`).
 - Switch to Llama 3.1 8B (or back) with one command, then restart:
   ```powershell
-  node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5:3b
+  node scripts\write-local-env.mjs --model llama3.1:8b     # or: --model qwen2.5-3b-4threads, --model qwen2.5:3b
   ```
   It sets `LLM_MODEL` in both `.env.local` and `fastapi-backend\.env`. A hosted provider is one more
   setting away (see "Switching the AI provider").
@@ -44,20 +50,22 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 - **Python 3.13** as `python` on PATH (for the FastAPI virtualenv).
 - **Supabase CLI v3.** The scripts use `C:\Users\gopal\tools\supabase\supabase.exe` if it exists,
   otherwise `supabase` from PATH, or whatever `$env:SUPABASE_CLI` points to.
-- **Ollama with the model in `.env.local`** (default `qwen2.5:3b`) on port 11434. Check with
-  `docker exec cvfix-ollama ollama list`; the start script warns and prints the `ollama pull` command
-  if the model is missing. Without Ollama the app still starts; AI answers then fail with a clear
+- **Ollama with the model in `.env.local`** (default `qwen2.5-3b-4threads`) on port 11434. Check with
+  `docker exec cvfix-ollama ollama list`; the start script warns if the model is missing and prints the
+  `ollama pull` command, or for `qwen2.5-3b-4threads` the two commands that create it from
+  `ollama\qwen2.5-3b-4threads.Modelfile`. Without Ollama the app still starts; AI answers then fail with a clear
   "Could not reach Ollama" message and the planner service falls back to its keyword planner.
 
 ## One-time setup
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 10 migrations in `supabase/migrations`
+1. starts the local Supabase stack and applies the 11 migrations in `supabase/migrations`
    (the first start downloads the Supabase images, several minutes); on every later run
    `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
-   printed; a random `GOOGLE_OAUTH_STATE_SECRET` and a shared `LIFEOPS_BACKEND_TOKEN` are generated),
+   printed: the status that `supabase start` prints with the local keys is dropped; a random
+   `GOOGLE_OAUTH_STATE_SECRET` and a shared `LIFEOPS_BACKEND_TOKEN` are generated),
 3. runs `npm install` and creates `fastapi-backend\.venv` with `requirements-dev.txt` if they are missing,
 4. creates the local test user and stores it in `.local-test-user.json`.
 
@@ -105,8 +113,9 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-lifeops.ps1 -KeepSupabase 
 
 ## What to try
 
-Every AI answer comes from the local model and takes minutes on this PC (see "Known limits"). The UI
-shows "Thinking..." meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_MS`).
+Every AI answer comes from the local model: about 1 to 2.5 minutes on this PC when the shared Ollama is
+not busy with other work, longer when it is (see "Known limits"). The UI shows "Thinking..."
+meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_MS`).
 
 1. **Workspace** (`/app`): on the first visit MONDAY asks itself for an inbox and calendar briefing and
    ranks your priorities (stored in the `tasks` table, shown under *Priorities*). Then try
@@ -130,8 +139,19 @@ shows "Thinking..." meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_
    if anything still sends a longer one, the answer is one sentence, not a JSON error.
    If the model does not answer the automatic first-visit briefing (timeout, Ollama unreachable), the
    briefing is put together by rules instead and says so: unread emails, today's events, and
-   priorities ranked by the same rule the model is given (stored as tasks with source `rules`). Every
-   other request shows the model's error.
+   priorities ranked by the same rule the model is given (stored as tasks with source `rules`). An
+   email task about one of today's remaining events is the same commitment and is ranked once, in the
+   event's line (the demo's 7 PM team sync and Alicia's "Team sync moved to 7 PM today" email: one
+   priority, "also in Alicia (manager)'s email ..."). Every other request shows the model's error as
+   a sentence, for example "Ollama is not available right now (HTTP 503: ...). Try again in a
+   moment.", with the provider's own message but never its raw JSON body (that goes to the server log).
+   **Reloading while MONDAY is still answering** (or opening the workspace in another tab) loses
+   nothing: every request runs to the end on the server and stores its answer, or its error, in the
+   chat. The page shows the message with "Thinking..." and "Still answering your last message",
+   keeps the box disabled, checks every 4 s and then shows the answer and its cards. A request that
+   was cut off (for example the dev server was stopped) is noted under the message once it is older
+   than the longest a request can take (the model timeout plus 2 minutes), so the page never waits
+   forever.
 2. **Plan** (`/app/plan`): **Create plan** fills only the free slots (07:00–22:00 minus your events) of
    the week that are still ahead: today's slots start at the next quarter hour, days that are over get
    none ("Day already over"). Items the model places outside a free slot, in the past or on top of an
@@ -146,6 +166,10 @@ shows "Thinking..." meanwhile; requests time out after 15 minutes (`LLM_TIMEOUT_
    the same conflict check, email actions become drafts only, actions the model invents (for example
    "send_email") are dropped, and the *Execution log* shows where each action went. If the planner
    service is stopped, the page says so and the same text goes to the in-app assistant instead.
+   Each **Plan it** is stored (table `planner_requests`) and runs to the end on the server, the
+   in-app assistant included, so a reload while it runs shows "Still planning ..." (Plan it disabled)
+   and then the result; the last result stays on the page with its time. A failed or cut-off request
+   says so.
 5. **Profile** (`/app/profile`): name, role and goals feed the prompts; *Manage Google connection*.
 
 ## Switching the AI provider
@@ -165,7 +189,7 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
 
 | Provider | `LLM_BASE_URL` | `LLM_MODEL` (example) | `LLM_API_KEY` |
 | --- | --- | --- | --- |
-| Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5:3b` (default), `llama3.1:8b` (intended) | any (`ollama`) |
+| Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-3b-4threads` (default), `qwen2.5:3b`, `llama3.1:8b` (intended) | any (`ollama`) |
 | Hugging Face router (original) | `https://router.huggingface.co/v1` | `meta-llama/Llama-3.1-8B-Instruct` | `hf_...` token with inference credits |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `sk-...` |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` | Gemini API key |
@@ -188,13 +212,15 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 54 unit tests (vitest): LLM gateway, time ranges, conflicts and free slots from now on,
-                         # Google OAuth offline, env files, readable input errors, workspace card state, rule-based briefing
+npm test                 # 70 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+                         # and free slots from now on, Google OAuth offline, env files, readable input errors,
+                         # workspace card state, rule-based briefing (one line per commitment, inbox coverage),
+                         # reply and plan-request state, dates in the chat prompt
 npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
 cd fastapi-backend
-.venv\Scripts\python.exe -m pytest     # 15 API tests with a temporary SQLite file and a fake LLM
+.venv\Scripts\python.exe -m pytest     # 16 API tests with a temporary SQLite file and a fake LLM
 ```
 
 `npm run check` runs lint, typecheck, unit tests and build in one go. The Google tests never touch the
@@ -261,6 +287,28 @@ node lifeops-fix3\rls.mjs p f    # row-level security of chat_card_actions betwe
 node lifeops-fix3\real-briefing.mjs r   # with the DEFAULT config (real model): model answer or rule-based fallback
 ```
 
+**Round-4 checks** (9 Nov 2026, the fixes after the second QA pass) live in `..\_e2e\lifeops-fix4\`: the
+same layout (`start-fake.ps1`, user files `.run\fix4-user-<suffix>.json`, `results.jsonl`, `shots\`), copies
+of the round-3 scripts, and a `fake-llm.mjs` that also answers HTTP 503 `{"error":{"message":"QA double:
+model unavailable"}}` to "Fallback" users, HTTP 500 with a JSON body without a message to "Broken" users,
+and answers "Slow" users (and planner inputs containing `SLOW`) only after 45 s (`$env:SLOW_MS`), so a
+page can be reloaded while a request runs.
+
+```powershell
+cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+powershell -ExecutionPolicy Bypass -File lifeops-fix4\start-fake.ps1
+node lifeops-fix4\errors.mjs f k            # readable 503/500 errors, failed turn stored, team sync ranked once
+node lifeops-fix4\reload.mjs chat s         # reload during the briefing and during a message: answer and card arrive
+node lifeops-fix4\reload.mjs dash d         # reload during "Plan it" (planner service): "Still planning", then the result
+node lifeops-fix4\reload.mjs interrupted r  # a request cut off 3 hours ago: a note, no endless wait, no new briefing
+node lifeops-fix4\rls-planner.mjs p f       # row-level security of planner_requests between two users
+# stop only the planner (taskkill /PID <fastapi id from .run\pids.json> /T /F), then:
+node lifeops-fix4\reload.mjs dash-offline s2   # reload while the in-app assistant plans
+node lifeops-fix4\inapp-card-after-reload.mjs d  # after dash.mjs d offline: the saved card does not come back
+# with the DEFAULT config (start-lifeops.ps1, real local model):
+node lifeops-fix4\real.mjs briefing x       # first-visit briefing; also: real.mjs chat x, real.mjs plan x
+```
+
 ## What only Gopal can do: connect real Gmail and Google Calendar
 
 The code path is in place and tested against mocked Google endpoints, but it needs an OAuth client in
@@ -298,23 +346,32 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
 
 ## Known limits
 
-- **Speed of the local model.** Measured on 9 Nov 2026 with the shared Ollama under heavy load from other
-  work on the PC (load average about 20 on 8 cores): one chat request ("Block 3–5 pm tomorrow ...",
-  with history) to `qwen2.5:3b` had 2,900 prompt tokens, evaluated at 7.8 tokens/s (6 min), and a
-  132-token answer generated at 0.07 tokens/s (33 min): 39 minutes in all, for a correct proposal.
-  The planner service's request (408 prompt tokens, a 250-token plan) took 58 minutes the same way.
-  `llama3.1:8b` was slower still (0.8 tokens/s prompt, 0.06 tokens/s output, 268 s to load). On an idle
-  machine the same models are many times faster. Later the same afternoon it was worse: a probe asking
-  `qwen2.5:3b` for one word (36 prompt tokens, 8 answer tokens at most) waited 28 minutes for the model
-  to be loaded, because the shared Ollama was busy unloading another project's model, then ran at
-  1.1 tokens/s (prompt) and 0.07 tokens/s (answer): 29 minutes in all (Docker VM load average 11-17 on
-  8 CPUs, Ollama at about 400% CPU, Windows CPU at 100%). The first-visit briefing then hit the
-  15-minute timeout after 905 s and came back rule-based; no real-model answer was seen that day. The default timeouts (15 minutes) are too short under
-  such load: raise `LLM_TIMEOUT_MS` in `.env.local` and `LLM_TIMEOUT_SECONDS` in `fastapi-backend\.env`
-  (for example `node scripts\write-local-env.mjs --set LLM_TIMEOUT_MS=3600000 --backend-set LLM_TIMEOUT_SECONDS=3600`),
-  or use a hosted provider.
-- **Ollama's context is 4096 tokens** (its default for OpenAI-compatible requests). A long chat history
-  makes the prompt grow; Ollama then drops the oldest messages first.
+- **Speed of the local model.** With the default `qwen2.5-3b-4threads`, measured on 9 Nov 2026 between
+  19:50 and 20:10 (Docker VM load average 1-7; another project loaded `qwen2.5:7b` in the same Ollama
+  at 19:54): first-visit briefings were answered by the model in 87, 98, 125 and 148 s (about 2,000
+  prompt tokens at 12-20 tokens/s, 105-417 answer tokens at 3-6 tokens/s; the 148 s include 14 s to
+  load the model), a briefing interrupted by a reload arrived 67 s after the reload, the chat request
+  "Block 7-8 am on Thursday for a morning run." took 66 and 107 s, and the planner service 75 s
+  (369 answer tokens at 6.6 tokens/s). The model was loaded once (19:50) and served every request
+  without being reloaded. Before the change, with `qwen2.5:3b` and Ollama's default threads, QA
+  measured 0.42 tokens/s, a planner answer after 820 s and two chat requests that hit the 15-minute
+  timeout, and earlier the same day a chat answer took 39 minutes and a planner answer 58 minutes
+  (load average about 20, Windows CPU at 100%). The causes, from the Ollama log: all 8 threads on a
+  CPU with 4 low-power cores that other work keeps busy, and `qwen2.5:3b` and another project's
+  `qwen2.5-3b-4threads` (the same weights file with other settings) unloading each other, each
+  waiting for the other's running request. Still true: the shared Ollama answers one request at a
+  time per model, so a request waits while another project's long request on the same model runs
+  (their requests took 1 to 12 minutes today), and the PC's load changes the speed several times over.
+  If requests time out, raise `LLM_TIMEOUT_MS` in `.env.local` and `LLM_TIMEOUT_SECONDS` in
+  `fastapi-backend\.env`, or use a hosted provider:
+  ```powershell
+  node scripts\write-local-env.mjs --set LLM_TIMEOUT_MS=3600000 --backend-set LLM_TIMEOUT_SECONDS=3600
+  ```
+  The first-visit briefing falls back to rules after the timeout, and a reload never loses an answer
+  that arrives later.
+- **Context: 8192 tokens** with `qwen2.5-3b-4threads` (Ollama's default for other models is 4096). A
+  long chat history makes the prompt grow; the app sends the newest 10 messages and Ollama drops the
+  oldest ones first if it still does not fit.
 - **Node's 5-minute fetch limit.** Node's built-in fetch gives up when response headers take longer than
   300 s. `vite.config.ts` lifts that limit for `vite dev` (the local setup); a Node production server
   would need the same `undici` Agent setting, Cloudflare Workers do not have the limit.
@@ -323,9 +380,15 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   event ids), so bad answers are dropped, not saved.
 - Real Gmail and Google Calendar were never exercised on this PC (no OAuth client); only the demo data and
   the mocked-endpoint tests.
-- The first workspace visit always sends one briefing request to the model. When the model does not
-  answer it (for example the 15-minute timeout under load), the briefing is rule-based and says so;
-  the priorities then come from simple rules, not from the model.
+- **Quality of a 3B model.** The first workspace visit always sends one briefing request to the model.
+  In five real briefings on 9 Nov 2026 `qwen2.5-3b-4threads` never returned priorities, and its text
+  twice missed or misstated the inbox (a read email listed as unread and one left out; "No unread
+  emails" next to four). The app now ranks the priorities by rule when the model gives none, lists
+  the inbox and today's events from the data when the model's text leaves one out (both say so in the
+  reply), and ignores calendar proposals in the briefing (the model had proposed today's existing
+  events again). The chat once put "Thursday" on the wrong date before the prompt listed the dates of
+  the next 8 days. Proposals always wait for **Save** and pass the conflict check, but read them before
+  saving; `llama3.1:8b` (the intended model) or a hosted model writes better answers, more slowly here.
 - Success toasts appear over the top-right header buttons for a few seconds (they pause while the mouse is
   over them).
 - The planner service keeps its data in SQLite and creates tables at start-up without migrations; after
