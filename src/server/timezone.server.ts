@@ -122,6 +122,21 @@ export function todayInTimeZone(requestedTimeZone?: string): string {
   return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
 }
 
+/**
+ * The local wall-clock date and time of an instant in a zone: date "YYYY-MM-DD", minutes after
+ * local midnight, "HH:MM" (24-hour) and the weekday (0 = Sunday).
+ */
+export function localDateTime(
+  iso: string | number,
+  requestedTimeZone?: string,
+): { date: string; minutes: number; hhmm: string; weekday: number } {
+  const ms = typeof iso === "number" ? iso : new Date(iso).getTime();
+  const p = partsAt(ms, normalizeTimeZone(requestedTimeZone));
+  const date = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+  const hhmm = `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
+  return { date, minutes: p.hour * 60 + p.minute, hhmm, weekday: new Date(`${date}T12:00:00Z`).getUTCDay() };
+}
+
 export function formatTimeInZone(iso: string, requestedTimeZone?: string): string {
   return new Date(iso).toLocaleTimeString("en-US", {
     timeZone: normalizeTimeZone(requestedTimeZone),

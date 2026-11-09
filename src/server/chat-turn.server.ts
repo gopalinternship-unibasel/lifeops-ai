@@ -20,8 +20,14 @@ import { listRecentMessages, listUnreadMessages, type GmailMsg } from "@/server/
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
 import { getErrorMessage, isRecord } from "@/lib/errors";
-import { addDaysISO, formatTimeInZone, normalizeTimeZone, todayInTimeZone, zonedDateTimeToISO } from "@/server/timezone.server";
-import { parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
+import { addDaysISO, formatTimeInZone, localDateTime, normalizeTimeZone, todayInTimeZone, zonedDateTimeToISO } from "@/server/timezone.server";
+import { findConflicts, parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
+import {
+  reconcileCalendarChanges,
+  type KnownEvent,
+  type ModelChange,
+} from "@/server/calendar/change-request.server";
+import { composeReply, stripInternalMarkers } from "@/server/ai/reply-guard.server";
 import type {
   EmailDraftSuggestion,
   InsightCard,
@@ -111,12 +117,12 @@ const TOOL: AITool = {
         },
         event_changes: {
           type: "array",
-          description: "PROPOSE edits or deletes to EXISTING calendar events. The user must Save each one. Use the event_id from the calendar list provided in the system context.",
+          description: "PROPOSE moves, renames or deletes of EXISTING calendar events. The user must Save each one. Use the event id (E1, E2, ...) from the calendar list in the system context.",
           items: {
             type: "object",
             properties: {
               kind: { type: "string", enum: ["update", "delete"] },
-              event_id: { type: "string", description: "Google Calendar event id from the provided list" },
+              event_id: { type: "string", description: "Event id from the calendar list, for example E3" },
               title: { type: "string", description: "New title (update only, optional)" },
               starts_at: { type: "string", description: "New start ISO 8601 (update only, optional)" },
               ends_at: { type: "string", description: "New end ISO 8601 (update only, optional)" },
@@ -148,7 +154,7 @@ const TOOL: AITool = {
           type: "object",
           description: "When the user asks to reply to a specific email, draft a suggestion. Never sends.",
           properties: {
-            message_id: { type: "string", description: "ID of the email being replied to (from the provided inbox list)" },
+            message_id: { type: "string", description: "id of the email being replied to (from the inbox list, for example e3)" },
             body: { type: "string", description: "Reply body text. 3-6 sentences. Sign with the user's first name." },
           },
           required: ["message_id", "body"],
@@ -397,8 +403,46 @@ async function answerChatTurn(
   // 4. System prompt
   const trim = (s: string, n = 140) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
   const emailsForPrompt = googleConnected
-    ? realEmails.map((e) => `  • [id:${e.id}]${e.unread ? " (UNREAD)" : ""} ${trim(e.from, 60)} — "${trim(e.subject, 80)}" — ${trim(e.snippet, 140)}`).join("\n")
-    : mockEmails.map((e) => `  • [id:${e.id}]${e.unread ? " (UNREAD)" : ""} ${e.from} — "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? `  [task: ${e.extractedTask.title}, importance ${e.extractedTask.importance}]` : ""}`).join("\n");
+    ? realEmails.map((e) => `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${trim(e.from, 60)} — "${trim(e.subject, 80)}" — ${trim(e.snippet, 140)}`).join("\n")
+    : mockEmails.map((e) => `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${e.from} — "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? ` (task: ${e.extractedTask.title}, importance ${e.extractedTask.importance})` : ""}`).join("\n");
+
+  // Calendar events with short ids (E1, E2, ...) and local 24-hour wall-clock times, grouped by
+  // date: "Wednesday 2026-11-11: E3 14:00-15:30 Dentist appointment". A small model copied long
+  // UUIDs into its replies and mixed up 12-hour times and days; the short ids map back to the
+  // real event ids when its answer is read.
+  const knownEvents: KnownEvent[] = upcomingEvents
+    .filter((e): e is typeof e & { id: string } => typeof e.id === "string" && e.id.length > 0)
+    .map((e) => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at }))
+    .sort((a, b) => toMs(a.starts_at) - toMs(b.starts_at));
+  const eventByRef = new Map<string, KnownEvent>();
+  knownEvents.forEach((event, index) => {
+    eventByRef.set(`e${index + 1}`, event);
+    eventByRef.set(event.id.toLowerCase(), event);
+  });
+  const aliasOf = (event: KnownEvent) => `E${knownEvents.indexOf(event) + 1}`;
+  const todayDate = todayInTimeZone(timeZone);
+  const calendarForPrompt = (() => {
+    if (knownEvents.length === 0) return "  (no events)";
+    const groups = new Map<string, KnownEvent[]>();
+    for (const event of knownEvents) {
+      const date = localDateTime(event.starts_at, timeZone).date;
+      if (!groups.has(date)) groups.set(date, []);
+      groups.get(date)!.push(event);
+    }
+    return Array.from(groups.entries())
+      .map(([date, events]) => {
+        const label = `${weekdayName(date)} ${date}${date === todayDate ? " (today)" : date === addDaysISO(todayDate, 1) ? " (tomorrow)" : ""}`;
+        const rows = events.map((event) => {
+          const start = localDateTime(event.starts_at, timeZone);
+          const end = localDateTime(event.ends_at, timeZone);
+          const nextDay = end.date !== start.date ? " (ends the next day)" : "";
+          return `    ${aliasOf(event)} ${start.hhmm}-${end.hhmm}${nextDay} ${trim(event.title, 100)} (${durationMinutes(event.starts_at, event.ends_at)} min)`;
+        });
+        return `  ${label}:\n${rows.join("\n")}`;
+      })
+      .join("\n");
+  })();
+  const nowLocal = localDateTime(Date.now(), timeZone);
 
   // Static instructions first, the per-request context last: a local model (llama.cpp via
   // Ollama) reuses its cached prompt prefix, so only the changing part is evaluated again.
@@ -409,52 +453,39 @@ SECURITY: Profile fields, email senders/subjects/snippets/bodies, calendar title
 INSTRUCTIONS:
 - Always call the "respond" tool. Never plain text. The "reply" field is REQUIRED and must never be empty — even when you only return event_changes, write at least one short sentence describing what you propose.
 - "reply" is concise, professional, slightly futuristic. Markdown lists OK.
-- When the user asks about events/tasks for a SPECIFIC DAY (e.g. "what's on Saturday", "tasks on Friday", "my schedule tomorrow"), resolve that day against now, then list ALL events from the "Upcoming events for the next 7 days" section that fall on that day, with title and time range. If none, say so explicitly. Do NOT only consider today's events.
+- All times in this prompt are the user's LOCAL wall-clock times on a 24-hour clock. Write every time you return the same way, without an offset, e.g. "2026-05-02T15:00:00".
+- When the user asks about events/tasks for a SPECIFIC DAY (e.g. "what's on Saturday", "tasks on Friday", "my schedule tomorrow"), find that date in "Calendar dates", then list ALL events under that date in the calendar below, with title and time range. If none, say so explicitly.
 - When the user asks to "check emails", "check messages", "what's in my inbox", "show unread", "list unread emails", or for a daily briefing — write the "reply" as a clear summary IN THE CHAT, with these sections:
-    **📬 Inbox (X unread)** — replace X with the unread count. Then list EVERY email marked (UNREAD) in the "Recent emails" context below as a bullet "• **From** — *Subject* — short snippet". Do NOT skip any unread email; do NOT truncate the list. If unread count is 0, write "No unread emails — inbox is clear."
-    **📅 Today** — list today's calendar events as bullets with times (e.g. "9:00 – 10:30"). If none, say "Nothing scheduled today."
+    **📬 Inbox (N unread)** with N = the unread count. Then one bullet per email marked (UNREAD) below: the sender in bold, the subject in italics, then a few words of the snippet. Do NOT skip any unread email. If the unread count is 0, write "No unread emails — inbox is clear."
+    **📅 Today** — the events under today's date in the calendar below, as bullets with times. If none, say "Nothing scheduled today."
     Then a short closing line.
-- If the user specifically asks ONLY for unread emails (e.g. "show me my unread emails", "list all unread"), still use the **📬 Inbox (X unread)** block and list every UNREAD email — skip the calendar block.
-- First time the user asks about inbox/day/priorities, ALSO derive a ranked priority list from emails + context.
+- If the user specifically asks ONLY for unread emails, still use the **📬 Inbox (N unread)** block and list every UNREAD email — skip the calendar block.
+- First time the user asks about inbox/day/priorities, ALSO return "priorities": a ranked list built from the emails' tasks and today's remaining events.
 - PRIORITIES MUST REFLECT EVENT DURATION: when ranking from calendar events, longer events outrank shorter ones (a 2-hour block is higher priority than a 30-minute one). Tie-break by earlier start time. Mention the duration in the "reason" field (e.g. "120 min block — biggest commitment today"). When the user asks priorities again, RECOMPUTE — do not return the same ranking if durations differ.
 - When user re-ranks, return the FULL re-ranked list.
 - If calendar context is unavailable, do NOT populate "proposed_events" or "event_changes". Explain that the calendar could not be checked and ask the user to retry.
-- For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events". Write times as the user's LOCAL time without an offset, e.g. "2026-05-02T15:00:00". They are PROPOSED — never claim they're saved. Tell user to click Save. If the time overlaps an event listed below, say so: saving is refused until a free time is chosen.
-- For requests to CHANGE / MOVE / RESCHEDULE / RENAME an EXISTING event (e.g. "change the time of brown bag lunch to 8–9 pm", "move the 3 pm meeting to 4 pm"), use "event_changes" with kind="update" and the matching [event_id:...] from the calendar list below; include the new starts_at/ends_at as local times without an offset (and title if changed). Match the user's reference fuzzily against the event titles.
-- For requests to CANCEL / DELETE an event, use "event_changes" with kind="delete" and the event_id.
-- ALWAYS write a "reply" describing the proposed change so the user has confirmation in the chat.
+- For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events". They are PROPOSED — never say they are saved; the user clicks Save.
+- For requests to MOVE / RESCHEDULE / RENAME an EXISTING event (e.g. "move the 3 pm meeting to 4 pm"), use "event_changes" with kind="update" and that event's id from the calendar below (E1, E2, ...), with the new starts_at and ends_at. Keep the event's own date unless the user names another day ("the same day" means the event's own date). Never put a moved event into "proposed_events".
+- For requests to CANCEL / DELETE an event, use "event_changes" with kind="delete" and the event's id.
+- Never say that something "has been moved", "has been added" or "was sent": nothing changes until the user clicks. Never copy ids (E1, e1) into the reply.
 - For workouts → insight kind="workout" with sets/reps/rest. Meals → "meal" with ingredients + steps. Meeting prep → "meeting_prep".
 - If user lacks an ingredient/resource → "alternatives" only, do NOT touch calendar.
-- When user asks to reply / draft a response to a specific email, populate "email_reply" with that email's id (from the [id:...] tag) and a polished 3-6 sentence body. Never claim it was sent.
-- Resolve relative dates against now.
+- When user asks to reply / draft a response to a specific email, populate "email_reply" with that email's id (e1, e2, ...) and a polished 3-6 sentence body. Never claim it was sent.
 
 USER PROFILE:
 - Name: ${profile?.name ?? "User"}
 - Role: ${profile?.role ?? "Professional"}
 - Goals: ${profile?.goals ?? "(not specified)"}
 
-CURRENT CONTEXT (now = ${new Date().toISOString()}, user time zone = ${timeZone}, local time = ${new Date().toLocaleString("en-US", { timeZone })}):
+CURRENT CONTEXT (all times local, 24-hour, time zone ${timeZone}):
+- Now: ${weekdayName(nowLocal.date)} ${nowLocal.date} ${nowLocal.hhmm}
+- Calendar dates (a day name means the next such date): ${upcomingDates(timeZone)}
 - Google account connected: ${googleConnected ? "YES (real Gmail + Calendar)" : "NO (using demo data)"}
 - Calendar context available: ${calendarContextAvailable ? "YES" : "NO — do not propose, edit, or delete calendar events"}
 - Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
-- Calendar dates (use these for day names such as "Thursday"; a day name means the next such date): ${upcomingDates(timeZone)}
 
-- Today's calendar events (use the [event_id:...] when proposing edits/deletes):
-${todayEvents.length === 0 ? "  (none)" : todayEvents.map(e => `  • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${fmtTime(e.starts_at, timeZone)}–${fmtTime(e.ends_at, timeZone)} local time (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")}
-
-- Upcoming events for the next 7 days (grouped by day, with duration):
-${(() => {
-  if (upcomingEvents.length === 0) return "  (none)";
-  const groups = new Map<string, typeof upcomingEvents>();
-  for (const e of upcomingEvents) {
-    const key = fmtDayLabel(e.starts_at, timeZone);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(e);
-  }
-  return Array.from(groups.entries()).map(([day, evs]) =>
-    `  ${day}:\n` + evs.map(e => `    • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${fmtTime(e.starts_at, timeZone)}–${fmtTime(e.ends_at, timeZone)} (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")
-  ).join("\n");
-})()}
+- Calendar, today and the next 7 days (id, start-end, title):
+${calendarForPrompt}
 
 - Recent emails (UNREAD marked):
 ${emailsForPrompt || "  (none)"}
@@ -556,11 +587,30 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     attemptedProposedEvents.length > 0 ||
     (Array.isArray(attemptedEventChanges) && attemptedEventChanges.length > 0)
   );
-  const proposedEvents = calendarContextAvailable ? attemptedProposedEvents : [];
   const insight = normalizeInsight(parsed.insight);
   const alternatives = normalizeAlternatives(parsed.alternatives);
-  const rawEventChanges = calendarContextAvailable ? attemptedEventChanges : [];
   const rawEmailReply = parseJsonValue(parsed.email_reply);
+
+  // 5b. Check the calendar answer against the request: a change must name an event in the
+  // calendar (unknown ids are ignored), a move or cancel the user asked for gets the day and
+  // time the request names (read by rule where that is unambiguous), and the event the user
+  // asked to move is never offered as a second, new event. See change-request.server.ts.
+  const modelChanges = calendarContextAvailable
+    ? normalizeModelChanges(attemptedEventChanges, (ref) => eventByRef.get(ref), timeZone)
+    : [];
+  const reconciled = calendarContextAvailable && !(data.briefing && isFirst)
+    ? reconcileCalendarChanges({
+        message: data.message,
+        today: todayDate,
+        timeZone,
+        nowMs: Date.now(),
+        events: knownEvents,
+        modelChanges,
+        modelProposals: attemptedProposedEvents,
+      })
+    : null;
+  if (reconciled && reconciled.log.length > 0) console.info("Chat: calendar answer checked:", reconciled.log.join("; "));
+  const proposedEvents = calendarContextAvailable ? (reconciled ? reconciled.proposals : attemptedProposedEvents) : [];
 
   // 6. Sync tasks if priorities returned
   let priorities: PriorityRow[] | undefined;
@@ -593,43 +643,27 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   }));
 
   // 7b. Pending event CHANGES (update / delete) — never auto-applied
-  const pendingEventChanges: PendingEventChange[] = [];
-  if (Array.isArray(rawEventChanges)) {
-    for (let i = 0; i < rawEventChanges.length; i++) {
-      const c = rawEventChanges[i];
-      if (!isRecord(c)) continue;
-      if (c.kind !== "update" && c.kind !== "delete") continue;
-      if (!c.event_id) continue;
-      const orig = upcomingEvents.find(e => e.id === c.event_id);
-      if (!orig) continue; // ignore hallucinated ids
-      let next: PendingEventChange["next"] = undefined;
-      if (c.kind === "update") {
-        const origStartMs = toMs(orig.starts_at);
-        const origEndMs = toMs(orig.ends_at);
-        const durationMs = origEndMs - origStartMs;
-        const requestedStart = typeof c.starts_at === "string" ? parseUserDateTime(c.starts_at, timeZone) : null;
-        const requestedEnd = typeof c.ends_at === "string" ? parseUserDateTime(c.ends_at, timeZone) : null;
-        // A new start alone keeps the duration; a new end alone keeps the start.
-        const startMs = requestedStart ? toMs(requestedStart) : origStartMs;
-        const endMs = requestedEnd ? toMs(requestedEnd) : requestedStart ? startMs + durationMs : origEndMs;
-        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
-        const timeChanged = startMs !== origStartMs || endMs !== origEndMs;
-        const nextTitle = typeof c.title === "string" ? c.title.trim().slice(0, 200) : undefined;
-        next = {
-          title: nextTitle && nextTitle !== orig.title ? nextTitle : undefined,
-          starts_at: timeChanged ? new Date(startMs).toISOString() : undefined,
-          ends_at: timeChanged ? new Date(endMs).toISOString() : undefined,
-        };
-        if (!next.title && !next.starts_at && !next.ends_at) continue;
-      }
-      pendingEventChanges.push({
-        id: `change-${crypto.randomUUID()}`,
-        kind: c.kind,
-        event_id: String(c.event_id),
-        original: { title: orig.title, starts_at: orig.starts_at, ends_at: orig.ends_at },
-        next,
-      });
+  const pendingEventChanges: PendingEventChange[] = (reconciled?.changes ?? []).map((change) => ({
+    id: `change-${crypto.randomUUID()}`,
+    kind: change.kind,
+    event_id: change.event.id,
+    original: { title: change.event.title, starts_at: change.event.starts_at, ends_at: change.event.ends_at },
+    next: change.kind === "update" ? { ...change.next } : undefined,
+  }));
+
+  // Overlaps are refused at Save; say so on the card's line now.
+  const cardNotes: Record<string, string> = {};
+  for (const change of pendingEventChanges) {
+    if (change.kind !== "update" || !change.next?.starts_at || !change.next.ends_at) continue;
+    const conflicts = findConflicts({ starts_at: change.next.starts_at, ends_at: change.next.ends_at }, knownEvents, { ignoreId: change.event_id });
+    if (conflicts.length > 0) {
+      const names = conflicts.slice(0, 2).map((c) => `"${c.title}" (${fmtTime(c.starts_at, timeZone)}–${fmtTime(c.ends_at, timeZone)})`).join(", ");
+      cardNotes[change.id] = `Heads-up: the new time overlaps ${names}, so Save will be refused until you pick a free time.`;
     }
+  }
+  for (const event of pendingEvents) {
+    const conflicts = findConflicts(event, knownEvents);
+    if (conflicts.length > 0) cardNotes[event.id] = `overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`;
   }
 
   // 8. Email draft suggestion
@@ -639,7 +673,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     typeof rawEmailReply.message_id === "string" &&
     typeof rawEmailReply.body === "string"
   ) {
-    const messageId = rawEmailReply.message_id.replace(/^id:/, "").trim();
+    const messageId = rawEmailReply.message_id.replace(/^\[?\s*id\s*[:=]\s*/i, "").replace(/\]$/, "").trim();
     const orig =
       realEmails.find((mail) => mail.id === messageId) ??
       mockEmails.find((mail) => mail.id === messageId);
@@ -675,24 +709,26 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   if (alternatives) panel.alternatives = alternatives;
   if (emailDraft) panel.emailDraft = emailDraft;
 
-  // Ensure non-empty reply (some models return only structured fields)
-  let replyText = blockedCalendarActions
-    ? "I couldn't safely access your calendar, so I did not prepare any calendar changes. Please retry after reconnecting Google or checking the connector."
-    : String(parsed.reply ?? "").trim();
-  if (!replyText) {
-    if (pendingEventChanges.length > 0) {
-      replyText = pendingEventChanges.map(c => c.kind === "delete"
-        ? `I've proposed cancelling **${c.original.title}** — review it on the right and click Save to apply.`
-        : `I've proposed updating **${c.original.title}**${c.next?.starts_at && c.next?.ends_at ? ` to ${describeRange(c.next.starts_at, c.next.ends_at, timeZone)}` : ""}${c.next?.title ? ` (new title: **${c.next.title}**)` : ""}. Click Save to apply.`
-      ).join("\n");
-    } else if (pendingEvents.length > 0) {
-      const listed = pendingEvents
-        .map((event) => `- **${event.title}**: ${describeRange(event.starts_at, event.ends_at, timeZone)}`)
-        .join("\n");
-      replyText = `I've drafted ${pendingEvents.length} event${pendingEvents.length === 1 ? "" : "s"}:\n${listed}\nReview on the right and click Save to add to your calendar.`;
-    } else {
-      replyText = "Done.";
-    }
+  // The reply never contradicts the cards: internal ids and prompt template lines are removed,
+  // claims of finished actions are dropped, and with calendar cards the confirmation is written
+  // from the validated cards (for a move or cancel request, only from them). See reply-guard.
+  let replyText: string;
+  if (blockedCalendarActions) {
+    replyText = "I couldn't safely access your calendar, so I did not prepare any calendar changes. Please retry after reconnecting Google or checking the connector.";
+  } else if (data.briefing && isFirst) {
+    replyText = stripInternalMarkers(String(parsed.reply ?? "")) || "Here is your briefing.";
+  } else {
+    replyText = composeReply({
+      modelReply: String(parsed.reply ?? ""),
+      timeZone,
+      pendingEvents,
+      pendingEventChanges,
+      emailDraft,
+      changeRequest: reconciled?.changeRequest ?? false,
+      changeNote: reconciled?.note,
+      notes: cardNotes,
+      hasOtherCards: Boolean(insight || alternatives || priorities),
+    });
   }
 
   // 10. Persist assistant msg
@@ -731,25 +767,48 @@ function endOfDaysFromNow(days: number, timeZone = "UTC") {
   return zonedDateTimeToISO(date, { hour: 23, minute: 59, second: 59, millisecond: 999 }, timeZone);
 }
 
-function fmtDayLabel(iso: string, timeZone = "UTC") {
-  return new Date(iso).toLocaleDateString("en-US", {
-    timeZone,
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  });
+/** "Wednesday" for "2026-11-11". */
+function weekdayName(date: string) {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
 }
 function fmtTime(iso: string, timeZone = "UTC") {
   return formatTimeInZone(iso, timeZone);
 }
-/** "Wed, Nov 11, 4:00 PM – 5:30 PM" in the user's time zone (the end date only when it differs). */
-function describeRange(startsAt: string, endsAt: string, timeZone = "UTC") {
-  const day = (iso: string) =>
-    new Date(iso).toLocaleDateString("en-US", { timeZone, weekday: "short", month: "short", day: "numeric" });
-  const startDay = day(startsAt);
-  const endDay = day(endsAt);
-  return `${startDay}, ${fmtTime(startsAt, timeZone)} – ${endDay === startDay ? "" : `${endDay}, `}${fmtTime(endsAt, timeZone)}`;
-}
 function durationMinutes(startsAt: string, endsAt: string) {
   return Math.max(0, Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000));
+}
+
+/**
+ * The model's event_changes with ids resolved (a short id "E3", "[E3]", "event_id:E3" or the
+ * real id) and times read as local wall-clock time. Unknown ids and invalid entries are dropped.
+ */
+export function normalizeModelChanges(
+  value: unknown,
+  lookup: (ref: string) => KnownEvent | undefined,
+  timeZone: string,
+): ModelChange[] {
+  if (!Array.isArray(value)) return [];
+  const changes: ModelChange[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw) || (raw.kind !== "update" && raw.kind !== "delete") || typeof raw.event_id !== "string") continue;
+    const ref = raw.event_id.replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "").replace(/\]\s*$/, "").trim().toLowerCase();
+    const event = lookup(ref);
+    if (!event) continue; // a hallucinated id
+    if (raw.kind === "delete") {
+      changes.push({ kind: "delete", event });
+      continue;
+    }
+    const startsAt = typeof raw.starts_at === "string" ? parseUserDateTime(raw.starts_at, timeZone) ?? undefined : undefined;
+    const endsAt = typeof raw.ends_at === "string" ? parseUserDateTime(raw.ends_at, timeZone) ?? undefined : undefined;
+    const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 200) : "";
+    changes.push({
+      kind: "update",
+      event,
+      // A new start alone keeps the event's length.
+      starts_at: startsAt,
+      ends_at: endsAt ?? (startsAt ? new Date(toMs(startsAt) + toMs(event.ends_at) - toMs(event.starts_at)).toISOString() : undefined),
+      title: title && title !== event.title ? title : undefined,
+    });
+  }
+  return changes;
 }
