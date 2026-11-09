@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, Calendar as CalIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
+import { END_HOUR, firstHour, minutesOnDay, positionOnDay } from "@/lib/calendar-grid";
 
 export const Route = createFileRoute("/app/calendar")({
   component: CalendarPage,
@@ -20,9 +21,6 @@ interface Ev {
 }
 
 const HOUR_PX = 48; // height of one hour row
-const START_HOUR = 6; // 6 am
-const END_HOUR = 23; // 11 pm
-const HOURS = Array.from({ length: END_HOUR - START_HOUR + 1 }, (_, i) => i + START_HOUR);
 
 function startOfWeek(d: Date) {
   const x = new Date(d);
@@ -68,6 +66,9 @@ function CalendarPage() {
   }, [weekStart]);
 
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
+  // 06:00 to midnight, starting earlier when an event of this week does (an early event is never hidden).
+  const startHour = useMemo(() => firstHour(events, days), [events, days]);
+  const hours = useMemo(() => Array.from({ length: END_HOUR - startHour + 1 }, (_, i) => i + startHour), [startHour]);
   const today = new Date();
 
   const monthLabel = useMemo(() => {
@@ -135,7 +136,7 @@ function CalendarPage() {
           <div className="relative grid grid-cols-[56px_repeat(7,1fr)]">
             {/* Hour column */}
             <div>
-              {HOURS.map((h) => (
+              {hours.map((h) => (
                 <div key={h} style={{ height: HOUR_PX }} className="border-b border-border relative">
                   <span className="absolute -top-2 right-2 text-[10px] font-mono text-muted-foreground bg-card px-1">
                     {h === 12 ? "12 PM" : h > 12 ? `${h - 12} PM` : `${h} AM`}
@@ -146,22 +147,24 @@ function CalendarPage() {
 
             {/* Day columns */}
             {days.map((d) => {
-              const dayEvents = events.filter((e) => sameDay(new Date(e.starts_at), d));
+              // Every event that overlaps this day (one that runs past midnight shows on both days).
+              const dayEvents = events.filter((e) => minutesOnDay(e, d) !== null);
               const isToday = sameDay(d, today);
               return (
                 <div key={d.toISOString()} className="relative border-l border-border">
-                  {HOURS.map((h) => (
+                  {hours.map((h) => (
                     <div key={h} style={{ height: HOUR_PX }} className="border-b border-border" />
                   ))}
                   {/* Now line */}
-                  {isToday && <NowIndicator />}
+                  {isToday && <NowIndicator startHour={startHour} />}
                   {/* Events */}
                   {dayEvents.map((e) => {
-                    const pos = positionFor(e);
+                    const pos = positionOnDay(e, d, startHour, HOUR_PX);
                     if (!pos) return null;
                     return (
                       <div
                         key={e.id}
+                        data-testid="calendar-event"
                         className="absolute left-1 right-1 rounded-md px-2 py-1 overflow-hidden text-[11px] leading-tight cursor-pointer hover:shadow-md transition-shadow"
                         style={{
                           top: pos.top,
@@ -196,27 +199,14 @@ function CalendarPage() {
   );
 }
 
-function positionFor(e: Ev): { top: number; height: number } | null {
-  const start = new Date(e.starts_at);
-  const end = new Date(e.ends_at);
-  const startMin = start.getHours() * 60 + start.getMinutes();
-  const endMin = end.getHours() * 60 + end.getMinutes();
-  const gridStartMin = START_HOUR * 60;
-  const gridEndMin = (END_HOUR + 1) * 60;
-  if (endMin <= gridStartMin || startMin >= gridEndMin) return null;
-  const top = ((Math.max(startMin, gridStartMin) - gridStartMin) / 60) * HOUR_PX;
-  const height = Math.max(20, ((Math.min(endMin, gridEndMin) - Math.max(startMin, gridStartMin)) / 60) * HOUR_PX - 2);
-  return { top, height };
-}
-
-function NowIndicator() {
+function NowIndicator({ startHour }: { startHour: number }) {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 60_000);
     return () => clearInterval(t);
   }, []);
   const min = now.getHours() * 60 + now.getMinutes();
-  const gridStart = START_HOUR * 60;
+  const gridStart = startHour * 60;
   const gridEnd = (END_HOUR + 1) * 60;
   if (min < gridStart || min > gridEnd) return null;
   const top = ((min - gridStart) / 60) * HOUR_PX;
