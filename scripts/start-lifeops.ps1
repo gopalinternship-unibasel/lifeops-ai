@@ -123,8 +123,9 @@ if ($llmBase -match '(localhost|127\.0\.0\.1):11434') {
     $modelfile = Join-Path $root "ollama\$llmModel.Modelfile"
     if (-not $present -and (Test-Path $modelfile)) {
       # A local variant (for example qwen2.5-3b-4threads) is created from its Modelfile, not pulled.
+      $baseModel = (Get-Content $modelfile | Where-Object { $_ -match '^\s*FROM\s+(\S+)' } | Select-Object -First 1) -replace '^\s*FROM\s+', ''
       Write-Host "WARNING: Ollama is up but $llmModel is missing. Create it once (see the Modelfile):" -ForegroundColor Yellow
-      Write-Host "  docker exec cvfix-ollama ollama pull qwen2.5:3b" -ForegroundColor Yellow
+      Write-Host "  docker exec cvfix-ollama ollama pull $baseModel" -ForegroundColor Yellow
       Write-Host "  Get-Content ollama\$llmModel.Modelfile | docker exec -i cvfix-ollama sh -c `"cat > /tmp/Modelfile && ollama create $llmModel -f /tmp/Modelfile`"" -ForegroundColor Yellow
     } elseif (-not $present) {
       Write-Host "WARNING: Ollama is up but $llmModel is missing. Run: docker exec cvfix-ollama ollama pull $llmModel" -ForegroundColor Yellow

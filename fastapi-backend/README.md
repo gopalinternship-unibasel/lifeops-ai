@@ -41,7 +41,7 @@ Open:
 http://127.0.0.1:8010/docs
 ```
 
-Run the tests with `python -m pytest` (15 tests; they use a temporary SQLite file and a fake LLM).
+Run the tests with `python -m pytest` (18 tests; they use a temporary SQLite file and a fake LLM).
 
 ## Core demo flow
 

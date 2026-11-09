@@ -358,7 +358,7 @@ async function answerChatTurn(
   let unreadCount = 0;
   let calendarContextAvailable = true;
   let todayEvents: { id?: string; title: string; starts_at: string; ends_at: string; notes?: string | null }[] = [];
-  let upcomingEvents: { id?: string; title: string; starts_at: string; ends_at: string; notes?: string | null }[] = [];
+  let upcomingEvents: { id?: string; title: string; starts_at: string; ends_at: string; notes?: string | null; busy?: boolean }[] = [];
 
   if (googleConnected) {
     try {
@@ -384,7 +384,7 @@ async function answerChatTurn(
       const weekStart = startOfToday(timeZone);
       const weekEnd = endOfDaysFromNow(7, timeZone);
       const evs = await listCalendarEvents(userId, weekStart, weekEnd);
-      upcomingEvents = evs.map(e => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at, notes: e.notes }));
+      upcomingEvents = evs.map(e => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at, notes: e.notes, busy: e.busy }));
       const todayEndMs = toMs(endOfToday(timeZone));
       todayEvents = upcomingEvents.filter((e) => toMs(e.starts_at) <= todayEndMs);
     } catch (e) {
@@ -651,18 +651,20 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     next: change.kind === "update" ? { ...change.next } : undefined,
   }));
 
-  // Overlaps are refused at Save; say so on the card's line now.
+  // Overlaps are refused at Save; say so on the card's line now ("show as free" and all-day
+  // Google events do not block time, as at Save).
   const cardNotes: Record<string, string> = {};
+  const busyEvents = upcomingEvents.filter((e) => e.busy !== false);
   for (const change of pendingEventChanges) {
     if (change.kind !== "update" || !change.next?.starts_at || !change.next.ends_at) continue;
-    const conflicts = findConflicts({ starts_at: change.next.starts_at, ends_at: change.next.ends_at }, knownEvents, { ignoreId: change.event_id });
+    const conflicts = findConflicts({ starts_at: change.next.starts_at, ends_at: change.next.ends_at }, busyEvents, { ignoreId: change.event_id });
     if (conflicts.length > 0) {
       const names = conflicts.slice(0, 2).map((c) => `"${c.title}" (${fmtTime(c.starts_at, timeZone)}–${fmtTime(c.ends_at, timeZone)})`).join(", ");
       cardNotes[change.id] = `Heads-up: the new time overlaps ${names}, so Save will be refused until you pick a free time.`;
     }
   }
   for (const event of pendingEvents) {
-    const conflicts = findConflicts(event, knownEvents);
+    const conflicts = findConflicts(event, busyEvents);
     if (conflicts.length > 0) cardNotes[event.id] = `overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`;
   }
 
