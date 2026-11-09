@@ -1,0 +1,17 @@
+### Create a LifeOps plan
+POST http://localhost:8000/api/plan
+Content-Type: application/json
+
+{
+  "user_input": "I have exams next week, 2 assignments, and a meeting tomorrow",
+  "autonomous_mode": false
+}
+
+### Dashboard
+GET http://localhost:8000/api/dashboard
+
+### List actions
+GET http://localhost:8000/api/actions
+
+### Execute all safe actions
+POST http://localhost:8000/api/actions/execute-safe

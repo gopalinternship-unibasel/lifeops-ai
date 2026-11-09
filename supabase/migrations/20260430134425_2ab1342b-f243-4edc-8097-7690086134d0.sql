@@ -1,0 +1,2 @@
+CREATE POLICY "msgs_delete_own" ON public.chat_messages FOR DELETE TO public USING (auth.uid() = user_id);
+CREATE POLICY "sessions_delete_own" ON public.chat_sessions FOR DELETE TO public USING (auth.uid() = user_id);
