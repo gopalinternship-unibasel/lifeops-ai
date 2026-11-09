@@ -35,7 +35,9 @@ function PlanPage() {
   const timeZone = useMemo(() => getBrowserTimeZone(), []);
   const [plan, setPlan] = useState<WeekPlan | null>(null);
   const [busyEvents, setBusyEvents] = useState<BusyEvent[]>([]);
+  // Both come from the server (which plan items are in the calendar), so they survive a reload.
   const [approvedDates, setApprovedDates] = useState<Set<string>>(new Set());
+  const [addedItems, setAddedItems] = useState<Record<string, number[]>>({});
   const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState<string | null>(null);
@@ -56,14 +58,20 @@ function PlanPage() {
     lastWeekFetched.current = monday;
     setLoading(true);
     setApprovedDates(new Set());
+    setAddedItems({});
     fetchWeekPlan({ data: { weekStart: monday, timeZone } } as Parameters<typeof fetchWeekPlan>[0])
-      .then((r: Awaited<ReturnType<typeof fetchWeekPlan>>) => {
-        setPlan(r.plan ?? null);
-        setBusyEvents(r.busyEvents ?? []);
-      })
+      .then((r: Awaited<ReturnType<typeof fetchWeekPlan>>) => applyPlanState(r))
       .catch((error: unknown) => toast.error(getErrorMessage(error, "Failed to load plan")))
       .finally(() => setLoading(false));
   }, [monday, timeZone]);
+
+  /** Plan, calendar events and which items are already in the calendar, as the server sees them. */
+  function applyPlanState(r: { plan: WeekPlan | null; busyEvents?: BusyEvent[]; addedItems?: Record<string, number[]>; approvedDates?: string[] }) {
+    setPlan(r.plan ?? null);
+    setBusyEvents(r.busyEvents ?? []);
+    setAddedItems(r.addedItems ?? {});
+    setApprovedDates(new Set(r.approvedDates ?? []));
+  }
 
   const shiftWeek = (delta: number) => {
     const d = new Date(monday + "T00:00:00");
@@ -79,9 +87,7 @@ function PlanPage() {
           typeof generateWeekPlan
         >[0],
       );
-      setPlan(r.plan);
-      setBusyEvents(r.busyEvents ?? []);
-      setApprovedDates(new Set());
+      applyPlanState(r);
       setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Failed to generate plan"));
@@ -140,9 +146,7 @@ function PlanPage() {
           typeof refineWeekPlan
         >[0],
       );
-      setPlan(r.plan);
-      setBusyEvents(r.busyEvents ?? []);
-      setApprovedDates(new Set()); // re-approval needed after refinement
+      applyPlanState(r); // a refined plan's new items need approving again
       setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Failed to update plan"));
@@ -157,13 +161,11 @@ function PlanPage() {
       const r = await approveWeekPlan(
         { data: { weekStart: monday, dayDate } } as Parameters<typeof approveWeekPlan>[0],
       );
-      const targets = dayDate ? [dayDate] : (plan?.days.map(d => d.date) ?? []);
-      if (r.failed === 0 && r.conflicts === 0) {
-        setApprovedDates((prev) => {
-          const next = new Set(prev);
-          for (const date of targets) next.add(date);
-          return next;
-        });
+      // What is in the calendar now decides "Added", not this click (held-back or failed items stay open).
+      try {
+        applyPlanState(await fetchWeekPlan({ data: { weekStart: monday, timeZone } } as Parameters<typeof fetchWeekPlan>[0]));
+      } catch {
+        /* the toast below still reports the approval */
       }
       const niceDay = dayDate
         ? new Date(dayDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" })
@@ -261,6 +263,7 @@ function PlanPage() {
           plan={plan}
           busyEvents={busyEvents}
           approvedDates={approvedDates}
+          addedItems={addedItems}
           onApproveDay={(d) => approveDay(d)}
           approving={approving}
           onItemTimeChange={async (date, idx, starts_at, ends_at) => {

@@ -7,6 +7,8 @@ interface Props {
   plan: WeekPlan | null;
   busyEvents: BusyEvent[];
   approvedDates: Set<string>;
+  /** Per date: indexes of the items already in the calendar. */
+  addedItems?: Record<string, number[]>;
   onApproveDay: (date: string) => void;
   approving: string | null;
   onItemTimeChange?: (date: string, itemIndex: number, starts_at: string, ends_at: string) => Promise<void> | void;
@@ -14,7 +16,7 @@ interface Props {
 
 const FULL_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-export function PlanWeekGrid({ plan, busyEvents, approvedDates, onApproveDay, approving, onItemTimeChange }: Props) {
+export function PlanWeekGrid({ plan, busyEvents, approvedDates, addedItems, onApproveDay, approving, onItemTimeChange }: Props) {
   if (!plan) return null;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -25,6 +27,7 @@ export function PlanWeekGrid({ plan, busyEvents, approvedDates, onApproveDay, ap
           dayLabel={FULL_DAY_NAMES[i]}
           busy={busyEvents.filter(b => sameDay(b.starts_at, day.date))}
           approved={approvedDates.has(day.date)}
+          added={addedItems?.[day.date] ?? []}
           approving={approving === day.date}
           onApprove={() => onApproveDay(day.date)}
           onItemTimeChange={onItemTimeChange}
@@ -34,11 +37,12 @@ export function PlanWeekGrid({ plan, busyEvents, approvedDates, onApproveDay, ap
   );
 }
 
-function DayCard({ day, dayLabel, busy, approved, approving, onApprove, onItemTimeChange }: {
+function DayCard({ day, dayLabel, busy, approved, added, approving, onApprove, onItemTimeChange }: {
   day: WeekPlanDay;
   dayLabel: string;
   busy: BusyEvent[];
   approved: boolean;
+  added: number[];
   approving: boolean;
   onApprove: () => void;
   onItemTimeChange?: Props["onItemTimeChange"];
@@ -47,7 +51,7 @@ function DayCard({ day, dayLabel, busy, approved, approving, onApprove, onItemTi
   const subLabel = dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   return (
-    <div className="rounded-2xl bg-card border border-border/60 p-5 shadow-sm flex flex-col min-h-[260px]">
+    <div className="rounded-2xl bg-card border border-border/60 p-5 shadow-sm flex flex-col min-h-[260px]" data-testid="plan-day" data-date={day.date} data-approved={approved ? "true" : "false"}>
       <div className="flex items-start justify-between">
         <div>
           <div className="text-2xl font-serif tracking-tight text-foreground">{dayLabel}</div>
@@ -95,7 +99,8 @@ function DayCard({ day, dayLabel, busy, approved, approving, onApprove, onItemTi
           <PlanItemRow
             key={idx}
             item={it}
-            editable={!!onItemTimeChange && !approved}
+            added={added.includes(idx)}
+            editable={!!onItemTimeChange && !approved && !added.includes(idx)}
             onSave={async (s, e) => onItemTimeChange?.(day.date, idx, s, e)}
           />
         ))}
@@ -109,8 +114,9 @@ function DayCard({ day, dayLabel, busy, approved, approving, onApprove, onItemTi
   );
 }
 
-function PlanItemRow({ item, editable, onSave }: {
+function PlanItemRow({ item, added, editable, onSave }: {
   item: WeekPlanItem;
+  added: boolean;
   editable: boolean;
   onSave: (starts_at: string, ends_at: string) => Promise<void> | void;
 }) {
@@ -133,12 +139,17 @@ function PlanItemRow({ item, editable, onSave }: {
   };
 
   return (
-    <li className="group flex items-start gap-2.5">
+    <li className="group flex items-start gap-2.5" data-testid="plan-item" data-added={added ? "true" : "false"}>
       <span className="text-base leading-none mt-0.5">{item.emoji}</span>
       <div className="flex-1 min-w-0">
         <div className="text-[13px] text-foreground truncate flex items-center gap-1.5">
           <span className="text-muted-foreground">●</span>
           <span className="truncate">{item.title}</span>
+          {added && (
+            <span className="inline-flex items-center gap-0.5 text-[10px] font-mono uppercase text-emerald-600 dark:text-emerald-400 shrink-0" title="In your calendar">
+              <Check className="h-3 w-3" /> in calendar
+            </span>
+          )}
           {editable && !editing && (
             <button
               onClick={() => setEditing(true)}

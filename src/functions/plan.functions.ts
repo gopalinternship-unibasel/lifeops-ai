@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { planCalendarState, planItemEventTitle } from "@/lib/plan-state";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
@@ -404,8 +405,9 @@ export const generateWeekPlan = createServerFn({ method: "POST" })
     }, { onConflict: "user_id,week_start" });
     if (savePlanError) throw savePlanError;
 
-    const busyEvents: BusyEvent[] = events;
-    return { reply, plan, busyEvents };
+    // Items already in the calendar (approved before) are shown as such, not twice.
+    const state = planCalendarState(plan, events, Date.now());
+    return { reply, plan, busyEvents: state.otherEvents, addedItems: state.addedItems, approvedDates: state.approvedDates };
   });
 
 /* ============================================================
@@ -429,11 +431,17 @@ export const fetchWeekPlan = createServerFn({ method: "POST" })
       .eq("week_start", monday)
       .maybeSingle();
     if (planReadError) throw planReadError;
+    const plan = (row?.payload as unknown as WeekPlan | null) ?? null;
+    // Which items are in the calendar already: after a reload the page shows them once, marked,
+    // and the days whose items are all there as "Added" (see lib/plan-state.ts).
+    const state = planCalendarState(plan, events as BusyEvent[], Date.now());
     return {
       monday,
-      plan: (row?.payload as unknown as WeekPlan | null) ?? null,
+      plan,
       approvedEventIds: (row?.approved_event_ids as string[] | null) ?? [],
-      busyEvents: events as BusyEvent[],
+      busyEvents: state.otherEvents,
+      addedItems: state.addedItems,
+      approvedDates: state.approvedDates,
     };
   });
 
@@ -478,7 +486,8 @@ export const refineWeekPlan = createServerFn({ method: "POST" })
     }, { onConflict: "user_id,week_start" });
     if (savePlanError) throw savePlanError;
 
-    return { reply, plan, busyEvents: events as BusyEvent[] };
+    const state = planCalendarState(plan, events as BusyEvent[], Date.now());
+    return { reply, plan, busyEvents: state.otherEvents, addedItems: state.addedItems, approvedDates: state.approvedDates };
   });
 
 /* ============================================================
@@ -618,7 +627,7 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
             continue;
           }
           const input = {
-            title: `${item.emoji} ${item.title}`.trim(),
+            title: planItemEventTitle(item),
             starts_at: item.starts_at,
             ends_at: item.ends_at,
             notes: item.notes ?? null,
