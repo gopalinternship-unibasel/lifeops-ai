@@ -168,7 +168,9 @@ function Workspace() {
 
     setPending(true);
     try {
-      const { reply, panel } = await processChat({ data: { sessionId: targetSid, message: text, timeZone: getBrowserTimeZone() } });
+      const { reply, panel } = await processChat({
+        data: { sessionId: targetSid, message: text, timeZone: getBrowserTimeZone(), briefing: opts.briefing },
+      });
       setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: reply }]);
       applyPanel(panel);
     } catch (err: unknown) {

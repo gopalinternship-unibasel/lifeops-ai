@@ -6,6 +6,7 @@ import type { Json } from "@/integrations/supabase/types";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, type AITool } from "@/server/ai/llm.server";
+import { buildRuleBasedBriefing } from "@/server/ai/briefing-fallback.server";
 import {
   listRecentMessages,
   listUnreadMessages,
@@ -258,6 +259,8 @@ const ProcessChatInput = z.object({
   sessionId: z.string().uuid(),
   message: z.string().min(1).max(4000),
   timeZone: z.string().max(100).optional(),
+  /** The workspace's automatic first-visit briefing; it gets a rule-based answer if the model fails. */
+  briefing: z.boolean().optional(),
 });
 
 export const processChat = createServerFn({ method: "POST" })
@@ -426,19 +429,38 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       ...recentHistory,
     ];
 
-    const aiResp = await callAI({
-      role: "chat",
-      messages: messagesPayload,
-      tools: [TOOL],
-      toolChoice: { type: "function", function: { name: "respond" } },
-    });
-
-    const choice = aiResp.choices?.[0];
-    const toolCall = choice?.message?.tool_calls?.[0];
-    const parsed = parseRespondPayload(
-      toolCall?.function?.arguments,
-      choice?.message?.content ?? "I'm not sure how to handle that.",
-    );
+    const isFirst = !history || history.length <= 1;
+    let parsed: RawRespondPayload;
+    let ruleBased = false;
+    try {
+      const aiResp = await callAI({
+        role: "chat",
+        messages: messagesPayload,
+        tools: [TOOL],
+        toolChoice: { type: "function", function: { name: "respond" } },
+      });
+      const choice = aiResp.choices?.[0];
+      const toolCall = choice?.message?.tool_calls?.[0];
+      parsed = parseRespondPayload(
+        toolCall?.function?.arguments,
+        choice?.message?.content ?? "I'm not sure how to handle that.",
+      );
+    } catch (error: unknown) {
+      // Only the automatic first-visit briefing degrades to a rule-based answer (inbox, today,
+      // priorities by rule, all labelled as such); every other request reports the failure.
+      if (!(data.briefing && isFirst)) throw error;
+      console.error("Briefing: the AI model failed; using the rule-based briefing", getErrorMessage(error));
+      ruleBased = true;
+      parsed = buildRuleBasedBriefing({
+        emails: googleConnected
+          ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+          : mockEmails,
+        unreadCount: googleConnected ? unreadCount : demoUnreadCount,
+        todayEvents,
+        timeZone,
+        reason: getErrorMessage(error, "no answer"),
+      });
+    }
 
     const normalizedPriorities = normalizePriorities(parsed.priorities);
     const attemptedProposedEvents = normalizeProposedEvents(parsed.proposed_events, timeZone);
@@ -469,7 +491,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
           title: priority.title,
           priority_rank: priority.rank,
           reason: priority.reason,
-          source: "chat",
+          source: ruleBased ? "rules" : "chat",
         })),
       );
       if (insertTasksError) throw insertTasksError;
@@ -549,7 +571,6 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     }
 
     // 9. Build panel
-    const isFirst = !history || history.length <= 1;
     const panel: PanelPayload = {};
     if (isFirst) {
       panel.inbox = {
