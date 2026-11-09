@@ -1,0 +1,86 @@
+import { describe, expect, it } from "vitest";
+import { replyStateOf } from "@/lib/reply-state";
+import { planRequestView } from "@/lib/plan-request";
+import { isFailedTurn, maxChatTurnMs } from "@/server/chat-turn.server";
+
+const now = Date.parse("2026-11-09T18:00:00Z");
+const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
+const FIFTEEN_MIN = 15 * 60_000;
+
+describe("reply state of a chat history (a reloaded page knows whether an answer is coming)", () => {
+  it("is 'awaiting' while the last message is the user's and younger than the longest turn", () => {
+    const state = replyStateOf(
+      [{ role: "user", created_at: at(10) }],
+      now,
+      FIFTEEN_MIN,
+    );
+    expect(state).toEqual({ kind: "awaiting", since: at(10), remainingMs: 5 * 60_000 });
+  });
+
+  it("is 'answered' when an assistant message (answer or failed turn) comes last, or there is none", () => {
+    expect(replyStateOf([], now, FIFTEEN_MIN)).toEqual({ kind: "answered" });
+    expect(
+      replyStateOf([{ role: "user", created_at: at(20) }, { role: "assistant", created_at: at(5) }], now, FIFTEEN_MIN),
+    ).toEqual({ kind: "answered" });
+  });
+
+  it("is 'interrupted' when the user's message is older than a turn can take (no answer will come)", () => {
+    expect(replyStateOf([{ role: "user", created_at: at(16) }], now, FIFTEEN_MIN)).toEqual({
+      kind: "interrupted",
+      since: at(16),
+    });
+  });
+
+  it("a turn may take the model timeout (twice with a fallback model) plus two minutes", () => {
+    expect(maxChatTurnMs({ LLM_TIMEOUT_MS: "900000", LLM_BASE_URL: "http://localhost:11434/v1" })).toBe(900_000 + 120_000);
+    expect(maxChatTurnMs({ LLM_TIMEOUT_MS: "900000", HUGGINGFACE_API_KEY: "hf_test" })).toBe(2 * 900_000 + 120_000);
+  });
+
+  it("failed turns are recognised by their panel marker", () => {
+    expect(isFailedTurn({ role: "assistant", panel_payload: { failed: true } })).toBe(true);
+    expect(isFailedTurn({ role: "assistant", panel_payload: { priorities: [] } })).toBe(false);
+    expect(isFailedTurn({ role: "user", panel_payload: { failed: true } })).toBe(false);
+    expect(isFailedTurn({ role: "assistant", panel_payload: null })).toBe(false);
+  });
+});
+
+describe("stored plan requests (the dashboard's 'Plan it' survives a reload)", () => {
+  const row = {
+    id: "r1",
+    input: "Gym tomorrow at 6 pm and call mom.",
+    status: "running",
+    result: null,
+    error: null,
+    created_at: at(3),
+    finished_at: null,
+  };
+
+  it("a running request younger than the limit is still running; older, it was cut off", () => {
+    expect(planRequestView(row, now, FIFTEEN_MIN).status).toBe("running");
+    expect(planRequestView({ ...row, created_at: at(30) }, now, FIFTEEN_MIN).status).toBe("interrupted");
+  });
+
+  it("a finished request carries its result; a failed one its error", () => {
+    const done = planRequestView(
+      {
+        ...row,
+        status: "done",
+        finished_at: at(1),
+        result: { mode: "service", summary: "2 tasks", planner: "llm", note: null, tasks: 2, actions: 1 },
+      },
+      now,
+      FIFTEEN_MIN,
+    );
+    expect(done).toMatchObject({ status: "done", finishedAt: at(1), result: { mode: "service", summary: "2 tasks", tasks: 2, actions: 1 } });
+
+    const inApp = planRequestView(
+      { ...row, status: "done", result: { mode: "in-app", reason: "offline", reply: "Done.", panel: { priorities: [] } } },
+      now,
+      FIFTEEN_MIN,
+    );
+    expect(inApp.result).toEqual({ mode: "in-app", reason: "offline", reply: "Done.", panel: { priorities: [] } });
+
+    const failed = planRequestView({ ...row, status: "failed", error: "Planner service: boom" }, now, FIFTEEN_MIN);
+    expect(failed).toMatchObject({ status: "failed", error: "Planner service: boom", result: null });
+  });
+});

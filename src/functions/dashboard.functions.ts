@@ -2,7 +2,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import type { Database, Json } from "@/integrations/supabase/types";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getErrorMessage } from "@/lib/errors";
+import { withoutHandledCards } from "@/lib/panel-state";
+import { planRequestView, type PlanRequestResult, type PlanRequestView } from "@/lib/plan-request";
+import { cardIdsOfPanel, listCardStates } from "@/server/chat-cards.server";
+import { ensureChatSessionFor, maxChatTurnMs, runChatTurn } from "@/server/chat-turn.server";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
@@ -18,6 +25,7 @@ import { createCalendarBlock, isGoogleConnected, saveNewDraft } from "@/server/w
 import {
   backend,
   BackendUnavailableError,
+  planTimeoutMs,
   type BackendAction,
   type BackendDashboard,
   type BackendPlanResponse,
@@ -25,6 +33,36 @@ import {
 import type { WeekPlan } from "@/types/plan";
 
 const TimeZoneInput = z.object({ timeZone: z.string().max(100).optional() });
+
+/** The longest a "Plan it" request can take: the planner service, then the in-app assistant. */
+function maxPlanRequestMs(): number {
+  return planTimeoutMs() + maxChatTurnMs() + 60_000;
+}
+
+/**
+ * The user's newest "Plan it" request as the page shows it; an in-app answer comes without the
+ * cards the user already saved or dismissed.
+ */
+async function latestPlanRequest(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+): Promise<PlanRequestView | null> {
+  const { data: row, error } = await supabase
+    .from("planner_requests")
+    .select("id, input, status, result, error, created_at, finished_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) return null;
+  const view = planRequestView(row, Date.now(), maxPlanRequestMs());
+  if (view.result?.mode === "in-app") {
+    const states = await listCardStates(supabase, userId, cardIdsOfPanel(view.result.panel));
+    view.result = { ...view.result, panel: withoutHandledCards(view.result.panel, states) };
+  }
+  return view;
+}
 
 /** The user's current wall-clock time, e.g. "2026-11-09T08:30:00" (no offset). */
 function localNow(timeZone: string): string {
@@ -61,13 +99,14 @@ export const fetchDashboard = createServerFn({ method: "POST" })
       calendarError = getErrorMessage(error, "Calendar unavailable");
     }
 
-    const [tasksResult, planResult, draftsResult, draftCountResult, messageCountResult, demoResult] = await Promise.all([
+    const [tasksResult, planResult, draftsResult, draftCountResult, messageCountResult, demoResult, planRequest] = await Promise.all([
       supabase.from("tasks").select("title, priority_rank, reason").eq("user_id", userId).order("priority_rank", { ascending: true }),
       supabase.from("weekly_plans").select("payload, approved_event_ids").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
       supabase.from("email_drafts").select("to_address, subject, provider, created_at").eq("user_id", userId).order("created_at", { ascending: false }).limit(3),
       supabase.from("email_drafts").select("id", { count: "exact", head: true }).eq("user_id", userId),
       supabase.from("chat_messages").select("id", { count: "exact", head: true }).eq("user_id", userId),
       supabase.from("connector_status").select("id").eq("user_id", userId).eq("provider", "demo").maybeSingle(),
+      latestPlanRequest(supabase, userId),
     ]);
     for (const result of [tasksResult, planResult, draftsResult, draftCountResult, messageCountResult, demoResult]) {
       if (result.error) throw result.error;
@@ -104,36 +143,84 @@ export const fetchDashboard = createServerFn({ method: "POST" })
         chatMessages: messageCountResult.count ?? 0,
       },
       planner,
+      planRequest,
     };
   });
 
+/** The newest "Plan it" request only: the page polls it while a request is still running. */
+export const fetchPlanRequest = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => ({ request: await latestPlanRequest(context.supabase, context.userId) }));
+
 /* ============================================================
  * runChaosPlan — messy input → planner service (FastAPI)
- * When the service is down the client falls back to the in-app
- * assistant (processChat), which extracts priorities and proposals.
+ * When the service is down, the in-app assistant (the workspace chat turn) does the same job:
+ * priorities and proposals. Both run to the end on the server and the result is stored in
+ * planner_requests, so a page reloaded meanwhile shows "Planning…" again and then the result.
  * ============================================================ */
 export const runChaosPlan = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => parseInput(z.object({ input: z.string().trim().min(3).max(4000), timeZone: z.string().max(100).optional() }), d))
-  .handler(
-    async ({
-      context,
-      data,
-    }): Promise<{ mode: "service"; result: BackendPlanResponse } | { mode: "offline"; reason: string }> => {
-      const timeZone = normalizeTimeZone(data.timeZone);
+  .handler(async ({ context, data }): Promise<{ request: PlanRequestView }> => {
+    const { supabase, userId } = context;
+    const timeZone = normalizeTimeZone(data.timeZone);
+    const { data: row, error: insertError } = await supabase
+      .from("planner_requests")
+      .insert({ user_id: userId, input: data.input, status: "running" })
+      .select("id, input, status, result, error, created_at, finished_at")
+      .single();
+    if (insertError) throw insertError;
+
+    // The answer can take longer than the rest of the browser's access token (1 hour) on a slow
+    // local model: the final update uses the service-role client, scoped to this user's row.
+    const finish = async (update: { status: "done" | "failed"; result?: PlanRequestResult; error?: string }) => {
+      const { data: finished, error } = await supabaseAdmin
+        .from("planner_requests")
+        .update({
+          status: update.status,
+          result: (update.result ?? null) as unknown as Json,
+          error: update.error ?? null,
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", row.id)
+        .eq("user_id", userId)
+        .select("id, input, status, result, error, created_at, finished_at")
+        .single();
+      if (error) throw error;
+      return planRequestView(finished, Date.now(), maxPlanRequestMs());
+    };
+
+    let result: PlanRequestResult;
+    try {
       try {
-        const result = await backend.plan(context.userId, {
+        const plan = await backend.plan(userId, {
           user_input: data.input,
           current_datetime: localNow(timeZone),
           timezone: timeZone,
         });
-        return { mode: "service", result };
+        result = {
+          mode: "service",
+          summary: plan.summary,
+          planner: plan.planner,
+          note: plan.planner_note,
+          tasks: plan.tasks_created,
+          actions: plan.actions_created,
+        };
       } catch (error: unknown) {
-        if (error instanceof BackendUnavailableError) return { mode: "offline", reason: error.message };
-        throw error;
+        if (!(error instanceof BackendUnavailableError)) throw error;
+        // Planner service down: the in-app assistant extracts priorities and proposals instead.
+        const { sessionId } = await ensureChatSessionFor(supabase, userId);
+        const chat = await runChatTurn(context, { sessionId, message: data.input, timeZone });
+        result = { mode: "in-app", reason: error.message, reply: chat.reply, panel: chat.panel };
       }
-    },
-  );
+    } catch (error: unknown) {
+      await finish({ status: "failed", error: getErrorMessage(error, "Planning failed") }).catch((e: unknown) =>
+        console.error("Could not store the failed plan request", e),
+      );
+      throw error;
+    }
+    return { request: await finish({ status: "done", result }) };
+  });
 
 /* ============================================================
  * Approval gate for planner actions

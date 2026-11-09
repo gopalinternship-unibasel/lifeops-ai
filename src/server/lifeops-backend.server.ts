@@ -82,7 +82,7 @@ export function backendBaseUrl(env: Record<string, string | undefined> = process
   return (raw || "http://127.0.0.1:8010").replace(/\/+$/, "");
 }
 
-function planTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+export function planTimeoutMs(env: Record<string, string | undefined> = process.env): number {
   const explicit = Number.parseInt(env.LIFEOPS_BACKEND_TIMEOUT_MS ?? "", 10);
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
   // The service may wait for the same LLM the app uses; allow the LLM timeout plus headroom.

@@ -1,16 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Bot, Calendar, Check, CheckCircle2, CircleSlash, Inbox, ListChecks, Loader2, Mail, MessageSquare, Play, ShieldCheck,
   Sparkles, X,
 } from "lucide-react";
 import {
-  completeBackendTask, decideBackendAction, executeBackendAction, fetchDashboard, runChaosPlan,
+  completeBackendTask, decideBackendAction, executeBackendAction, fetchDashboard, fetchPlanRequest, runChaosPlan,
 } from "@/functions/dashboard.functions";
-import { dismissChatCard, ensureChatSession, processChat } from "@/functions/chat.functions";
+import { dismissChatCard } from "@/functions/chat.functions";
 import { EmailDraftCard, PendingEventCard } from "@/components/workspace/ContextPanel";
-import type { PanelPayload } from "@/types/panel";
+import type { PlanRequestView } from "@/lib/plan-request";
 import { getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
 
@@ -22,6 +22,9 @@ type DashboardData = Awaited<ReturnType<typeof fetchDashboard>>;
 type PlannerData = Extract<DashboardData["planner"], { online: true }>["data"];
 type PlannerAction = PlannerData["actions"][number];
 
+/** How often the page asks whether a plan that is still running (from before a reload) is done. */
+const PLAN_POLL_MS = 5000;
+
 const EXAMPLE =
   "Exams next week, two assignments due Friday, a meeting tomorrow I might need to move, and I keep forgetting to call the bank.";
 
@@ -30,19 +33,21 @@ function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState("");
+  // This page's own "Plan it" call is running.
   const [planning, setPlanning] = useState(false);
-  const [planResult, setPlanResult] = useState<
-    | { mode: "service"; summary: string; planner: string; note: string | null; tasks: number; actions: number }
-    | { mode: "in-app"; reason: string; reply: string; panel: PanelPayload }
-    | null
-  >(null);
+  // The newest plan request as stored on the server: its result survives a reload, and a request
+  // that is still running (started before a reload, or in another tab) shows as "Planning…".
+  const [request, setRequest] = useState<PlanRequestView | null>(null);
+  const planPoll = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [busyAction, setBusyAction] = useState<number | null>(null);
   // Fallback cards (in-app assistant) the user saved or dismissed on this page.
   const [handledCards, setHandledCards] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
-      setData(await fetchDashboard({ data: { timeZone } }));
+      const next = await fetchDashboard({ data: { timeZone } });
+      setData(next);
+      setRequest(next.planRequest);
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, "Could not load the dashboard"));
     } finally {
@@ -54,31 +59,45 @@ function DashboardPage() {
     void refresh();
   }, [refresh]);
 
+  // A request that runs on the server without this page waiting for it: check until it is done.
+  const serverRunning = request?.status === "running" && !planning;
+  useEffect(() => {
+    if (!serverRunning) return;
+    let stopped = false;
+    const check = async () => {
+      try {
+        const { request: latest } = await fetchPlanRequest();
+        if (stopped) return;
+        if (latest?.status === "running") {
+          planPoll.current = setTimeout(check, PLAN_POLL_MS);
+          return;
+        }
+        setRequest(latest);
+        await refresh();
+      } catch {
+        if (!stopped) planPoll.current = setTimeout(check, PLAN_POLL_MS * 3);
+      }
+    };
+    planPoll.current = setTimeout(check, PLAN_POLL_MS);
+    return () => {
+      stopped = true;
+      if (planPoll.current) clearTimeout(planPoll.current);
+    };
+  }, [serverRunning, refresh]);
+
   async function plan() {
     const text = input.trim();
-    if (text.length < 3 || planning) return;
+    if (text.length < 3 || planning || serverRunning) return;
     setPlanning(true);
-    setPlanResult(null);
+    setRequest({ id: "pending", input: text, status: "running", startedAt: new Date().toISOString(), finishedAt: null, result: null, error: null });
     try {
-      const r = await runChaosPlan({ data: { input: text, timeZone } });
-      if (r.mode === "service") {
-        setPlanResult({
-          mode: "service",
-          summary: r.result.summary,
-          planner: r.result.planner,
-          note: r.result.planner_note,
-          tasks: r.result.tasks_created,
-          actions: r.result.actions_created,
-        });
-      } else {
-        // Planner service down: the in-app assistant does the same job (priorities + proposals).
-        const { sessionId } = await ensureChatSession();
-        const chat = await processChat({ data: { sessionId, message: text, timeZone } });
-        setPlanResult({ mode: "in-app", reason: r.reason, reply: chat.reply, panel: chat.panel });
-      }
+      // The planner service, or the in-app assistant when the service is down (both on the server).
+      const { request: done } = await runChaosPlan({ data: { input: text, timeZone } });
+      setRequest(done);
       setInput("");
       await refresh();
     } catch (error: unknown) {
+      void refresh();
       toast.error(getErrorMessage(error, "Planning failed"));
     } finally {
       setPlanning(false);
@@ -126,6 +145,8 @@ function DashboardPage() {
   }
 
   const ws = data.workspace;
+  const busy = planning || serverRunning;
+  const planResult = request?.status === "done" ? request.result : null;
   const planner = data.planner.online ? data.planner.data : null;
   const actions = planner ? [...planner.actions].sort((a, b) => statusOrder(a.status) - statusOrder(b.status) || b.id - a.id) : [];
   const executed = actions.filter((a) => a.status === "executed");
@@ -172,14 +193,31 @@ function DashboardPage() {
               <button
                 type="button"
                 onClick={plan}
-                disabled={planning || input.trim().length < 3}
+                disabled={busy || input.trim().length < 3}
                 data-testid="chaos-submit"
                 className="inline-flex items-center gap-2 rounded-md bg-gradient-brand px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60"
               >
-                {planning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {planning ? "Planning… (a local model can take a few minutes)" : "Plan it"}
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {busy ? "Planning… (a local model can take a few minutes)" : "Plan it"}
               </button>
             </div>
+
+            {serverRunning && request && (
+              <div className="mt-4 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground" data-testid="plan-running">
+                <Loader2 className="inline h-3 w-3 animate-spin mr-1" />
+                Still planning “{shorten(request.input, 120)}” (started {fmtClock(request.startedAt)}). The result appears here when it is ready.
+              </div>
+            )}
+            {request?.status === "failed" && !busy && (
+              <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800" data-testid="plan-failed">
+                Planning “{shorten(request.input, 80)}” failed: {request.error}
+              </div>
+            )}
+            {request?.status === "interrupted" && !busy && (
+              <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900" data-testid="plan-interrupted">
+                The plan for “{shorten(request.input, 80)}” (started {fmtClock(request.startedAt)}) did not finish: the request was cut off, for example by a server restart. Plan it again.
+              </div>
+            )}
 
             {planResult?.mode === "service" && (
               <div className="mt-4 rounded-md border border-border bg-muted/40 p-3 text-sm" data-testid="plan-result">
@@ -187,6 +225,7 @@ function DashboardPage() {
                 <div className="mt-1 text-xs text-muted-foreground">
                   {planResult.tasks} tasks and {planResult.actions} proposed actions ·{" "}
                   {planResult.planner === "llm" ? "planned by the AI model" : "keyword planner (no model answer)"}
+                  {request?.finishedAt ? ` · ${fmtClock(request.finishedAt)}` : ""}
                 </div>
                 {planResult.note && <div className="mt-1 text-xs text-amber-800">{planResult.note}</div>}
               </div>
@@ -371,6 +410,15 @@ function DashboardPage() {
       </div>
     </div>
   );
+}
+
+function shorten(text: string, max: number) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function fmtClock(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function statusOrder(status: string) {

@@ -8,6 +8,8 @@ import { dismissChatCard, ensureChatSession, fetchSessionHistory, processChat, f
 import { getGoogleConnectionStatus } from "@/functions/google.functions";
 import type { PanelPayload, PriorityRow, ScheduleBlock, PendingEvent, PendingEventChange, InsightCard, InboxSummary, EmailDraftSuggestion } from "@/types/panel";
 import { isToday, mergeUnique, withoutHandledCards } from "@/lib/panel-state";
+import { INTERRUPTED_NOTE, type ReplyState } from "@/lib/reply-state";
+import type { CardState } from "@/types/panel";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
 import { getBrowserTimeZone } from "@/lib/date";
@@ -18,6 +20,11 @@ export const Route = createFileRoute("/app/")({
 });
 
 type Tab = "priorities" | "schedule" | "insights";
+
+/** How often a reloaded page asks whether the answer to the last message is stored yet. */
+const REPLY_POLL_MS = 4000;
+
+type HistoryMessage = Awaited<ReturnType<typeof fetchSessionHistory>>["messages"][number];
 
 function Workspace() {
   const { user } = useAuth();
@@ -35,6 +42,63 @@ function Workspace() {
   const [emailDraft, setEmailDraft] = useState<EmailDraftSuggestion | undefined>();
   const [activeTab, setActiveTab] = useState<Tab>("priorities");
   const bootstrapped = useRef(false);
+  // Messages whose panel is already on screen, and the timer of the wait for a pending answer.
+  const appliedMessageIds = useRef<Set<string>>(new Set());
+  const replyPoll = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [waitingForEarlierReply, setWaitingForEarlierReply] = useState(false);
+
+  useEffect(() => () => {
+    if (replyPoll.current) clearTimeout(replyPoll.current);
+  }, []);
+
+  /**
+   * Show the stored history: every message, plus a note when the last one was cut off, and the
+   * panel of every assistant message not shown yet (minus the cards the user already handled).
+   */
+  function showHistory(hist: HistoryMessage[], cardStates: Record<string, CardState>, replyState: ReplyState) {
+    const turns: ChatTurn[] = hist.map((message) => ({
+      id: message.id,
+      role: message.role as ChatTurn["role"],
+      content: message.content,
+    }));
+    if (replyState.kind === "interrupted") {
+      turns.push({ id: `interrupted-${replyState.since}`, role: "assistant", content: INTERRUPTED_NOTE });
+    }
+    setMessages(turns);
+    for (const m of hist) {
+      if (appliedMessageIds.current.has(m.id)) continue;
+      appliedMessageIds.current.add(m.id);
+      if (m.role === "assistant" && m.panel_payload) {
+        applyPanel(withoutHandledCards(m.panel_payload as unknown as PanelPayload, cardStates));
+      }
+    }
+  }
+
+  /**
+   * The last message is still being answered on the server (this page was reloaded, or opened in
+   * another tab, while the request ran): show "Thinking…" and check every few seconds until
+   * the answer, or the stored error, is there.
+   */
+  function waitForStoredReply(sid: string) {
+    setPending(true);
+    setWaitingForEarlierReply(true);
+    const check = async () => {
+      try {
+        const { messages: hist, cardStates, replyState } = await fetchSessionHistory({ data: { sessionId: sid } });
+        if (replyState.kind === "awaiting") {
+          replyPoll.current = setTimeout(check, REPLY_POLL_MS);
+          return;
+        }
+        showHistory(hist, cardStates, replyState);
+        setPending(false);
+        setWaitingForEarlierReply(false);
+      } catch {
+        // For example the dev server restarting: ask again a little later.
+        replyPoll.current = setTimeout(check, REPLY_POLL_MS * 3);
+      }
+    };
+    replyPoll.current = setTimeout(check, REPLY_POLL_MS);
+  }
 
   useEffect(() => {
     if (!user || bootstrapped.current) return;
@@ -66,21 +130,14 @@ function Workspace() {
           })));
         } catch (e) { /* ignore */ }
 
-        const { messages: hist, cardStates } = await fetchSessionHistory({ data: { sessionId: sid } });
-        const turns: ChatTurn[] = hist.map((message) => ({
-          id: message.id,
-          role: message.role as ChatTurn["role"],
-          content: message.content,
-        }));
-        setMessages(turns);
-        // Rebuild the panel from the history, minus every card the user already saved,
-        // applied or dismissed (stored on the server, so it holds across reloads and devices).
-        for (const m of hist) {
-          if (m.role === "assistant" && m.panel_payload) {
-            applyPanel(withoutHandledCards(m.panel_payload as unknown as PanelPayload, cardStates));
-          }
-        }
-        if (hist.length === 0) {
+        const { messages: hist, cardStates, replyState } = await fetchSessionHistory({ data: { sessionId: sid } });
+        // Rebuild the chat and the panel from the history, minus every card the user already
+        // saved, applied or dismissed (stored on the server, so it holds across reloads and devices).
+        showHistory(hist, cardStates, replyState);
+        if (replyState.kind === "awaiting") {
+          // A request from before the reload (the first-visit briefing, say) is still running.
+          waitForStoredReply(sid);
+        } else if (hist.length === 0) {
           await sendMessage("Please check all my emails and messages.", sid, { briefing: true });
         }
       } catch (err: unknown) {
@@ -186,7 +243,11 @@ function Workspace() {
   return (
     <div className="h-[calc(100vh-3.5rem)] grid grid-cols-1 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
       <section className="flex flex-col min-h-0 border-r border-border">
-        <ChatThread messages={messages} pending={pending} />
+        <ChatThread
+          messages={messages}
+          pending={pending}
+          pendingNote={waitingForEarlierReply ? "Still answering your last message. The answer appears here when it is ready." : undefined}
+        />
         <ChatComposer onSend={(t) => sendMessage(t)} busy={pending} showSuggestions={messages.length <= 2} />
       </section>
       <ContextPanel

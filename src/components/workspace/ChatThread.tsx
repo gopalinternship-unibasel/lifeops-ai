@@ -9,7 +9,16 @@ export interface ChatTurn {
   content: string;
 }
 
-export function ChatThread({ messages, pending }: { messages: ChatTurn[]; pending: boolean }) {
+export function ChatThread({
+  messages,
+  pending,
+  pendingNote,
+}: {
+  messages: ChatTurn[];
+  pending: boolean;
+  /** Shown under "Thinking…" (for example when a reloaded page waits for an earlier request). */
+  pendingNote?: string;
+}) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -64,6 +73,7 @@ export function ChatThread({ messages, pending }: { messages: ChatTurn[]; pendin
             <div className="bg-card border border-border rounded-lg px-4 py-3 inline-flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               <span>Thinking…</span>
+              {pendingNote && <span className="text-xs" data-testid="chat-pending-note">{pendingNote}</span>}
             </div>
           </div>
         )}
