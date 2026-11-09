@@ -34,6 +34,23 @@ function longLlmRequests(): Plugin {
 export default defineConfig({
   vite: {
     plugins: [longLlmRequests()],
+    // With an empty dependency cache (a fresh install) Vite found these TanStack Start internals
+    // only when the first page loaded, bundled them and then reloaded every open page
+    // ("optimized dependencies changed. reloading"), which cut off the first-visit briefing in
+    // the browser. They are imported by @tanstack/react-start and @tanstack/react-router, which
+    // TanStack Start keeps out of pre-bundling, so the start-up scan cannot see them. Bundle
+    // them at start-up instead.
+    optimizeDeps: {
+      include: [
+        "@tanstack/router-core",
+        "@tanstack/router-core/isServer",
+        "@tanstack/router-core/ssr/client",
+        "@tanstack/router-core/ssr/server",
+        "@tanstack/history",
+        "seroval",
+        "h3-v2",
+      ],
+    },
     server: {
       host: "localhost",
       port,
