@@ -21,11 +21,17 @@ interface Props {
   activeTab: Tab;
   onTabChange: (t: Tab) => void;
   onPendingSaved: (id: string, ev: ScheduleBlock) => void;
-  onPendingDismiss: (id: string) => void;
+  onPendingDismiss: DismissHandler;
   onPendingChangeApplied: (id: string, change: PendingEventChange) => void;
-  onPendingChangeDismiss: (id: string) => void;
-  onDraftSaved: (draftId: string) => void;
+  onPendingChangeDismiss: DismissHandler;
+  onDraftSaved: (draftId: string, body: string) => void;
 }
+
+/**
+ * Remove a card from the panel. `remember: false` when the server already has a state for it
+ * (saved elsewhere, or dismissed), so nothing new needs to be stored.
+ */
+export type DismissHandler = (id: string, opts?: { remember?: boolean }) => void;
 
 export function ContextPanel({
   inbox, priorities, schedule, pendingEvents, pendingEventChanges, insights, alternatives, emailDraft,
@@ -140,9 +146,9 @@ function ScheduleView({
   pendingEvents: PendingEvent[];
   pendingEventChanges: PendingEventChange[];
   onPendingSaved: (id: string, ev: ScheduleBlock) => void;
-  onPendingDismiss: (id: string) => void;
+  onPendingDismiss: DismissHandler;
   onPendingChangeApplied: (id: string, change: PendingEventChange) => void;
-  onPendingChangeDismiss: (id: string) => void;
+  onPendingChangeDismiss: DismissHandler;
 }) {
   const sorted = [...schedule].sort((a, b) => a.starts_at.localeCompare(b.starts_at));
   return (
@@ -186,27 +192,34 @@ function ScheduleView({
   );
 }
 
-function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEventChange; onApplied: (id: string, c: PendingEventChange) => void; onDismiss: (id: string) => void }) {
+function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEventChange; onApplied: (id: string, c: PendingEventChange) => void; onDismiss: DismissHandler }) {
   const [busy, setBusy] = useState(false);
   const isDelete = change.kind === "delete";
   async function apply() {
     setBusy(true);
     try {
-      if (isDelete) {
-        const r = await removeCalendarEvent({ data: { eventId: change.event_id } });
-        if (!r.ok) { toast.error(r.error ?? "Could not cancel event"); setBusy(false); return; }
-        toast.success("Event cancelled");
-      } else {
-        const r = await updateCalendarEvent({ data: {
-          eventId: change.event_id,
-          title: change.next?.title,
-          starts_at: change.next?.starts_at,
-          ends_at: change.next?.ends_at,
-          timeZone: getBrowserTimeZone(),
-        } });
-        if (!r.ok) { toast.error(r.error ?? "Could not update event"); setBusy(false); return; }
-        toast.success("Event updated");
+      const r = isDelete
+        ? await removeCalendarEvent({ data: { eventId: change.event_id, cardId: change.id } })
+        : await updateCalendarEvent({ data: {
+            cardId: change.id,
+            eventId: change.event_id,
+            title: change.next?.title,
+            starts_at: change.next?.starts_at,
+            ends_at: change.next?.ends_at,
+            timeZone: getBrowserTimeZone(),
+          } });
+      if (r.alreadyHandled) {
+        // Handled before (another tab, or before a reload): just take the card away.
+        toast.info(r.error ?? "This change was already handled.");
+        onDismiss(change.id, { remember: false });
+        return;
       }
+      if (!r.ok) {
+        toast.error(r.error ?? (isDelete ? "Could not cancel event" : "Could not update event"));
+        setBusy(false);
+        return;
+      }
+      toast.success(isDelete ? "Event cancelled" : "Event updated");
       onApplied(change.id, change);
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Failed"));
@@ -243,12 +256,17 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
   );
 }
 
-export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent; onSaved: (id: string, ev: ScheduleBlock) => void; onDismiss: (id: string) => void }) {
+export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent; onSaved: (id: string, ev: ScheduleBlock) => void; onDismiss: DismissHandler }) {
   const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
     try {
-      const r = await saveCalendarEvent({ data: { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes ?? undefined, timeZone: getBrowserTimeZone() } });
+      const r = await saveCalendarEvent({ data: { cardId: ev.id, title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes ?? undefined, timeZone: getBrowserTimeZone() } });
+      if (r.alreadyHandled) {
+        toast.info(r.error ?? "This proposal was already handled.");
+        onDismiss(ev.id, { remember: false });
+        return;
+      }
       if (!r.ok) { toast.error(r.error ?? "Save failed"); setBusy(false); return; }
       toast.success("Added to your calendar");
       onSaved(ev.id, { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes });
@@ -272,7 +290,7 @@ export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent;
   );
 }
 
-function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { insights: InsightCard[]; alternatives?: { title: string; bullets: string[] }; emailDraft?: EmailDraftSuggestion; onDraftSaved: (draftId: string) => void }) {
+function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { insights: InsightCard[]; alternatives?: { title: string; bullets: string[] }; emailDraft?: EmailDraftSuggestion; onDraftSaved: (draftId: string, body: string) => void }) {
   if (insights.length === 0 && !alternatives && !emailDraft) {
     return (
       <div className="text-center py-12">
@@ -284,7 +302,7 @@ function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { in
   }
   return (
     <div className="space-y-4">
-      {emailDraft && <EmailDraftCard draft={emailDraft} onSaved={onDraftSaved} />}
+      {emailDraft && <EmailDraftCard key={emailDraft.id ?? emailDraft.messageId} draft={emailDraft} onSaved={onDraftSaved} />}
       {insights.map((card, i) => (
         <div key={`${card.kind}-${i}`} className="rounded-lg border border-border bg-card overflow-hidden">
           <div className="px-4 py-2.5 border-b border-border flex items-center gap-2" style={{ background: "var(--gradient-brand-soft)" }}>
@@ -319,7 +337,7 @@ function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { in
   );
 }
 
-export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSaved: (draftId: string) => void }) {
+export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion; onSaved: (draftId: string, body: string) => void }) {
   const [body, setBody] = useState(draft.body);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(!!draft.saved);
@@ -327,11 +345,16 @@ export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion
   async function saveDraft() {
     setBusy(true);
     try {
-      const r = await saveGmailDraft({ data: { messageId: draft.messageId, replyBody: body } });
-      if (!r.ok || !r.draft) { toast.error(r.error ?? "Could not save draft"); setBusy(false); return; }
+      const r = await saveGmailDraft({ data: { cardId: draft.id, messageId: draft.messageId, replyBody: body } });
+      if (r.alreadyHandled) {
+        toast.info(r.error ?? "This reply is already saved as a draft.");
+        setSaved(true);
+        return;
+      }
+      if (!r.ok || !r.draft) { toast.error(r.error ?? "Could not save draft"); return; }
       toast.success(r.draft.provider === "gmail" ? "Draft saved to Gmail (not sent)" : "Draft saved to the demo mailbox (not sent)");
       setSaved(true);
-      onSaved(r.draft.draftId);
+      onSaved(r.draft.draftId, body);
     } catch (e: unknown) { toast.error(getErrorMessage(e, "Failed")); }
     finally { setBusy(false); }
   }

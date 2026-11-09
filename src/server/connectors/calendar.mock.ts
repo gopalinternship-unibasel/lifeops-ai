@@ -175,10 +175,15 @@ export async function deleteEvent(
   userId: string,
   eventId: string,
 ): Promise<void> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("calendar_events")
     .delete()
     .eq("id", eventId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .select("id");
   if (error) throw error;
+  // Deleting nothing is not a success: the event was already cancelled (or never existed).
+  if (!data || data.length === 0) {
+    throw new Error("This event is no longer in your calendar (already cancelled?).");
+  }
 }

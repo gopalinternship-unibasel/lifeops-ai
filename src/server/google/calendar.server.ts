@@ -126,7 +126,12 @@ export async function deleteCalendarEvent(userId: string, eventId: string): Prom
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: googleApiSignal(),
   });
-  if (!res.ok && res.status !== 410 && res.status !== 404) {
+  // 404/410: the event is gone already. Say so instead of reporting a cancellation that
+  // did not happen (the demo calendar does the same).
+  if (res.status === 404 || res.status === 410) {
+    throw new Error("This event is no longer in your calendar (already cancelled?).");
+  }
+  if (!res.ok) {
     throw new Error(`Calendar delete failed: ${res.status} ${await res.text()}`);
   }
 }

@@ -15,6 +15,8 @@ export interface InsightCard {
   bullets: string[];
 }
 export interface EmailDraftSuggestion {
+  /** Card id ("draft-..."); older stored drafts get `draft-<chat message id>` when loaded. */
+  id?: string;
   messageId: string;
   to: string;
   subject: string;
@@ -39,4 +41,14 @@ export interface PanelPayload {
   insight?: InsightCard;
   alternatives?: { title: string; bullets: string[] };
   emailDraft?: EmailDraftSuggestion;
+}
+
+/** What the user did with a card (see chat_card_actions). */
+export type CardStatus = "saved" | "applied" | "dismissed";
+export interface CardState {
+  status: CardStatus;
+  /** Calendar event id or draft id the action produced. */
+  resultId: string | null;
+  /** For a saved reply draft: the body as it was saved (the user may have edited it). */
+  savedBody?: string;
 }

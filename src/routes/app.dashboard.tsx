@@ -8,7 +8,7 @@ import {
 import {
   completeBackendTask, decideBackendAction, executeBackendAction, fetchDashboard, runChaosPlan,
 } from "@/functions/dashboard.functions";
-import { ensureChatSession, processChat } from "@/functions/chat.functions";
+import { dismissChatCard, ensureChatSession, processChat } from "@/functions/chat.functions";
 import { EmailDraftCard, PendingEventCard } from "@/components/workspace/ContextPanel";
 import type { PanelPayload } from "@/types/panel";
 import { getBrowserTimeZone } from "@/lib/date";
@@ -37,6 +37,8 @@ function DashboardPage() {
     | null
   >(null);
   const [busyAction, setBusyAction] = useState<number | null>(null);
+  // Fallback cards (in-app assistant) the user saved or dismissed on this page.
+  const [handledCards, setHandledCards] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -195,10 +197,31 @@ function DashboardPage() {
                   {planResult.reason} The in-app assistant handled it instead.
                 </div>
                 <div className="rounded-md border border-border bg-muted/40 p-3 text-sm whitespace-pre-wrap">{planResult.reply}</div>
-                {(planResult.panel.pendingEvents ?? []).map((ev) => (
-                  <PendingEventCard key={ev.id} ev={ev} onSaved={() => void refresh()} onDismiss={() => undefined} />
+                {(planResult.panel.pendingEvents ?? []).filter((ev) => !handledCards.has(ev.id)).map((ev) => (
+                  <PendingEventCard
+                    key={ev.id}
+                    ev={ev}
+                    onSaved={(id) => {
+                      setHandledCards((prev) => new Set(prev).add(id));
+                      void refresh();
+                    }}
+                    onDismiss={(id, opts) => {
+                      setHandledCards((prev) => new Set(prev).add(id));
+                      if (opts?.remember !== false) {
+                        dismissChatCard({ data: { cardId: id } }).catch((error: unknown) =>
+                          toast.error(getErrorMessage(error, "Could not remember the dismissal")),
+                        );
+                      }
+                    }}
+                  />
                 ))}
-                {planResult.panel.emailDraft && <EmailDraftCard draft={planResult.panel.emailDraft} onSaved={() => void refresh()} />}
+                {planResult.panel.emailDraft && (
+                  <EmailDraftCard
+                    key={planResult.panel.emailDraft.id ?? planResult.panel.emailDraft.messageId}
+                    draft={planResult.panel.emailDraft}
+                    onSaved={() => void refresh()}
+                  />
+                )}
               </div>
             )}
           </Card>

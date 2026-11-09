@@ -4,9 +4,10 @@ import { useAuth } from "@/lib/auth-context";
 import { ChatThread, type ChatTurn } from "@/components/workspace/ChatThread";
 import { ChatComposer } from "@/components/workspace/ChatComposer";
 import { ContextPanel } from "@/components/workspace/ContextPanel";
-import { ensureChatSession, fetchSessionHistory, processChat, fetchCalendar } from "@/functions/chat.functions";
+import { dismissChatCard, ensureChatSession, fetchSessionHistory, processChat, fetchCalendar } from "@/functions/chat.functions";
 import { getGoogleConnectionStatus } from "@/functions/google.functions";
 import type { PanelPayload, PriorityRow, ScheduleBlock, PendingEvent, PendingEventChange, InsightCard, InboxSummary, EmailDraftSuggestion } from "@/types/panel";
+import { isToday, mergeUnique, withoutHandledCards } from "@/lib/panel-state";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
 import { getBrowserTimeZone } from "@/lib/date";
@@ -65,18 +66,22 @@ function Workspace() {
           })));
         } catch (e) { /* ignore */ }
 
-        const { messages: hist } = await fetchSessionHistory({ data: { sessionId: sid } });
+        const { messages: hist, cardStates } = await fetchSessionHistory({ data: { sessionId: sid } });
         const turns: ChatTurn[] = hist.map((message) => ({
           id: message.id,
           role: message.role as ChatTurn["role"],
           content: message.content,
         }));
         setMessages(turns);
+        // Rebuild the panel from the history, minus every card the user already saved,
+        // applied or dismissed (stored on the server, so it holds across reloads and devices).
         for (const m of hist) {
-          if (m.role === "assistant" && m.panel_payload) applyPanel(m.panel_payload as PanelPayload);
+          if (m.role === "assistant" && m.panel_payload) {
+            applyPanel(withoutHandledCards(m.panel_payload as unknown as PanelPayload, cardStates));
+          }
         }
         if (hist.length === 0) {
-          await sendMessage("Please check all my emails and messages.", sid);
+          await sendMessage("Please check all my emails and messages.", sid, { briefing: true });
         }
       } catch (err: unknown) {
         toast.error(getErrorMessage(err, "Failed to load workspace"));
@@ -91,8 +96,9 @@ function Workspace() {
       setPriorities(panel.priorities);
       setActiveTab("priorities");
     }
-    if (panel.newEvents?.length) {
-      setSchedule((previous) => mergeUnique(previous, panel.newEvents ?? []));
+    const newToday = (panel.newEvents ?? []).filter((block) => isToday(block));
+    if (newToday.length) {
+      setSchedule((previous) => mergeUnique(previous, newToday));
       setActiveTab("schedule");
     }
     if (panel.pendingEvents?.length) {
@@ -127,7 +133,14 @@ function Workspace() {
     }
   }
 
-  async function sendMessage(text: string, sid?: string) {
+  /** Remember a dismissal on the server; the card is already gone from the panel. */
+  function rememberDismissal(cardId: string) {
+    dismissChatCard({ data: { cardId } }).catch((err: unknown) =>
+      toast.error(getErrorMessage(err, "Could not remember the dismissal")),
+    );
+  }
+
+  async function sendMessage(text: string, sid?: string, opts: { briefing?: boolean } = {}) {
     const targetSid = sid ?? sessionId;
     if (!targetSid) return;
     const userTurn: ChatTurn = { id: `tmp-${Date.now()}`, role: "user", content: text };
@@ -187,28 +200,38 @@ function Workspace() {
         onTabChange={setActiveTab}
         onPendingSaved={(id, ev) => {
           setPendingEvents((prev) => prev.filter((p) => p.id !== id));
-          setSchedule((prev) => mergeUnique(prev, [ev]));
+          // "Today's schedule" lists today only; an event saved for another day is in the calendar.
+          if (isToday(ev)) setSchedule((prev) => mergeUnique(prev, [ev]));
         }}
-        onPendingDismiss={(id) => setPendingEvents((prev) => prev.filter((p) => p.id !== id))}
+        onPendingDismiss={(id, opts) => {
+          setPendingEvents((prev) => prev.filter((p) => p.id !== id));
+          if (opts?.remember !== false) rememberDismissal(id);
+        }}
         onPendingChangeApplied={(id, change) => {
           setPendingEventChanges((prev) => prev.filter((p) => p.id !== id));
+          const isOriginal = (s: ScheduleBlock) =>
+            s.title === change.original.title && Date.parse(s.starts_at) === Date.parse(change.original.starts_at);
           if (change.kind === "delete") {
-            setSchedule((prev) => prev.filter((s) => !(s.title === change.original.title && s.starts_at === change.original.starts_at)));
+            setSchedule((prev) => prev.filter((s) => !isOriginal(s)));
           } else {
-            setSchedule((prev) => prev.map((s) =>
-              s.title === change.original.title && s.starts_at === change.original.starts_at
-                ? {
-                    title: change.next?.title ?? s.title,
-                    starts_at: change.next?.starts_at ?? s.starts_at,
-                    ends_at: change.next?.ends_at ?? s.ends_at,
-                    notes: s.notes,
-                  }
-                : s
-            ));
+            const moved: ScheduleBlock = {
+              title: change.next?.title ?? change.original.title,
+              starts_at: change.next?.starts_at ?? change.original.starts_at,
+              ends_at: change.next?.ends_at ?? change.original.ends_at,
+            };
+            setSchedule((prev) => {
+              const notes = prev.find(isOriginal)?.notes;
+              const rest = prev.filter((s) => !isOriginal(s));
+              // Moved to another day: it leaves today's list; moved into today: it joins it.
+              return isToday(moved) ? mergeUnique(rest, [{ ...moved, notes }]) : rest;
+            });
           }
         }}
-        onPendingChangeDismiss={(id) => setPendingEventChanges((prev) => prev.filter((p) => p.id !== id))}
-        onDraftSaved={() => setEmailDraft((d) => d ? { ...d, saved: true } : d)}
+        onPendingChangeDismiss={(id, opts) => {
+          setPendingEventChanges((prev) => prev.filter((p) => p.id !== id));
+          if (opts?.remember !== false) rememberDismissal(id);
+        }}
+        onDraftSaved={(_draftId, body) => setEmailDraft((d) => d ? { ...d, saved: true, body } : d)}
       />
     </div>
   );
@@ -248,8 +271,3 @@ function normalizeAlternatives(
   return { title: value.title, bullets: normalizeStringArray(value.bullets) };
 }
 
-function mergeUnique(prev: ScheduleBlock[], next: ScheduleBlock[]): ScheduleBlock[] {
-  const map = new Map<string, ScheduleBlock>();
-  for (const b of [...prev, ...next]) map.set(`${b.title}|${b.starts_at}`, b);
-  return Array.from(map.values());
-}

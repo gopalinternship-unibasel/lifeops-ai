@@ -26,13 +26,24 @@ import {
   isGoogleConnected,
   saveReplyDraft,
 } from "@/server/workspace.server";
+import { claimCard, recordCardResult, releaseCard } from "@/server/chat-cards.server";
 
 const IsoDateTime = z.string().refine(
   (value) => Number.isFinite(new Date(value).getTime()),
   "Expected a valid ISO date-time",
 );
 
+/** Id of the workspace card the request comes from (see chat_card_actions). Optional. */
+const CardId = z.string().min(1).max(100).optional();
+
+const ALREADY_HANDLED: Record<string, string> = {
+  saved: "This proposal was already saved.",
+  applied: "This change was already applied.",
+  dismissed: "This proposal was dismissed.",
+};
+
 const CalendarEventSchema = z.object({
+  cardId: CardId,
   title: z.string().trim().min(1).max(200),
   starts_at: IsoDateTime,
   ends_at: IsoDateTime,
@@ -49,6 +60,7 @@ const CalendarEventSchema = z.object({
 });
 
 const CalendarEventUpdateSchema = z.object({
+  cardId: CardId,
   eventId: z.string().min(1),
   title: z.string().trim().min(1).max(200).optional(),
   starts_at: IsoDateTime.optional(),
@@ -185,8 +197,16 @@ export const listMyCalendar = createServerFn({ method: "POST" })
 
 export const saveCalendarEvent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => CalendarEventSchema.parse(d))
+  .validator((d) => parseInput(CalendarEventSchema, d))
   .handler(async ({ context, data }) => {
+    // A card is saved once: a second click, a second tab or a reloaded page gets a clear
+    // answer instead of a second event (or a conflict with the first one).
+    if (data.cardId) {
+      const claim = await claimCard(context.supabase, context.userId, data.cardId, "saved");
+      if (!claim.claimed) {
+        return { ok: false, event: null, alreadyHandled: true, error: ALREADY_HANDLED[claim.existing.status] };
+      }
+    }
     try {
       // Approval gate: this only runs when the user clicks Save on a proposal.
       // createCalendarBlock refuses times that overlap an existing event.
@@ -202,16 +222,24 @@ export const saveCalendarEvent = createServerFn({ method: "POST" })
         source: "chat",
         timeZone: data.timeZone,
       });
-      return { ok: true, event: ev, error: null };
+      if (data.cardId) await recordCardResult(context.supabase, context.userId, data.cardId, ev.id);
+      return { ok: true, event: ev, alreadyHandled: false, error: null };
     } catch (e: unknown) {
-      return { ok: false, event: null, error: String(getErrorMessage(e)) };
+      if (data.cardId) await releaseCard(context.supabase, context.userId, data.cardId);
+      return { ok: false, event: null, alreadyHandled: false, error: String(getErrorMessage(e)) };
     }
   });
 
 export const updateCalendarEvent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => CalendarEventUpdateSchema.parse(d))
+  .validator((d) => parseInput(CalendarEventUpdateSchema, d))
   .handler(async ({ context, data }) => {
+    if (data.cardId) {
+      const claim = await claimCard(context.supabase, context.userId, data.cardId, "applied");
+      if (!claim.claimed) {
+        return { ok: false, event: null, alreadyHandled: true, error: ALREADY_HANDLED[claim.existing.status] };
+      }
+    }
     try {
       const connected = await isGoogleConnected(context.userId);
       const patch = {
@@ -237,23 +265,34 @@ export const updateCalendarEvent = createServerFn({ method: "POST" })
       const ev = connected
         ? await patchCalendarEvent(context.userId, data.eventId, patch)
         : await updateMockCalendarEvent(context.supabase, context.userId, data.eventId, patch);
-      return { ok: true, event: ev, error: null };
+      if (data.cardId) await recordCardResult(context.supabase, context.userId, data.cardId, data.eventId);
+      return { ok: true, event: ev, alreadyHandled: false, error: null };
     } catch (e: unknown) {
-      return { ok: false, event: null, error: String(getErrorMessage(e)) };
+      if (data.cardId) await releaseCard(context.supabase, context.userId, data.cardId);
+      return { ok: false, event: null, alreadyHandled: false, error: String(getErrorMessage(e)) };
     }
   });
 
 export const removeCalendarEvent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({ eventId: z.string().min(1) }).parse(d))
+  .validator((d) => parseInput(z.object({ eventId: z.string().min(1), cardId: CardId }), d))
   .handler(async ({ context, data }) => {
+    if (data.cardId) {
+      const claim = await claimCard(context.supabase, context.userId, data.cardId, "applied");
+      if (!claim.claimed) {
+        return { ok: false, alreadyHandled: true, error: ALREADY_HANDLED[claim.existing.status] };
+      }
+    }
     try {
       const connected = await isGoogleConnected(context.userId);
+      // Both throw when the event does not exist (already cancelled, or never there).
       if (connected) await deleteCalendarEvent(context.userId, data.eventId);
       else await deleteMockCalendarEvent(context.supabase, context.userId, data.eventId);
-      return { ok: true, error: null };
+      if (data.cardId) await recordCardResult(context.supabase, context.userId, data.cardId, data.eventId);
+      return { ok: true, alreadyHandled: false, error: null };
     } catch (e: unknown) {
-      return { ok: false, error: String(getErrorMessage(e)) };
+      if (data.cardId) await releaseCard(context.supabase, context.userId, data.cardId);
+      return { ok: false, alreadyHandled: false, error: String(getErrorMessage(e)) };
     }
   });
 
@@ -275,7 +314,7 @@ export const listMyGmail = createServerFn({ method: "GET" })
 /** Generate a suggested reply (NOT sent). If `save=true`, also create a Gmail draft. */
 export const draftReplySuggestion = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => z.object({
+  .validator((d) => parseInput(z.object({
     messageId: z.string().min(1),
     instruction: z.string().max(500).optional(),
     save: z.boolean().optional(),
@@ -339,10 +378,26 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
 export const saveGmailDraft = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => parseInput(z.object({
+    cardId: CardId,
     messageId: z.string().min(1),
     replyBody: z.string().trim().min(1).max(10000),
-  }).parse(d))
+  }), d))
   .handler(async ({ context, data }) => {
+    // One draft per reply card: saving the same card again does not add a second draft.
+    if (data.cardId) {
+      const claim = await claimCard(context.supabase, context.userId, data.cardId, "saved");
+      if (!claim.claimed) {
+        return {
+          ok: false,
+          alreadyHandled: true,
+          error:
+            claim.existing.status === "saved"
+              ? "This reply is already saved as a draft (not sent)."
+              : ALREADY_HANDLED[claim.existing.status],
+          draft: null,
+        };
+      }
+    }
     try {
       const draft = await saveReplyDraft({
         supabase: context.supabase,
@@ -350,8 +405,10 @@ export const saveGmailDraft = createServerFn({ method: "POST" })
         messageId: data.messageId,
         replyBody: data.replyBody,
       });
-      return { ok: true, error: null, draft };
+      if (data.cardId) await recordCardResult(context.supabase, context.userId, data.cardId, draft.draftId);
+      return { ok: true, alreadyHandled: false, error: null, draft };
     } catch (e: unknown) {
-      return { ok: false, error: `Draft save failed: ${getErrorMessage(e)}`, draft: null };
+      if (data.cardId) await releaseCard(context.supabase, context.userId, data.cardId);
+      return { ok: false, alreadyHandled: false, error: `Draft save failed: ${getErrorMessage(e)}`, draft: null };
     }
   });

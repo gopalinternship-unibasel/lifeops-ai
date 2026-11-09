@@ -3,7 +3,8 @@
   Starts the whole LifeOps AI (MONDAY) stack on this PC.
 
 .DESCRIPTION
-  1. Local Supabase (Docker) on ports 55320-55329 with the migrations in supabase/migrations.
+  1. Local Supabase (Docker) on ports 55320-55329 with the migrations in supabase/migrations
+     (new migrations are applied to an existing database too).
   2. Writes .env.local and fastapi-backend/.env from `supabase status` (no secrets printed).
   3. Installs npm packages and the FastAPI virtualenv on first run.
   4. Creates the local test user (.local-test-user.json) if it does not exist.
@@ -57,6 +58,10 @@ Push-Location $root
 try {
   & $supabase start --ignore-health-check
   if ($LASTEXITCODE -ne 0) { Fail "supabase start failed (exit $LASTEXITCODE)." }
+  # `supabase start` runs the migrations only when it creates the database. On an existing
+  # database (data kept by `supabase stop`) apply the ones added since; a no-op when none are.
+  & $supabase migration up
+  if ($LASTEXITCODE -ne 0) { Fail "supabase migration up failed (exit $LASTEXITCODE)." }
 } finally { Pop-Location }
 
 Step "Writing .env.local and fastapi-backend\.env"

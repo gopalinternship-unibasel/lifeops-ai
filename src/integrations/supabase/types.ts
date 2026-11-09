@@ -50,6 +50,30 @@ export type Database = {
         }
         Relationships: []
       }
+      chat_card_actions: {
+        Row: {
+          card_id: string
+          created_at: string
+          result_id: string | null
+          status: string
+          user_id: string
+        }
+        Insert: {
+          card_id: string
+          created_at?: string
+          result_id?: string | null
+          status: string
+          user_id: string
+        }
+        Update: {
+          card_id?: string
+          created_at?: string
+          result_id?: string | null
+          status?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       chat_messages: {
         Row: {
           content: string

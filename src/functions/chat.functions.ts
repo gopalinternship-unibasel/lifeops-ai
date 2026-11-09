@@ -22,45 +22,31 @@ import {
   zonedDateTimeToISO,
 } from "@/server/timezone.server";
 import { parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
+import { cardIdsOfPanel, listCardStates, withDraftCardId } from "@/server/chat-cards.server";
+import type {
+  CardState,
+  EmailDraftSuggestion,
+  InsightCard,
+  PanelPayload,
+  PendingEvent,
+  PendingEventChange,
+  PriorityRow,
+  ScheduleBlock,
+} from "@/types/panel";
 
 /* ============================================================
- * Types
+ * Types (shared with the client)
  * ============================================================ */
-export interface PriorityRow { rank: number; title: string; reason: string; }
-export interface ScheduleBlock { title: string; starts_at: string; ends_at: string; notes?: string | null; }
-export interface PendingEvent extends ScheduleBlock { id: string; }
-export interface PendingEventChange {
-  id: string;
-  kind: "update" | "delete";
-  event_id: string;
-  // For update: new fields (any subset). Original snapshot for the UI.
-  original: { title: string; starts_at: string; ends_at: string };
-  next?: { title?: string; starts_at?: string; ends_at?: string; notes?: string | null };
-}
-export interface InsightCard {
-  kind: "workout" | "meal" | "meeting_prep" | "summary";
-  title: string;
-  bullets: string[];
-}
-export interface InboxSummary {
-  emails: { id?: string; from: string; subject: string; snippet: string; importance?: "high" | "medium" | "low"; unread?: boolean }[];
-  todayEvents: { title: string; starts_at: string; ends_at: string }[];
-  unreadCount?: number;
-}
-export interface EmailDraftSuggestion {
-  messageId: string; to: string; subject: string; body: string;
-  saved?: boolean; draftId?: string | null;
-}
-export interface PanelPayload {
-  inbox?: InboxSummary;
-  priorities?: PriorityRow[];
-  newEvents?: ScheduleBlock[];
-  pendingEvents?: PendingEvent[];
-  pendingEventChanges?: PendingEventChange[];
-  insight?: InsightCard;
-  alternatives?: { title: string; bullets: string[] };
-  emailDraft?: EmailDraftSuggestion;
-}
+export type {
+  PriorityRow,
+  ScheduleBlock,
+  PendingEvent,
+  PendingEventChange,
+  InsightCard,
+  InboxSummary,
+  EmailDraftSuggestion,
+  PanelPayload,
+} from "@/types/panel";
 
 /* ============================================================
  * LLM tool schema
@@ -490,8 +476,10 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     }
 
     // 7. Pending (proposed) events — never auto-saved
-    const pendingEvents: PendingEvent[] = proposedEvents.map((event, index) => ({
-      id: `pending-${Date.now()}-${index}`,
+    // Card ids are stored with the message; chat_card_actions records what the user did
+    // with each card, so a reload does not offer a handled card again.
+    const pendingEvents: PendingEvent[] = proposedEvents.map((event) => ({
+      id: `pending-${crypto.randomUUID()}`,
       ...event,
     }));
 
@@ -526,7 +514,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
           if (!next.title && !next.starts_at && !next.ends_at) continue;
         }
         pendingEventChanges.push({
-          id: `change-${Date.now()}-${i}`,
+          id: `change-${crypto.randomUUID()}`,
           kind: c.kind,
           event_id: String(c.event_id),
           original: { title: orig.title, starts_at: orig.starts_at, ends_at: orig.ends_at },
@@ -549,6 +537,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       const body = rawEmailReply.body.trim().slice(0, 10000);
       if (orig && body) {
         emailDraft = {
+          id: `draft-${crypto.randomUUID()}`,
           messageId: orig.id,
           to: orig.from,
           subject: orig.subject,
@@ -636,7 +625,33 @@ export const fetchSessionHistory = createServerFn({ method: "POST" })
       .eq("user_id", userId)
       .order("created_at", { ascending: true });
     if (messagesError) throw messagesError;
-    return { messages: msgs ?? [] };
+    const messages = (msgs ?? []).map((message) =>
+      message.panel_payload
+        ? { ...message, panel_payload: (withDraftCardId(message.panel_payload, message.id) ?? message.panel_payload) as Json }
+        : message,
+    );
+    const cardIds = messages.flatMap((message) =>
+      message.role === "assistant" && message.panel_payload
+        ? cardIdsOfPanel(message.panel_payload as unknown as PanelPayload)
+        : [],
+    );
+    const cardStates: Record<string, CardState> = await listCardStates(supabase, userId, cardIds);
+    return { messages, cardStates };
+  });
+
+/** The user dismissed a proposal card: remember it so a reload does not show it again. */
+export const dismissChatCard = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d) => parseInput(z.object({ cardId: z.string().min(1).max(100) }), d))
+  .handler(async ({ data, context }) => {
+    const { error } = await context.supabase
+      .from("chat_card_actions")
+      .upsert(
+        { user_id: context.userId, card_id: data.cardId, status: "dismissed" },
+        { onConflict: "user_id,card_id", ignoreDuplicates: true },
+      );
+    if (error) throw error;
+    return { ok: true };
   });
 
 /**
@@ -658,6 +673,12 @@ export const clearChatHistory = createServerFn({ method: "POST" })
       .delete()
       .eq("user_id", userId);
     if (sessionDeleteError) throw sessionDeleteError;
+
+    const { error: cardDeleteError } = await supabase
+      .from("chat_card_actions")
+      .delete()
+      .eq("user_id", userId);
+    if (cardDeleteError) throw cardDeleteError;
     return { ok: true };
   });
 
