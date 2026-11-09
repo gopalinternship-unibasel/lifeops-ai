@@ -237,11 +237,11 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
       <div className="text-sm font-medium leading-snug truncate">{change.next?.title ?? change.original.title}</div>
       <div className="mt-1 space-y-0.5 text-[11px]">
         <div className="text-muted-foreground line-through">
-          {change.original.title}: {fmtTime(change.original.starts_at)}–{fmtTime(change.original.ends_at)}
+          {change.original.title}: {fmtDayPrefix(change.original.starts_at)}{fmtTime(change.original.starts_at)}–{fmtTime(change.original.ends_at)}
         </div>
         {!isDelete && change.next && (change.next.starts_at || change.next.ends_at) && (
           <div className="text-foreground font-medium">
-            → {fmtTime(change.next.starts_at ?? change.original.starts_at)}–{fmtTime(change.next.ends_at ?? change.original.ends_at)}
+            → {fmtDayPrefix(change.next.starts_at ?? change.original.starts_at)}{fmtTime(change.next.starts_at ?? change.original.starts_at)}–{fmtTime(change.next.ends_at ?? change.original.ends_at)}
           </div>
         )}
       </div>
@@ -276,7 +276,7 @@ export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent;
     <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3">
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-medium leading-snug truncate text-amber-950">{ev.title}</div>
-        <div className="font-mono text-[11px] text-amber-800 whitespace-nowrap">{fmtTime(ev.starts_at)}–{fmtTime(ev.ends_at)}</div>
+        <div className="font-mono text-[11px] text-amber-800 whitespace-nowrap">{fmtDayPrefix(ev.starts_at)}{fmtTime(ev.starts_at)}–{fmtTime(ev.ends_at)}</div>
       </div>
       {ev.notes && <div className="text-[11px] text-amber-900/80 mt-1">{ev.notes}</div>}
       <div className="mt-2.5 flex gap-2">
@@ -392,3 +392,16 @@ function InsightIcon({ kind }: { kind: InsightCard["kind"] }) {
 }
 
 function fmtTime(iso: string) { return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+
+/** "" for today, "Tomorrow " or "Wed, Nov 11 " for other days (proposals can be for any day). */
+function fmtDayPrefix(iso: string) {
+  const date = new Date(iso);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((day.getTime() - today.getTime()) / 86_400_000);
+  if (diffDays === 0) return "";
+  if (diffDays === 1) return "Tomorrow ";
+  return `${date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} `;
+}

@@ -394,7 +394,7 @@ CURRENT CONTEXT (now = ${new Date().toISOString()}, user time zone = ${timeZone}
 - Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
 
 - Today's calendar events (use the [event_id:...] when proposing edits/deletes):
-${todayEvents.length === 0 ? "  (none)" : todayEvents.map(e => `  • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${e.starts_at} → ${e.ends_at} (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")}
+${todayEvents.length === 0 ? "  (none)" : todayEvents.map(e => `  • ${e.id ? `[event_id:${e.id}] ` : ""}${e.title} — ${fmtTime(e.starts_at, timeZone)}–${fmtTime(e.ends_at, timeZone)} local time (${durationMinutes(e.starts_at, e.ends_at)} min)`).join("\n")}
 
 - Upcoming events for the next 7 days (grouped by day, with duration):
 ${(() => {
@@ -575,10 +575,13 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       if (pendingEventChanges.length > 0) {
         replyText = pendingEventChanges.map(c => c.kind === "delete"
           ? `I've proposed cancelling **${c.original.title}** — review it on the right and click Save to apply.`
-          : `I've proposed updating **${c.original.title}**${c.next?.starts_at && c.next?.ends_at ? ` to ${c.next.starts_at} → ${c.next.ends_at}` : ""}. Click Save to apply.`
+          : `I've proposed updating **${c.original.title}**${c.next?.starts_at && c.next?.ends_at ? ` to ${describeRange(c.next.starts_at, c.next.ends_at, timeZone)}` : ""}${c.next?.title ? ` (new title: **${c.next.title}**)` : ""}. Click Save to apply.`
         ).join("\n");
       } else if (pendingEvents.length > 0) {
-        replyText = `I've drafted ${pendingEvents.length} event${pendingEvents.length === 1 ? "" : "s"}. Review on the right and click Save to add to your calendar.`;
+        const listed = pendingEvents
+          .map((event) => `- **${event.title}**: ${describeRange(event.starts_at, event.ends_at, timeZone)}`)
+          .join("\n");
+        replyText = `I've drafted ${pendingEvents.length} event${pendingEvents.length === 1 ? "" : "s"}:\n${listed}\nReview on the right and click Save to add to your calendar.`;
       } else {
         replyText = "Done.";
       }
@@ -753,6 +756,14 @@ function fmtDayLabel(iso: string, timeZone = "UTC") {
 }
 function fmtTime(iso: string, timeZone = "UTC") {
   return formatTimeInZone(iso, timeZone);
+}
+/** "Wed, Nov 11, 4:00 PM – 5:30 PM" in the user's time zone (the end date only when it differs). */
+function describeRange(startsAt: string, endsAt: string, timeZone = "UTC") {
+  const day = (iso: string) =>
+    new Date(iso).toLocaleDateString("en-US", { timeZone, weekday: "short", month: "short", day: "numeric" });
+  const startDay = day(startsAt);
+  const endDay = day(endsAt);
+  return `${startDay}, ${fmtTime(startsAt, timeZone)} – ${endDay === startDay ? "" : `${endDay}, `}${fmtTime(endsAt, timeZone)}`;
 }
 function durationMinutes(startsAt: string, endsAt: string) {
   return Math.max(0, Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000));
