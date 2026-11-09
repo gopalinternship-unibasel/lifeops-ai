@@ -264,3 +264,29 @@ def test_env_file_with_a_byte_order_mark_is_read_completely():
     loaded = Settings(_env_file=env_file)
     assert loaded.frontend_origin == "http://bom.test"
     assert loaded.llm_model == "bom-model"
+
+
+def test_model_times_with_an_offset_are_read_as_local_wall_clock(client, fake_llm):
+    # Seen with qwen2.5:3b on 9 Nov 2026: "18:00:00Z" for a block the user wanted at 18:00 local.
+    # Mixed naive/offset times must not crash the comparison either.
+    fake_llm.answer = json.dumps(
+        {
+            "summary": "Assignment",
+            "tasks": [{"title": "Assignment", "deadline": "2026-11-13T17:00:00+02:00"}],
+            "actions": [
+                {
+                    "action_type": "calendar_block",
+                    "title": "Assignment work block",
+                    "start_time": "2026-11-10T18:00:00Z",
+                    "end_time": "2026-11-10T19:00:00",
+                }
+            ],
+        }
+    )
+    plan = make_plan(client, text="assignment block tomorrow 18-19")
+    assert plan["planner"] == "llm"
+    action = plan["plan"]["actions"][0]
+    assert action["start_time"] == "2026-11-10T18:00:00"
+    assert action["end_time"] == "2026-11-10T19:00:00"
+    assert plan["plan"]["tasks"][0]["deadline"] == "2026-11-13T17:00:00"
+    assert "local times" in plan["planner_note"]

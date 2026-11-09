@@ -80,6 +80,13 @@ def _extract_json(raw: str) -> dict[str, Any]:
     return data
 
 
+def _wall_clock(value: datetime | None) -> datetime | None:
+    """Planned times are the user's local wall-clock time (the prompt says so). Small models
+    still append "Z" or an offset now and then; keep the wall time and drop the offset, so a
+    block asked for at 18:00 lands at 18:00 local, whatever database stores it."""
+    return value.replace(tzinfo=None) if value is not None and value.tzinfo is not None else value
+
+
 def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
     """Validate a model answer item by item, so one bad entry does not discard the plan.
 
@@ -89,6 +96,7 @@ def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
     - medium/high risk actions always require human approval.
     """
     notes: list[str] = []
+    had_offsets = False
     tasks: list[PlannerTask] = []
     for raw_task in data.get("tasks") or []:
         if not isinstance(raw_task, dict):
@@ -114,6 +122,10 @@ def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
             except ValidationError:
                 notes.append("Dropped a task the model returned in an invalid shape.")
 
+    for task in tasks:
+        had_offsets |= task.deadline is not None and task.deadline.tzinfo is not None
+        task.deadline = _wall_clock(task.deadline)
+
     actions: list[PlannerAction] = []
     for raw_action in data.get("actions") or []:
         if not isinstance(raw_action, dict):
@@ -133,11 +145,18 @@ def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
         except ValidationError:
             notes.append(f"Dropped action '{candidate.get('title')}' with invalid fields.")
             continue
+        # Before comparing: a naive and an offset time cannot be compared.
+        had_offsets |= any(t is not None and t.tzinfo is not None for t in (action.start_time, action.end_time))
+        action.start_time = _wall_clock(action.start_time)
+        action.end_time = _wall_clock(action.end_time)
         if action.action_type == "calendar_block":
             if not action.start_time or not action.end_time or action.end_time <= action.start_time:
                 notes.append(f"Dropped calendar block '{action.title}' without a valid time range.")
                 continue
         actions.append(action)
+
+    if had_offsets:
+        notes.append("Read the model's times as local times (ignored a time zone offset).")
 
     summary = str(data.get("summary") or "").strip() or "Here is your plan."
     order = [str(step) for step in (data.get("execution_order") or []) if str(step).strip()]

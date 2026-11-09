@@ -170,7 +170,7 @@ npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
 cd fastapi-backend
-.venv\Scripts\python.exe -m pytest     # 14 API tests with a temporary SQLite file and a fake LLM
+.venv\Scripts\python.exe -m pytest     # 15 API tests with a temporary SQLite file and a fake LLM
 ```
 
 `npm run check` runs lint, typecheck, unit tests and build in one go. The Google tests never touch the
