@@ -817,10 +817,6 @@ function durationMinutes(startsAt: string, endsAt: string) {
   return Math.max(0, Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000));
 }
 
-/**
- * The model's event_changes with ids resolved (a short id "E3", "[E3]", "event_id:E3" or the
- * real id) and times read as local wall-clock time. Unknown ids and invalid entries are dropped.
- */
 /** The lookup key of a model's event id: "E3", "[E3]", "event_id:E3" -> "e3". */
 function changeRef(eventId: string): string {
   return eventId.replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "").replace(/\]\s*$/, "").trim().toLowerCase();
@@ -832,6 +828,10 @@ export function countUnknownChangeRefs(value: unknown, lookup: (ref: string) => 
   return value.filter((raw) => isRecord(raw) && typeof raw.event_id === "string" && !lookup(changeRef(raw.event_id))).length;
 }
 
+/**
+ * The model's event_changes with ids resolved (a short id "E3", "[E3]", "event_id:E3" or the
+ * real id) and times read as local wall-clock time. Unknown ids and invalid entries are dropped.
+ */
 export function normalizeModelChanges(
   value: unknown,
   lookup: (ref: string) => KnownEvent | undefined,
