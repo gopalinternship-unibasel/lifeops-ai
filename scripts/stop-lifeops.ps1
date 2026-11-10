@@ -24,10 +24,20 @@ function Stop-Tree([int]$processId, [string]$label) {
   }
 }
 
+# A recorded PID is stopped only while it is still this project's process: after a crash or a
+# reboot Windows gives the number to another program, which must not be killed (this PC runs
+# other projects at the same time).
+function Stop-Recorded([int]$processId, [string]$label) {
+  $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+  if (-not $proc) { return }
+  if ($proc.CommandLine -match [regex]::Escape($root)) { Stop-Tree $processId $label }
+  else { Write-Host "PID $processId (recorded for the $label) now belongs to another program; left alone." }
+}
+
 if (Test-Path $pidFile) {
   $pids = Get-Content $pidFile -Raw | ConvertFrom-Json
-  if ($pids.web) { Stop-Tree ([int]$pids.web) "web app" }
-  if ($pids.fastapi) { Stop-Tree ([int]$pids.fastapi) "FastAPI planner" }
+  if ($pids.web) { Stop-Recorded ([int]$pids.web) "web app" }
+  if ($pids.fastapi) { Stop-Recorded ([int]$pids.fastapi) "FastAPI planner" }
   Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 
