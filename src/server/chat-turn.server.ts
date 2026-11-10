@@ -694,7 +694,11 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     if (conflicts.length > 0) notes.push(`overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`);
     // A new event with the title of one already in the calendar adds a second one; it does not
     // move the existing one (the reply says so, so the card cannot be mistaken for a move).
-    const same = reconciled?.sameTitleAs.find((entry) => entry.title === event.title);
+    // (Not when the same turn offers to cancel that one: "Cancel the dentist appointment and
+    // book a new one for Friday at 2 pm".)
+    const same = reconciled?.sameTitleAs.find(
+      (entry) => entry.title === event.title && !pendingEventChanges.some((change) => change.kind === "delete" && change.event_id === entry.event.id),
+    );
     if (same) notes.push(`**${same.event.title}** is already in your calendar on ${describeRange(same.event.starts_at, same.event.ends_at, timeZone)}; saving this adds a second one`);
     if (notes.length > 0) cardNotes[event.id] = notes.join("; ");
   }
