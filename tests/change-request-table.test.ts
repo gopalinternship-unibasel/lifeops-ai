@@ -335,6 +335,9 @@ const CANCELS: [message: string, event: string][] = [
   ["Sure, please cancel the team sync", "sync"],
   ["Would you kindly cancel the lecture", "lecture"],
   ["Move it to 5 pm and cancel the team sync", "sync"],
+  ["Cancel the appointment for the dentist", "dentist"],
+  ["Cancel the team sync for tomorrow", "sync"],
+  ["Cancel the team sync for me please", "sync"],
 ];
 
 describe("direction 2: clear requests to move or cancel a named event are read by rule", () => {
@@ -391,6 +394,9 @@ describe("a clear verb without a clear target or time: no card, a question or a 
     ["Move my dentist visit to Friday", "Dentist appointment"],
     ["Cancel the lecture notes review", "Lecture — Distributed Systems"],
     ["Move the lecture notes to the shared drive", "Lecture — Distributed Systems"],
+    ["Move the block for the Acme interview to Sunday at 3 pm", "Acme onsite interview"],
+    ["Cancel the meeting for the dentist appointment", "Dentist appointment"],
+    ["Reschedule the session for the lecture to Friday at 9 am", "Lecture — Distributed Systems"],
   ];
   it.each(NOT_THAT_EVENT)("%s", (message, closest) => {
     const worst = worstCase(message);

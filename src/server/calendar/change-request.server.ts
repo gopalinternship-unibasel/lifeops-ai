@@ -626,10 +626,16 @@ const GENERIC_NOUNS = new Set([
  */
 export function matchEvent(request: ChangeRequest, events: KnownEvent[], timeZone: string): EventMatch {
   const subject = [...new Set(request.subjectWords)];
+  // "the block for the Acme interview", "the meeting for the dentist appointment": the thing
+  // before "for" is what is meant. It names the event only if a word of it is in the title
+  // ("the appointment for the dentist" is the dentist appointment).
+  const forAt = / for /.exec(` ${request.subject} `);
+  const before = forAt ? titleWords(` ${request.subject} `.slice(0, forAt.index)) : [];
   const score = (event: KnownEvent) => {
     const words = new Set(titleWords(event.title));
     const shared = subject.filter((word) => words.has(word)).length;
-    const other = subject.filter((word) => !words.has(word) && !GENERIC_NOUNS.has(word)).length;
+    const somethingElse = before.length > 0 && !before.some((word) => words.has(word));
+    const other = subject.filter((word) => !words.has(word) && !GENERIC_NOUNS.has(word)).length + (somethingElse ? 1 : 0);
     return { event, shared, other, whole: words.size > 0 && shared === words.size };
   };
   const filtered = events.filter((event) => {
