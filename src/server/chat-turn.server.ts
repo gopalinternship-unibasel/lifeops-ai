@@ -23,6 +23,7 @@ import { getErrorMessage, isRecord } from "@/lib/errors";
 import { addDaysISO, formatTimeInZone, localDateTime, normalizeTimeZone, todayInTimeZone, zonedDateTimeToISO } from "@/server/timezone.server";
 import { findConflicts, parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
 import {
+  asksForCalendarAction,
   reconcileCalendarChanges,
   type KnownEvent,
   type ModelChange,
@@ -767,6 +768,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       hasOtherCards: Boolean(insight || alternatives || priorities),
       refs: replyRefs,
       emailNote,
+      actionRequest: asksForCalendarAction(data.message),
     });
   }
 

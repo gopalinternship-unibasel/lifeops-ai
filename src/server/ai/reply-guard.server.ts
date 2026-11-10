@@ -40,18 +40,31 @@ const TEMPLATE_LINES: RegExp[] = [
 const ACTION_VERBS =
   "moved|rescheduled|added|saved|scheduled|booked|created|updated|changed|cancell?ed|deleted|removed|sent|blocked|shifted|postponed|applied";
 const CLAIMS: RegExp[] = [
-  new RegExp(`\\b(?:has|have|had)\\s+(?:now\\s+|already\\s+|successfully\\s+)?been\\s+(?:successfully\\s+)?(?:${ACTION_VERBS})\\b`, "i"),
+  new RegExp(`\\b(?:has|have|had)\\s+(?:now\\s+|already\\s+|successfully\\s+)?been\\s+(?:successfully\\s+)?(?:${ACTION_VERBS}|set)\\b`, "i"),
   new RegExp(`\\bI(?:'ve|\\s+have|\\s+just|\\s+already)?\\s+(?:successfully\\s+|now\\s+)?(?:${ACTION_VERBS})\\b`, "i"),
   /\b(?:is|are)\s+now\s+(?:scheduled|booked|moved|set|saved|added|in your calendar|on your calendar|cancell?ed|confirmed)\b/i,
   /\b(?:is|are)\s+(?:saved|added)\s+(?:to|in|on)\s+your\s+calendar\b/i,
   /\b(?:email|reply|message)\s+(?:is|was)\s+sent\b/i,
   // A sentence that starts with the finished action: "Moved E99.", "Done!", "Scheduled your gym
-  // session." (QA round 4). A heading such as "Scheduled for Friday:" is not a claim.
-  /^[^\p{L}\d]*(?:moved|rescheduled|added|saved|scheduled|booked|created|cancell?ed|deleted|removed|sent|blocked|shifted|postponed|drafted|done|all set)\b(?![^.!?]*:)/iu,
-  // "Reminder set for Thursday ...", "Your gym session is set": the real default model wrote this
-  // with no card at all (10 Nov 2026), and "I set a reminder".
-  /\b(?:reminders?|alarms?|events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?)\s+(?:is\s+|are\s+|has\s+been\s+|have\s+been\s+)?(?:now\s+)?(?:set|created|added|scheduled|booked|saved)\b(?!\s+to\b)/i,
-  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+set\s+(?:up\s+)?(?:a|an|the|your)\b/i,
+  // session." (QA round 4). A heading such as "Scheduled for Friday:" is not a claim, and neither
+  // is a description ("Scheduled events today are the lecture and the team sync.").
+  /^[^\p{L}\d]*(?:moved|rescheduled|added|saved|scheduled|booked|created|cancell?ed|deleted|removed|sent|blocked|shifted|postponed|drafted|done|all set)\b(?![^.!?]*:)(?!\s+(?:events?|meetings?|items?|tasks?|blocks?|emails?|drafts?|time|slots?|appointments?|sessions?|calls?)\b)/iu,
+  // "Reminder set for Thursday ...": the real default model wrote this with no card at all
+  // (10 Nov 2026), and "I set a reminder". MONDAY has no reminders or alarms of its own, so one
+  // that "is set" is always a claim.
+  /\b(?:reminders?|alarms?)\s+(?:is\s+|are\s+|was\s+|were\s+)?(?:now\s+)?(?:set|created|added|scheduled|saved)\b(?!\s+to\b)/i,
+  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+set\s+(?:up\s+)?(?:a|an|the|your)\s+(?:[\w-]+\s+){0,3}?(?:reminders?|alarms?|events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?|time)\b/i,
+  /\b(?:is|are)\s+(?:all\s+)?set(?:\s+up)?\s*(?:[.!]|$|for you\b)/i,
+];
+
+/**
+ * In the answer to a request for something new or for a change ("Set up a gym session ...",
+ * "Move ..."): "Your gym session is scheduled for 6 pm" says it is done. In the answer to a
+ * question ("When is my dentist appointment?") the same words describe the calendar ("Your
+ * dentist appointment is scheduled for Wednesday at 2 pm") and must stay.
+ */
+const ACTION_REQUEST_CLAIMS: RegExp[] = [
+  /\b(?:events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?)\s+(?:is\s+|are\s+)?(?:now\s+)?(?:set|created|added|scheduled|booked|saved)\b(?!\s+to\b)/i,
 ];
 
 const WEEKDAY_INDEX: Record<string, number> = {
@@ -65,18 +78,19 @@ const MONTH_INDEX: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, ma
  * Saturday): the real default model wrote that on 10 Nov 2026. `year` is used for dates without one.
  */
 export function hasWrongWeekday(sentence: string, year: number): boolean {
+  // A date without a year is this year's or (in December, about January) next year's.
+  const weekdayOf = (y: number, mo: number, d: number): number | null => {
+    const date = new Date(Date.UTC(y, mo - 1, d, 12));
+    return Number.isFinite(date.getTime()) && date.getUTCDate() === d ? date.getUTCDay() : null;
+  };
   const text = sentence.toLowerCase();
   const pattern =
     /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)\b,?\s+(?:(\d{4})-(\d{2})-(\d{2})|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})|(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*)\b/g;
   for (const m of text.matchAll(pattern)) {
     const weekday = WEEKDAY_INDEX[m[1]];
-    const [y, mo, d] = m[2]
-      ? [Number(m[2]), Number(m[3]), Number(m[4])]
-      : m[5]
-        ? [year, MONTH_INDEX[m[5]], Number(m[6])]
-        : [year, MONTH_INDEX[m[8]], Number(m[7])];
-    const date = new Date(Date.UTC(y, mo - 1, d, 12));
-    if (Number.isFinite(date.getTime()) && date.getUTCDate() === d && date.getUTCDay() !== weekday) return true;
+    const [mo, d] = m[2] ? [Number(m[3]), Number(m[4])] : m[5] ? [MONTH_INDEX[m[5]], Number(m[6])] : [MONTH_INDEX[m[8]], Number(m[7])];
+    const readings = (m[2] ? [Number(m[2])] : [year, year + 1]).map((y) => weekdayOf(y, mo, d)).filter((value) => value !== null);
+    if (readings.length > 0 && !readings.includes(weekday)) return true;
   }
   return false;
 }
@@ -170,8 +184,10 @@ export function removeSentences(text: string, matches: (sentence: string) => boo
   return { text: collapseBlankLines(cleaned).join("\n").trim(), removed };
 }
 
-export function removeActionClaims(text: string): { text: string; removed: number } {
-  return removeSentences(text, (sentence) => CLAIMS.some((re) => re.test(sentence)));
+/** `actionRequest`: the user asked for something new or for a change (see ACTION_REQUEST_CLAIMS). */
+export function removeActionClaims(text: string, actionRequest = false): { text: string; removed: number } {
+  const patterns = actionRequest ? [...CLAIMS, ...ACTION_REQUEST_CLAIMS] : CLAIMS;
+  return removeSentences(text, (sentence) => patterns.some((re) => re.test(sentence)));
 }
 
 export function removeTimeStatements(text: string): { text: string; removed: number } {
@@ -248,13 +264,15 @@ export function composeReply(opts: {
   emailNote?: string;
   /** The year for dates the model wrote without one (default: this year). */
   year?: number;
+  /** The user asked for something new or for a change, not a question (see ACTION_REQUEST_CLAIMS). */
+  actionRequest?: boolean;
 }): string {
   const cleaned = stripInternalMarkers(opts.modelReply);
   const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
   // A weekday that is not its date's ("Thursday 2026-11-14") is wrong either way: drop it.
   const year = opts.year ?? new Date().getUTCFullYear();
   const weekdays = removeSentences(resolved.text, (sentence) => hasWrongWeekday(sentence, year));
-  const claims = removeActionClaims(weekdays.text);
+  const claims = removeActionClaims(weekdays.text, opts.actionRequest ?? false);
   claims.removed += weekdays.removed;
   const calendarTurn = opts.pendingEvents.length > 0 || opts.pendingEventChanges.length > 0 || Boolean(opts.changeNote);
 
@@ -267,7 +285,12 @@ export function composeReply(opts: {
     if (opts.pendingEventChanges.length === 0) modelText = removeSentences(modelText, (sentence) => CHANGE_TALK.test(sentence)).text;
   }
   // "Draft ready." with no draft card (QA round 4: an email id the inbox does not have).
-  if (!opts.emailDraft) modelText = removeSentences(modelText, (sentence) => DRAFT_CLAIMS.some((re) => re.test(sentence))).text;
+  let draftClaims = 0;
+  if (!opts.emailDraft) {
+    const withoutDraftClaims = removeSentences(modelText, (sentence) => DRAFT_CLAIMS.some((re) => re.test(sentence)));
+    modelText = withoutDraftClaims.text;
+    draftClaims = withoutDraftClaims.removed;
+  }
 
   const lines: string[] = [];
   if (modelText) lines.push(modelText);
@@ -279,6 +302,9 @@ export function composeReply(opts: {
   }
   if (lines.length > 0) return lines.join("\n\n");
   if (opts.hasOtherCards) return "See the card on the right.";
+  if (draftClaims > 0 && claims.removed === 0 && resolved.removed === 0) {
+    return "The AI model answered without a reply draft, so nothing was prepared. Please try again and say which email you want to answer.";
+  }
   if (claims.removed > 0 || resolved.removed > 0) {
     return "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.";
   }
