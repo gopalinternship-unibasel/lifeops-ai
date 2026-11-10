@@ -576,7 +576,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
         todayEvents,
         timeZone,
         reason: "",
-        header: "ℹ️ The AI model's summary left part of your inbox or today's calendar out, so this briefing lists them straight from your data.",
+        header: "ℹ️ The AI model's summary did not match your inbox or today's calendar (it left something out, or listed an email that is already read), so this briefing lists them straight from your data.",
         prioritiesNote: false,
       });
       parsed = { ...parsed, reply: [listed.reply, rulePriorities ? prioritiesNote : ""].filter(Boolean).join("\n\n") };
