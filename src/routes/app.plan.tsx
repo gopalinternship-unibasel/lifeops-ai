@@ -47,6 +47,10 @@ function PlanPage() {
   const [approving, setApproving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const lastWeekFetched = useRef<string | null>(null);
+  // The week on screen now. A draft can take minutes; when it returns, the user may be looking
+  // at another week, and that week must not be overwritten with this one's plan.
+  const shownWeek = useRef(monday);
+  shownWeek.current = monday;
   // The newest plan request of the shown week, as stored on the server: a draft that is still
   // running (started before a reload, or in another tab) shows as "Drafting…" until it is done.
   const [request, setRequest] = useState<WeekPlanRequestView | null>(null);
@@ -71,9 +75,13 @@ function PlanPage() {
     setAddedItems({});
     setRequest(null);
     fetchWeekPlan({ data: { weekStart: monday, timeZone } } as Parameters<typeof fetchWeekPlan>[0])
-      .then((r: Awaited<ReturnType<typeof fetchWeekPlan>>) => applyPlanState(r))
+      .then((r: Awaited<ReturnType<typeof fetchWeekPlan>>) => {
+        if (shownWeek.current === monday) applyPlanState(r);
+      })
       .catch((error: unknown) => toast.error(getErrorMessage(error, "Failed to load plan")))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (shownWeek.current === monday) setLoading(false);
+      });
   }, [monday, timeZone]);
 
   /** Plan, calendar events and which items are already in the calendar, as the server sees them. */
@@ -145,22 +153,32 @@ function PlanPage() {
     }
   };
 
+  /** The plan that came back belongs to `week`; show it only if that week is still on screen. */
+  const showDraft = (week: string, r: Parameters<typeof applyPlanState>[0] & { reply: string }) => {
+    if (r.request) announced.current.add(r.request.id);
+    if (shownWeek.current !== week) {
+      toast.success(`The plan for the week of ${fmtWeek(week)} is ready.`);
+      return;
+    }
+    applyPlanState(r);
+    setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
+  };
+
   const generate = async (instructions?: string) => {
     if (drafting) return;
+    const week = monday;
     setBusy(true);
     setRequest({ id: "pending", kind: "create", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
     try {
       const r = await generateWeekPlan(
-        { data: { weekStart: monday, instructions, timeZone } } as Parameters<
+        { data: { weekStart: week, instructions, timeZone } } as Parameters<
           typeof generateWeekPlan
         >[0],
       );
-      if (r.request) announced.current.add(r.request.id);
-      applyPlanState(r);
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
+      showDraft(week, r);
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Failed to generate plan"));
-      await resync();
+      if (shownWeek.current === week) await resync();
     } finally {
       setBusy(false);
     }
@@ -210,20 +228,19 @@ function PlanPage() {
 
     // Otherwise: refine
     if (drafting) return;
+    const week = monday;
     setBusy(true);
     setRequest({ id: "pending", kind: "refine", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
     try {
       const r = await refineWeekPlan(
-        { data: { weekStart: monday, message: text, timeZone } } as Parameters<
+        { data: { weekStart: week, message: text, timeZone } } as Parameters<
           typeof refineWeekPlan
         >[0],
       );
-      if (r.request) announced.current.add(r.request.id);
-      applyPlanState(r); // a refined plan's new items need approving again
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
+      showDraft(week, r); // a refined plan's new items need approving again
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Failed to update plan"));
-      await resync();
+      if (shownWeek.current === week) await resync();
     } finally {
       setBusy(false);
     }
@@ -426,6 +443,13 @@ function PlanPage() {
   );
 }
 
+/** "3:14 PM", with the day when it was not today ("Mon 3:14 PM"). */
 function fmtClock(iso: string) {
-  return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString("en-US", { weekday: "short" })} ${time}`;
+}
+
+function fmtWeek(monday: string) {
+  return new Date(`${monday}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
