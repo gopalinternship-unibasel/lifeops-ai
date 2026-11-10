@@ -135,6 +135,9 @@ describe("new-item requests that start with set / put / change are not moves", (
     });
     expect(cancel.request?.subject).toBe("the gym session from my plan");
     expect(cancel.proposals.map((p) => p.title)).toEqual(["Reading"]);
+    // A full stop after an abbreviation does not end the request; one after a sentence does.
+    expect(move("Move the dentist appointment to Nov. 13 at 2pm")).toMatchObject({ starts_at: at("2026-11-13", 14), byRule: true });
+    expect(move("Move the dentist appointment to 4 pm. Then add lunch tomorrow at noon.")).toMatchObject({ starts_at: at("2026-11-11", 16), ends_at: at("2026-11-11", 17, 30) });
   });
 
   it("moving an event that is not there: no new event of that name instead; an unknown event id is reported", () => {

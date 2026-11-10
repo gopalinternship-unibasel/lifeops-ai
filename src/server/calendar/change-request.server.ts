@@ -107,10 +107,11 @@ const WEAK_OBJECT_OK = new RegExp(
 /**
  * Where a request's clause ends: "Move the dentist to 5 pm and block 3-5 pm tomorrow for the
  * gym" names the destination "5 pm" only, and "Remove the gym session from my plan and block
- * ..." the subject "the gym session from my plan".
+ * ..." the subject "the gym session from my plan". A full stop after an abbreviation ("Nov. 13",
+ * "Dr. Lee") does not end it.
  */
 const NEXT_CLAUSE_RE =
-  /(?:[;.!?]\s+|,\s*(?:and\s+|then\s+|also\s+|but\s+)?(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check|what|when|how)\b)|\s(?:and|then|but|also|and then)\s+(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check)\b))/;
+  /(?:[;!?]\s+|(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|dr|mr|mrs|ms|prof|st|approx|ca|[a-z]))\.\s+|,\s*(?:and\s+|then\s+|also\s+|but\s+)?(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check|what|when|how)\b)|\s(?:and|then|but|also|and then)\s+(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check)\b))/;
 
 function cutAtNextClause(text: string): string {
   const m = NEXT_CLAUSE_RE.exec(text);
