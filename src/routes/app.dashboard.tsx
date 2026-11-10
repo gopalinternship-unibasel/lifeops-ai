@@ -291,8 +291,11 @@ function DashboardPage() {
                               ? `${fmtNaive(action.start_time)} – ${fmtNaive(action.end_time, true)}`
                               : fmtNaive(action.start_time)
                             : null}
-                          {action.email_to ? `Draft to ${action.email_to}: ${action.email_subject ?? ""}` : null}
-                          {!action.start_time && !action.email_to ? action.description : null}
+                          {/* The planner keeps only addresses the user wrote; an unknown one is left for the user. */}
+                          {action.action_type === "email_draft"
+                            ? `Draft to ${action.email_to?.trim() || "(recipient to fill in)"}: ${action.email_subject ?? action.title}`
+                            : null}
+                          {!action.start_time && action.action_type !== "email_draft" ? action.description : null}
                         </div>
                       </div>
                       <div className="flex shrink-0 gap-1.5">
