@@ -3,7 +3,7 @@
  * reply for a reminder that the parser used to turn into a move.
  */
 import { describe, expect, it } from "vitest";
-import { composeReply, removeActionClaims, resolveRefs } from "@/server/ai/reply-guard.server";
+import { composeReply, hasWrongWeekday, removeActionClaims, resolveRefs } from "@/server/ai/reply-guard.server";
 import type { EmailDraftSuggestion, PendingEvent } from "@/types/panel";
 
 const ZRH = "Europe/Zurich";
@@ -41,6 +41,33 @@ describe("short ids in replies", () => {
   it("a claim that starts the sentence is a claim; a heading with a colon is not", () => {
     expect(removeActionClaims("Done! Scheduled your gym session. Have a nice day.").text).toBe("Have a nice day.");
     expect(removeActionClaims("Scheduled for Friday: the lecture at 10:00.").removed).toBe(0);
+  });
+});
+
+describe("the real default model's reminder answer (10 Nov 2026)", () => {
+  it("'Reminder set for Thursday 2026-11-14 13:00:00 ...' with no card is not shown as done", () => {
+    const reply = composeReply({
+      modelReply: "Reminder set for Thursday 2026-11-14 13:00:00 for the dentist appointment.",
+      timeZone: ZRH,
+      pendingEvents: [],
+      pendingEventChanges: [],
+      refs,
+      year: 2026,
+    });
+    expect(reply).toBe("The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.");
+  });
+
+  it("other 'set' claims are claims; 'set to' and plain sentences are not", () => {
+    expect(removeActionClaims("Your gym session is set. I set a reminder for you. Enjoy!").text).toBe("Enjoy!");
+    expect(removeActionClaims("The meeting is set to discuss the demo.").removed).toBe(0);
+  });
+
+  it("a weekday that is not its date's is wrong; a right one is fine", () => {
+    expect(hasWrongWeekday("Reminder on Thursday 2026-11-14 at 13:00", 2026)).toBe(true);
+    expect(hasWrongWeekday("Thu, Nov 14", 2026)).toBe(true);
+    expect(hasWrongWeekday("Thursday 2026-11-12 at 13:00", 2026)).toBe(false);
+    expect(hasWrongWeekday("Thu, Nov 12, 1:00 PM", 2026)).toBe(false);
+    expect(hasWrongWeekday("Saturday 14 Nov", 2026)).toBe(false);
   });
 });
 

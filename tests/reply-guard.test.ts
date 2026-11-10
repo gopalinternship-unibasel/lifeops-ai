@@ -74,7 +74,7 @@ describe("the reply agrees with the cards", () => {
 
   it("a claim with no card left is not repeated; the user is told nothing changed", () => {
     const reply = composeReply({ modelReply: "Your dentist appointment has been moved.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [] });
-    expect(reply).toContain("nothing was changed");
+    expect(reply).toContain("nothing was prepared or changed");
   });
 
   it("a plain answer without cards keeps the model's text (ids removed)", () => {

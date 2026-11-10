@@ -48,7 +48,38 @@ const CLAIMS: RegExp[] = [
   // A sentence that starts with the finished action: "Moved E99.", "Done!", "Scheduled your gym
   // session." (QA round 4). A heading such as "Scheduled for Friday:" is not a claim.
   /^[^\p{L}\d]*(?:moved|rescheduled|added|saved|scheduled|booked|created|cancell?ed|deleted|removed|sent|blocked|shifted|postponed|drafted|done|all set)\b(?![^.!?]*:)/iu,
+  // "Reminder set for Thursday ...", "Your gym session is set": the real default model wrote this
+  // with no card at all (10 Nov 2026), and "I set a reminder".
+  /\b(?:reminders?|alarms?|events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?)\s+(?:is\s+|are\s+|has\s+been\s+|have\s+been\s+)?(?:now\s+)?(?:set|created|added|scheduled|booked|saved)\b(?!\s+to\b)/i,
+  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+set\s+(?:up\s+)?(?:a|an|the|your)\b/i,
 ];
+
+const WEEKDAY_INDEX: Record<string, number> = {
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+  sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6,
+};
+const MONTH_INDEX: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+/**
+ * A weekday next to a date it is not ("Thursday 2026-11-14", "Thu, Nov 14" when Nov 14 is a
+ * Saturday): the real default model wrote that on 10 Nov 2026. `year` is used for dates without one.
+ */
+export function hasWrongWeekday(sentence: string, year: number): boolean {
+  const text = sentence.toLowerCase();
+  const pattern =
+    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)\b,?\s+(?:(\d{4})-(\d{2})-(\d{2})|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})|(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*)\b/g;
+  for (const m of text.matchAll(pattern)) {
+    const weekday = WEEKDAY_INDEX[m[1]];
+    const [y, mo, d] = m[2]
+      ? [Number(m[2]), Number(m[3]), Number(m[4])]
+      : m[5]
+        ? [year, MONTH_INDEX[m[5]], Number(m[6])]
+        : [year, MONTH_INDEX[m[8]], Number(m[7])];
+    const date = new Date(Date.UTC(y, mo - 1, d, 12));
+    if (Number.isFinite(date.getTime()) && date.getUTCDate() === d && date.getUTCDay() !== weekday) return true;
+  }
+  return false;
+}
 
 /** "Draft ready.", "Here's a draft", "I've drafted a reply": a draft that must be on a card. */
 const DRAFT_CLAIMS: RegExp[] = [
@@ -215,10 +246,16 @@ export function composeReply(opts: {
   refs?: ReplyRefs;
   /** Why a requested reply draft has no card (the model named an email that is not in the inbox). */
   emailNote?: string;
+  /** The year for dates the model wrote without one (default: this year). */
+  year?: number;
 }): string {
   const cleaned = stripInternalMarkers(opts.modelReply);
   const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
-  const claims = removeActionClaims(resolved.text);
+  // A weekday that is not its date's ("Thursday 2026-11-14") is wrong either way: drop it.
+  const year = opts.year ?? new Date().getUTCFullYear();
+  const weekdays = removeSentences(resolved.text, (sentence) => hasWrongWeekday(sentence, year));
+  const claims = removeActionClaims(weekdays.text);
+  claims.removed += weekdays.removed;
   const calendarTurn = opts.pendingEvents.length > 0 || opts.pendingEventChanges.length > 0 || Boolean(opts.changeNote);
 
   let modelText = claims.text;
@@ -243,7 +280,7 @@ export function composeReply(opts: {
   if (lines.length > 0) return lines.join("\n\n");
   if (opts.hasOtherCards) return "See the card on the right.";
   if (claims.removed > 0 || resolved.removed > 0) {
-    return "I could not prepare that as a valid proposal, so nothing was changed. Please try again with a day and a time.";
+    return "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.";
   }
   return "I'm not sure how to help with that. Could you rephrase it?";
 }
