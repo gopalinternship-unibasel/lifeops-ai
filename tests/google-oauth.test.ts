@@ -362,4 +362,13 @@ describe("Calendar and Gmail calls", () => {
     expect(mime).toContain("To: organizer@example.com");
     expect(mime).toContain("Subject: Reschedule\r\n");
   });
+
+  it("a planner email without a known recipient becomes a draft without a To header", async () => {
+    // The planner keeps only addresses the user wrote; "(recipient to fill in)" is not an address.
+    mockGoogle({ "https://gmail.googleapis.com/gmail/v1/users/me/drafts": () => json({ id: "draft-8" }) });
+    await createDraft(USER, { to: "(recipient to fill in)", subject: "Lunch", body: "Hi Sam" });
+    const mime = decodeRaw(JSON.parse(String(calls[0].init.body)).message.raw);
+    expect(mime).not.toContain("To:");
+    expect(mime.startsWith("Subject: Lunch\r\n")).toBe(true);
+  });
 });

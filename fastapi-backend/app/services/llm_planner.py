@@ -101,6 +101,27 @@ def _wall_clock(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=None) if value is not None and value.tzinfo is not None else value
 
 
+_ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+
+
+def recipient_from_user(value: str, user_input: str) -> str | None:
+    """The recipient the model wrote, if the user wrote it; otherwise None.
+
+    Every email address in it must be an address of the user's text ("Sam <sam@uni.example>" is
+    kept when the text has sam@uni.example), and a recipient without an address must be a name
+    the text contains as a word ("Sam"). An address the model made up never passes.
+    """
+    recipient = " ".join((value or "").split())
+    text = (user_input or "").lower()
+    addresses = [address.lower() for address in _ADDRESS.findall(recipient)]
+    if addresses:
+        written = {address.lower() for address in _ADDRESS.findall(text)}
+        return recipient if all(address in written for address in addresses) else None
+    if "@" in recipient or len(recipient) < 2:
+        return None
+    return recipient if re.search(rf"(?<!\w){re.escape(recipient.lower())}(?!\w)", text) else None
+
+
 def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOutput, list[str]]:
     """Validate a model answer item by item, so one bad entry does not discard the plan.
 
@@ -174,14 +195,13 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
             # A reminder or task is a point in time: "17:45 - 17:45" is not a range.
             action.end_time = None
         if action.email_to:
-            address = action.email_to.strip()
-            if action.action_type != "email_draft" or address.lower() not in (user_input or "").lower():
-                if action.action_type == "email_draft":
-                    notes.append(
-                        f"Left the recipient of '{action.title}' empty: the model wrote '{address[:80]}', "
-                        "which is not in your text. Fill it in on the draft."
-                    )
-                action.email_to = None
+            written = action.email_to.strip()
+            action.email_to = recipient_from_user(written, user_input) if action.action_type == "email_draft" else None
+            if action.email_to is None and action.action_type == "email_draft":
+                notes.append(
+                    f"Left the recipient of '{action.title}' empty: the model wrote '{written[:80]}', "
+                    "which is not in your text. Fill it in on the draft."
+                )
         actions.append(action)
 
     if had_offsets:

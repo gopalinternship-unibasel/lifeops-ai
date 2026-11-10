@@ -358,3 +358,19 @@ def test_invented_email_addresses_are_not_kept(client, fake_llm):
     to = {action["title"]: action["email_to"] for action in plan["plan"]["actions"]}
     assert to == {"Lunch with Sam": None, "Note to Ana": "Ana@Uni.example", "Call": None}
     assert "sam@example.com" in plan["planner_note"] and "Fill it in" in plan["planner_note"]
+
+
+def test_recipient_is_kept_only_if_the_user_wrote_it():
+    from app.services.llm_planner import recipient_from_user
+
+    text = "Draft an email to Sam about lunch, one to ana@uni.example and one to Dr. Lee."
+    assert recipient_from_user("sam@example.com", text) is None  # made up by the model
+    assert recipient_from_user("Ana@Uni.example", text) == "Ana@Uni.example"
+    assert recipient_from_user("Ana <ana@uni.example>", text) == "Ana <ana@uni.example>"
+    assert recipient_from_user("ana@uni.example, sam@example.com", text) is None  # one of them is made up
+    assert recipient_from_user("na@uni.example", text) is None  # part of an address is not the address
+    assert recipient_from_user("Sam", text) == "Sam"  # a name the user wrote
+    assert recipient_from_user("Dr. Lee", text) == "Dr. Lee"
+    assert recipient_from_user("Samantha", text) is None
+    assert recipient_from_user("a", text) is None
+    assert recipient_from_user("  ", text) is None

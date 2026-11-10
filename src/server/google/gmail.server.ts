@@ -176,8 +176,11 @@ function safeHeaderValue(value: string): string {
 function buildRawReply(opts: { to: string; subject: string; body: string; inReplyTo?: string; references?: string; isReply?: boolean }) {
   const cleanSubject = safeHeaderValue(opts.subject);
   const subj = opts.isReply === false || cleanSubject.toLowerCase().startsWith("re:") ? cleanSubject : `Re: ${cleanSubject}`;
+  // A draft may have no recipient yet (the planner keeps only addresses the user wrote, so its
+  // drafts can arrive with "(recipient to fill in)"): then there is no To header at all.
+  const to = safeHeaderValue(opts.to);
   const lines = [
-    `To: ${safeHeaderValue(opts.to)}`,
+    ...(to.includes("@") ? [`To: ${to}`] : []),
     `Subject: ${subj}`,
     'Content-Type: text/plain; charset="UTF-8"',
     "MIME-Version: 1.0",
