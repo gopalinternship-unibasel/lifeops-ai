@@ -145,7 +145,7 @@ def test_outcome_of_externally_executed_action_is_recorded(client):
 def test_email_actions_are_drafts_only(client):
     make_plan(client)
     draft = next(a for a in client.get("/api/actions", headers=ALICE).json() if a["action_type"] == "email_draft")
-    assert draft["email_to"] == "meeting.organizer@example.com"
+    assert draft["email_to"] is None  # never an invented address; the user fills it in
     client.post(f"/api/actions/{draft['id']}/approve", headers=ALICE)
     result = client.post(f"/api/actions/{draft['id']}/execute", headers=ALICE).json()
     assert result["provider"] == "gmail"
@@ -338,3 +338,23 @@ def test_reminder_with_an_empty_range_keeps_only_its_start(client, fake_llm):
     action = plan["plan"]["actions"][0]
     assert action["start_time"] == "2026-11-10T17:45:00"
     assert action["end_time"] is None
+
+
+def test_invented_email_addresses_are_not_kept(client, fake_llm):
+    # QA round 4: "draft an email to Sam" came back addressed to sam@example.com, and the app
+    # saved that as the draft's recipient.
+    fake_llm.answer = json.dumps(
+        {
+            "summary": "Lunch",
+            "tasks": [],
+            "actions": [
+                {"action_type": "email_draft", "title": "Lunch with Sam", "email_to": "sam@example.com", "email_body": "Hi Sam", "risk_level": "low"},
+                {"action_type": "email_draft", "title": "Note to Ana", "email_to": "Ana@Uni.example", "email_body": "Hi Ana", "risk_level": "low"},
+                {"action_type": "reminder", "title": "Call", "start_time": "2026-11-10T09:00:00", "email_to": "x@example.com", "risk_level": "low"},
+            ],
+        }
+    )
+    plan = make_plan(client, text="Draft an email to Sam about lunch, and one to ana@uni.example. Remind me to call.")
+    to = {action["title"]: action["email_to"] for action in plan["plan"]["actions"]}
+    assert to == {"Lunch with Sam": None, "Note to Ana": "Ana@Uni.example", "Call": None}
+    assert "sam@example.com" in plan["planner_note"] and "Fill it in" in plan["planner_note"]

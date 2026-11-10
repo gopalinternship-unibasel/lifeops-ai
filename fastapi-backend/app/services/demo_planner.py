@@ -86,7 +86,8 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
                 action_type="email_draft",
                 title="Draft meeting reschedule email",
                 description="Prepare a polite email asking to reschedule the meeting.",
-                email_to="meeting.organizer@example.com",
+                # No address book here: the user fills in the recipient on the draft.
+                email_to=None,
                 email_subject="Request to reschedule our meeting",
                 email_body=(
                     "Hi,\n\nI hope you are doing well. I have an important academic deadline "

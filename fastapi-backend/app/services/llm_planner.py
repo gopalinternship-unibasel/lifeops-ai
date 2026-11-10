@@ -101,13 +101,16 @@ def _wall_clock(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=None) if value is not None and value.tzinfo is not None else value
 
 
-def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
+def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOutput, list[str]]:
     """Validate a model answer item by item, so one bad entry does not discard the plan.
 
     Safety rules enforced here, whatever the model said:
     - unknown action types are dropped (there is no "send email" action at all);
     - calendar blocks need a start and an end, and must end after they start;
-    - medium/high risk actions always require human approval.
+    - medium/high risk actions always require human approval;
+    - an email address is kept only if the user wrote it: the planner knows no address book, and
+      the model invented "sam@example.com" for "draft an email to Sam" (QA round 4), which the app
+      then saved as the draft's recipient.
     """
     notes: list[str] = []
     had_offsets = False
@@ -170,6 +173,15 @@ def sanitize_plan(data: dict[str, Any]) -> tuple[PlannerOutput, list[str]]:
         elif action.end_time is not None and (action.start_time is None or action.end_time <= action.start_time):
             # A reminder or task is a point in time: "17:45 - 17:45" is not a range.
             action.end_time = None
+        if action.email_to:
+            address = action.email_to.strip()
+            if action.action_type != "email_draft" or address.lower() not in (user_input or "").lower():
+                if action.action_type == "email_draft":
+                    notes.append(
+                        f"Left the recipient of '{action.title}' empty: the model wrote '{address[:80]}', "
+                        "which is not in your text. Fill it in on the draft."
+                    )
+                action.email_to = None
         actions.append(action)
 
     if had_offsets:
@@ -260,7 +272,7 @@ def create_plan(
             max_tokens=settings.llm_max_tokens,
         )
         raw = response.choices[0].message.content or "{}"
-        plan, notes = sanitize_plan(_extract_json(raw))
+        plan, notes = sanitize_plan(_extract_json(raw), user_input)
         return plan, "llm", " ".join(notes) or None
     except Exception as error:  # noqa: BLE001 - any failure falls back so the demo stays alive
         logger.warning("LLM planner failed, using the keyword planner: %s", error)
