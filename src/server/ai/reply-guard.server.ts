@@ -45,7 +45,29 @@ const CLAIMS: RegExp[] = [
   /\b(?:is|are)\s+now\s+(?:scheduled|booked|moved|set|saved|added|in your calendar|on your calendar|cancell?ed|confirmed)\b/i,
   /\b(?:is|are)\s+(?:saved|added)\s+(?:to|in|on)\s+your\s+calendar\b/i,
   /\b(?:email|reply|message)\s+(?:is|was)\s+sent\b/i,
+  // A sentence that starts with the finished action: "Moved E99.", "Done!", "Scheduled your gym
+  // session." (QA round 4). A heading such as "Scheduled for Friday:" is not a claim.
+  /^[^\p{L}\d]*(?:moved|rescheduled|added|saved|scheduled|booked|created|cancell?ed|deleted|removed|sent|blocked|shifted|postponed|drafted|done|all set)\b(?![^.!?]*:)/iu,
 ];
+
+/** "Draft ready.", "Here's a draft", "I've drafted a reply": a draft that must be on a card. */
+const DRAFT_CLAIMS: RegExp[] = [
+  /\b(?:draft|reply|response)\b[^.!?\n]{0,40}?\b(?:ready|prepared|done|created|written|below|attached|saved|on the right|under insights)\b/i,
+  /\bI(?:'ve|\s+have)?\s+(?:drafted|written|prepared|composed)\b/i,
+  /\bhere(?:'s|\s+is)\s+(?:a|the|your)\s+(?:draft|reply|response)\b/i,
+];
+
+/** Talk about moving or cancelling an event, for a turn that has no change card. */
+const CHANGE_TALK = /\b(?:mov(?:e|ed|ing)|reschedul\w*|postpon\w*|cancel\w*|push(?:ed|ing)?\s+back|shift(?:ed|ing)?)\b/i;
+
+/**
+ * The short ids of the prompt: events "E1", "E2", ... (upper case) and emails "e1", "e2", ...
+ * (lower case), each with the name the user knows it by.
+ */
+export interface ReplyRefs {
+  events?: Record<string, string>;
+  emails?: Record<string, string>;
+}
 
 /** A day or a clock time in a sentence. */
 const TIME_WORDS =
@@ -163,6 +185,19 @@ export function cardConfirmations(opts: {
   return lines;
 }
 
+/**
+ * Short ids left in the text after stripInternalMarkers: a known one becomes the event's title
+ * or the email's name; a sentence that names an id the prompt never had ("Moved E99.") is about
+ * something that does not exist and is removed.
+ */
+export function resolveRefs(text: string, refs: ReplyRefs): { text: string; removed: number } {
+  const known = (id: string) => (/^E/.test(id) ? refs.events?.[id] : refs.emails?.[id]);
+  // Only the kinds of id the prompt used: Gmail message ids are long, not "e3".
+  const idPattern = new RegExp(`\\b(${[refs.events ? "E\\d{1,3}" : "", refs.emails ? "e\\d{1,2}" : ""].filter(Boolean).join("|") || "(?!)"})\\b`, "g");
+  const result = removeSentences(text ?? "", (sentence) => [...sentence.matchAll(idPattern)].some((m) => !known(m[1])));
+  return { text: result.text.replace(idPattern, (id) => known(id) ?? id), removed: result.removed };
+}
+
 export function composeReply(opts: {
   modelReply: string;
   timeZone: string;
@@ -176,25 +211,38 @@ export function composeReply(opts: {
   notes?: Record<string, string>;
   /** Other cards the turn produced (insight, alternatives), for an otherwise empty reply. */
   hasOtherCards?: boolean;
+  /** The prompt's short ids and what they stand for (see resolveRefs). */
+  refs?: ReplyRefs;
+  /** Why a requested reply draft has no card (the model named an email that is not in the inbox). */
+  emailNote?: string;
 }): string {
   const cleaned = stripInternalMarkers(opts.modelReply);
-  const claims = removeActionClaims(cleaned);
+  const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
+  const claims = removeActionClaims(resolved.text);
   const calendarTurn = opts.pendingEvents.length > 0 || opts.pendingEventChanges.length > 0 || Boolean(opts.changeNote);
 
   let modelText = claims.text;
   if (opts.changeRequest) modelText = "";
-  else if (calendarTurn) modelText = removeTimeStatements(modelText).text;
+  else if (calendarTurn) {
+    modelText = removeTimeStatements(modelText).text;
+    // "Ready to move your dentist appointment." next to a NEW event card (QA round 4): with no
+    // change card, nothing is being moved or cancelled.
+    if (opts.pendingEventChanges.length === 0) modelText = removeSentences(modelText, (sentence) => CHANGE_TALK.test(sentence)).text;
+  }
+  // "Draft ready." with no draft card (QA round 4: an email id the inbox does not have).
+  if (!opts.emailDraft) modelText = removeSentences(modelText, (sentence) => DRAFT_CLAIMS.some((re) => re.test(sentence))).text;
 
   const lines: string[] = [];
   if (modelText) lines.push(modelText);
   if (opts.changeNote) lines.push(`${opts.changeNote} Nothing in your calendar was changed.`);
+  if (opts.emailNote) lines.push(opts.emailNote);
   lines.push(...cardConfirmations(opts));
   if (opts.emailDraft && (claims.removed > 0 || !modelText)) {
     lines.push(`The reply to ${opts.emailDraft.to} is under **Insights** as a draft suggestion. Edit it and click **Save as draft**; nothing is sent.`);
   }
   if (lines.length > 0) return lines.join("\n\n");
   if (opts.hasOtherCards) return "See the card on the right.";
-  if (claims.removed > 0) {
+  if (claims.removed > 0 || resolved.removed > 0) {
     return "I could not prepare that as a valid proposal, so nothing was changed. Please try again with a day and a time.";
   }
   return "I'm not sure how to help with that. Could you rephrase it?";

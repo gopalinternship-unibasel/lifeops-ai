@@ -16,7 +16,7 @@ export interface BriefingEmail {
   subject: string;
   snippet: string;
   unread?: boolean;
-  extractedTask?: { title: string; importance: "high" | "medium" | "low" };
+  extractedTask?: { title: string; importance: "high" | "medium" | "low"; deadline?: string };
 }
 
 export interface BriefingEvent {
@@ -185,7 +185,8 @@ function plain(text: string): string {
  * subject (its first three words) and every event of today (the first two words of its title)
  * must appear, and it must not claim an empty inbox or an empty day when there is mail or
  * an event. A small local model wrote "No unread emails — inbox is clear" next to four unread
- * emails, and "Nothing scheduled today" on a day with an event (9 Nov 2026).
+ * emails, and "Nothing scheduled today" on a day with an event (9 Nov 2026). Its inbox block
+ * must also match the inbox (see inboxSectionMatches).
  */
 export function briefingCoversInbox(opts: {
   reply: string;
@@ -200,5 +201,119 @@ export function briefingCoversInbox(opts: {
   const firstWords = (value: string, n: number) => plain(value).split(" ").slice(0, n).join(" ");
   const subjectsCovered = unread.every((email) => text.includes(firstWords(email.subject, 3)));
   const eventsCovered = opts.todayEvents.every((event) => text.includes(firstWords(event.title, 2)));
-  return subjectsCovered && eventsCovered;
+  return subjectsCovered && eventsCovered && inboxSectionMatches(opts);
+}
+
+/** The lines of the briefing's inbox section: from the "Inbox (N unread)" heading to the next heading. */
+function inboxSection(reply: string): { count: number | null; lines: string[] } | null {
+  const lines = (reply ?? "").split("\n");
+  const start = lines.findIndex((line) => /inbox\s*\(\s*\d+\s*unread\s*\)/i.test(line));
+  if (start < 0) return null;
+  const count = Number(/inbox\s*\(\s*(\d+)\s*unread\s*\)/i.exec(lines[start])?.[1]);
+  const section: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    // The next block: a bold heading, a markdown heading, or the "Today" heading.
+    if (/^\s*(?:\*\*[^*]+\*\*\s*$|#{1,6}\s|[^\w\s]{0,3}\s*\**\s*📅|\**\s*today\b)/i.test(line)) break;
+    section.push(line);
+  }
+  return { count: Number.isFinite(count) ? count : null, lines: section };
+}
+
+/**
+ * The model's inbox section matches the inbox: its heading says the unread count, it has one
+ * bullet per unread email and lists no email that is read. QA round 4 saw "Inbox (4 unread)"
+ * followed by five bullets, the read Stripe summary among them.
+ */
+export function inboxSectionMatches(opts: { reply: string; emails: BriefingEmail[]; unreadCount: number }): boolean {
+  const section = inboxSection(opts.reply);
+  if (!section) return true; // no inbox block at all is judged by briefingCoversInbox
+  if (section.count !== null && section.count !== opts.unreadCount) return false;
+  const bullets = section.lines.filter((line) => /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(line));
+  const unread = opts.emails.filter((email) => email.unread);
+  if (bullets.length > 0 && bullets.length !== unread.length) return false;
+  const text = plain(section.lines.join(" "));
+  const firstWords = (value: string) => plain(value).split(" ").slice(0, 3).join(" ");
+  return !opts.emails.some((email) => !email.unread && firstWords(email.subject) && text.includes(firstWords(email.subject)));
+}
+
+export interface PriorityContext {
+  /** Today's events. */
+  todayEvents: BriefingEvent[];
+  /** The next days' events (today's may be included). */
+  upcomingEvents: BriefingEvent[];
+  emails: BriefingEmail[];
+  timeZone?: string;
+}
+
+function sharedWords(a: string, b: string): number {
+  const words = significantWords(b);
+  let shared = 0;
+  for (const word of significantWords(a)) if (words.has(word)) shared++;
+  return shared;
+}
+
+/** The event (or email task) a priority is about: two identifying words in common, the most wins. */
+function bestMatch<T>(title: string, items: T[], text: (item: T) => string): T | undefined {
+  let best: T | undefined;
+  let bestShared = 1;
+  for (const item of items) {
+    const shared = sharedWords(title, text(item));
+    if (shared > bestShared) {
+      best = item;
+      bestShared = shared;
+    }
+  }
+  return best;
+}
+
+function dayLabel(iso: string, timeZone: string): string {
+  return new Date(iso).toLocaleDateString("en-US", { timeZone, weekday: "short", month: "short", day: "numeric" });
+}
+
+/**
+ * The model's priority reasons checked against the data. A reason may call an item "today" or
+ * "tonight" only when the item is one of today's events, and the minutes it gives for an event
+ * must be that event's length. QA round 4 saw "120 min block — biggest commitment today" for the
+ * Acme interview, which is next Monday (the prompt's own example, copied by the model). A wrong
+ * reason is rewritten from the data: the event's day, time and length, or the email it came from.
+ */
+export function checkPriorityReasons(priorities: PriorityRow[], ctx: PriorityContext): { priorities: PriorityRow[]; corrected: string[] } {
+  const timeZone = normalizeTimeZone(ctx.timeZone);
+  const time = (iso: string) => formatTimeInZone(iso, timeZone);
+  const minutesOf = (event: BriefingEvent) => Math.max(0, Math.round((Date.parse(event.ends_at) - Date.parse(event.starts_at)) / 60000));
+  const todayKeys = new Set(ctx.todayEvents.map((event) => `${event.title}|${event.starts_at}`));
+  const laterEvents = ctx.upcomingEvents.filter((event) => !todayKeys.has(`${event.title}|${event.starts_at}`));
+  const tasks = ctx.emails.filter((email) => email.extractedTask);
+  const corrected: string[] = [];
+
+  const checked = priorities.map((priority) => {
+    let reason = priority.reason;
+    const todayEvent = bestMatch(priority.title, ctx.todayEvents, (event) => event.title);
+    const laterEvent = todayEvent ? undefined : bestMatch(priority.title, laterEvents, (event) => event.title);
+    const event = todayEvent ?? laterEvent;
+    const claimsToday = /\b(today|tonight)\b/i.test(reason);
+    if (!todayEvent && claimsToday) {
+      const email = bestMatch(priority.title, tasks, (mail) => `${mail.extractedTask!.title} ${mail.subject}`);
+      const sender = email ? oneLine(email.from.replace(/\s*<[^>]*>/, ""), 50) : "";
+      const fromEmail = email ? `from ${sender}'s email (${email.extractedTask!.importance} importance)` : "";
+      if (laterEvent) {
+        reason = `${minutesOf(laterEvent)} min block on ${dayLabel(laterEvent.starts_at, timeZone)} (${time(laterEvent.starts_at)}–${time(laterEvent.ends_at)})${fromEmail ? `; ${fromEmail}` : ""}`;
+      } else if (email) {
+        const due = email.extractedTask!.deadline ? `, due ${dayLabel(email.extractedTask!.deadline, timeZone)}` : "";
+        reason = `${fromEmail.charAt(0).toUpperCase()}${fromEmail.slice(1)}${due}`;
+      } else {
+        const kept = reason
+          .split(/\s*(?:[—–;()]|\s-\s|,)\s*/)
+          .map((part) => part.trim())
+          .filter((part) => part && !/\b(today|tonight)\b/i.test(part));
+        reason = kept.join(" — ") || "Ranked by the AI model";
+      }
+    } else if (event) {
+      const minutes = minutesOf(event);
+      reason = reason.replace(/\b(\d{1,4})\s?-?\s?(?:min(?:ute)?s?)\b/i, (whole, value: string) => (Number(value) === minutes ? whole : `${minutes} min`));
+    }
+    if (reason !== priority.reason) corrected.push(`"${priority.title}": "${priority.reason}" -> "${reason}"`);
+    return reason === priority.reason ? priority : { ...priority, reason };
+  });
+  return { priorities: checked, corrected };
 }

@@ -15,7 +15,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, resolveLLMConfig, type AITool } from "@/server/ai/llm.server";
-import { briefingCoversInbox, buildRuleBasedBriefing } from "@/server/ai/briefing-fallback.server";
+import { briefingCoversInbox, buildRuleBasedBriefing, checkPriorityReasons } from "@/server/ai/briefing-fallback.server";
 import { listRecentMessages, listUnreadMessages, type GmailMsg } from "@/server/google/gmail.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
@@ -27,7 +27,7 @@ import {
   type KnownEvent,
   type ModelChange,
 } from "@/server/calendar/change-request.server";
-import { composeReply, stripInternalMarkers } from "@/server/ai/reply-guard.server";
+import { composeReply, describeRange, resolveRefs, stripInternalMarkers, type ReplyRefs } from "@/server/ai/reply-guard.server";
 import type {
   EmailDraftSuggestion,
   InsightCard,
@@ -443,6 +443,12 @@ async function answerChatTurn(
       .join("\n");
   })();
   const nowLocal = localDateTime(Date.now(), timeZone);
+  // What the prompt's short ids stand for, so a reply that still names one shows the event's
+  // title or the email instead, and a sentence about an id the prompt never had is dropped.
+  const replyRefs: ReplyRefs = {
+    events: Object.fromEntries(knownEvents.map((event) => [aliasOf(event), event.title])),
+    emails: googleConnected ? undefined : Object.fromEntries(mockEmails.map((mail) => [mail.id, `the email "${mail.subject}"`])),
+  };
 
   // Static instructions first, the per-request context last: a local model (llama.cpp via
   // Ollama) reuses its cached prompt prefix, so only the changing part is evaluated again.
@@ -461,7 +467,7 @@ INSTRUCTIONS:
     Then a short closing line.
 - If the user specifically asks ONLY for unread emails, still use the **📬 Inbox (N unread)** block and list every UNREAD email — skip the calendar block.
 - First time the user asks about inbox/day/priorities, ALSO return "priorities": a ranked list built from the emails' tasks and today's remaining events.
-- PRIORITIES MUST REFLECT EVENT DURATION: when ranking from calendar events, longer events outrank shorter ones (a 2-hour block is higher priority than a 30-minute one). Tie-break by earlier start time. Mention the duration in the "reason" field (e.g. "120 min block — biggest commitment today"). When the user asks priorities again, RECOMPUTE — do not return the same ranking if durations differ.
+- PRIORITIES MUST REFLECT EVENT DURATION: when ranking from calendar events, longer events outrank shorter ones (a 2-hour block is higher priority than a 30-minute one). Tie-break by earlier start time. In the "reason" field give the item's own day and its length from the calendar below; only events under today's date are "today". When the user asks priorities again, RECOMPUTE — do not return the same ranking if durations differ.
 - When user re-ranks, return the FULL re-ranked list.
 - If calendar context is unavailable, do NOT populate "proposed_events" or "event_changes". Explain that the calendar could not be checked and ask the user to retry.
 - For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events". They are PROPOSED — never say they are saved; the user clicks Save.
@@ -598,6 +604,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   const modelChanges = calendarContextAvailable
     ? normalizeModelChanges(attemptedEventChanges, (ref) => eventByRef.get(ref), timeZone)
     : [];
+  const unknownChangeRefs = calendarContextAvailable ? countUnknownChangeRefs(attemptedEventChanges, (ref) => eventByRef.get(ref)) : 0;
   const reconciled = calendarContextAvailable && !(data.briefing && isFirst)
     ? reconcileCalendarChanges({
         message: data.message,
@@ -607,10 +614,27 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
         events: knownEvents,
         modelChanges,
         modelProposals: attemptedProposedEvents,
+        unknownChangeRefs,
       })
     : null;
   if (reconciled && reconciled.log.length > 0) console.info("Chat: calendar answer checked:", reconciled.log.join("; "));
   const proposedEvents = calendarContextAvailable ? (reconciled ? reconciled.proposals : attemptedProposedEvents) : [];
+
+  // 5c. The model's priority reasons must match the data: "today" only for today's events, an
+  // event's real length (QA round 4: "120 min block — biggest commitment today" for an interview
+  // next Monday). Rule-ranked priorities are built from the data already.
+  if (normalizedPriorities.length > 0 && !rulePriorities) {
+    const checked = checkPriorityReasons(normalizedPriorities, {
+      todayEvents,
+      upcomingEvents,
+      emails: googleConnected
+        ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+        : mockEmails,
+      timeZone,
+    });
+    if (checked.corrected.length > 0) console.info("Chat: corrected priority reasons:", checked.corrected.join("; "));
+    normalizedPriorities = checked.priorities;
+  }
 
   // 6. Sync tasks if priorities returned
   let priorities: PriorityRow[] | undefined;
@@ -664,12 +688,19 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     }
   }
   for (const event of pendingEvents) {
+    const notes: string[] = [];
     const conflicts = findConflicts(event, busyEvents);
-    if (conflicts.length > 0) cardNotes[event.id] = `overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`;
+    if (conflicts.length > 0) notes.push(`overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`);
+    // A new event with the title of one already in the calendar adds a second one; it does not
+    // move the existing one (the reply says so, so the card cannot be mistaken for a move).
+    const same = reconciled?.sameTitleAs.find((entry) => entry.title === event.title);
+    if (same) notes.push(`**${same.event.title}** is already in your calendar on ${describeRange(same.event.starts_at, same.event.ends_at, timeZone)}; saving this adds a second one`);
+    if (notes.length > 0) cardNotes[event.id] = notes.join("; ");
   }
 
   // 8. Email draft suggestion
   let emailDraft: EmailDraftSuggestion | undefined = undefined;
+  let emailNote: string | undefined;
   if (
     isRecord(rawEmailReply) &&
     typeof rawEmailReply.message_id === "string" &&
@@ -680,6 +711,10 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       realEmails.find((mail) => mail.id === messageId) ??
       mockEmails.find((mail) => mail.id === messageId);
     const body = rawEmailReply.body.trim().slice(0, 10000);
+    if (!orig) {
+      console.info(`Chat: dropped a reply draft for an email id that is not in the inbox: ${messageId.slice(0, 40)}`);
+      emailNote = "The AI model referred to an email that is not in your inbox, so no reply draft was prepared. Nothing was saved or sent.";
+    }
     if (orig && body) {
       emailDraft = {
         id: `draft-${crypto.randomUUID()}`,
@@ -718,7 +753,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   if (blockedCalendarActions) {
     replyText = "I couldn't safely access your calendar, so I did not prepare any calendar changes. Please retry after reconnecting Google or checking the connector.";
   } else if (data.briefing && isFirst) {
-    replyText = stripInternalMarkers(String(parsed.reply ?? "")) || "Here is your briefing.";
+    replyText = resolveRefs(stripInternalMarkers(String(parsed.reply ?? "")), replyRefs).text || "Here is your briefing.";
   } else {
     replyText = composeReply({
       modelReply: String(parsed.reply ?? ""),
@@ -730,6 +765,8 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       changeNote: reconciled?.note,
       notes: cardNotes,
       hasOtherCards: Boolean(insight || alternatives || priorities),
+      refs: replyRefs,
+      emailNote,
     });
   }
 
@@ -784,6 +821,17 @@ function durationMinutes(startsAt: string, endsAt: string) {
  * The model's event_changes with ids resolved (a short id "E3", "[E3]", "event_id:E3" or the
  * real id) and times read as local wall-clock time. Unknown ids and invalid entries are dropped.
  */
+/** The lookup key of a model's event id: "E3", "[E3]", "event_id:E3" -> "e3". */
+function changeRef(eventId: string): string {
+  return eventId.replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "").replace(/\]\s*$/, "").trim().toLowerCase();
+}
+
+/** How many of the model's event changes name an event id that is not in the calendar. */
+export function countUnknownChangeRefs(value: unknown, lookup: (ref: string) => KnownEvent | undefined): number {
+  if (!Array.isArray(value)) return 0;
+  return value.filter((raw) => isRecord(raw) && typeof raw.event_id === "string" && !lookup(changeRef(raw.event_id))).length;
+}
+
 export function normalizeModelChanges(
   value: unknown,
   lookup: (ref: string) => KnownEvent | undefined,
@@ -793,8 +841,7 @@ export function normalizeModelChanges(
   const changes: ModelChange[] = [];
   for (const raw of value) {
     if (!isRecord(raw) || (raw.kind !== "update" && raw.kind !== "delete") || typeof raw.event_id !== "string") continue;
-    const ref = raw.event_id.replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "").replace(/\]\s*$/, "").trim().toLowerCase();
-    const event = lookup(ref);
+    const event = lookup(changeRef(raw.event_id));
     if (!event) continue; // a hallucinated id
     if (raw.kind === "delete") {
       changes.push({ kind: "delete", event });
