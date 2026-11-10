@@ -821,6 +821,11 @@ export interface Reconciled {
   sameTitleAs: { title: string; event: KnownEvent }[];
   /** A question back or the reason a requested change has no card. */
   note?: string;
+  /**
+   * The note is only about a change the model made although the message did not ask for one
+   * (it was left out); the model's answer to the message itself stands.
+   */
+  unasked?: boolean;
   /** What the app corrected or dropped, for the server log. */
   log: string[];
 }
@@ -1020,7 +1025,7 @@ export function reconcileCalendarChanges(opts: {
     } else if (!note && changes.length === 0 && (opts.unknownChangeRefs ?? 0) > 0) {
       note = "The AI model referred to an event that is not in your calendar, so there is no change to save.";
     }
-    return result({ changeRequest: false, changes, note });
+    return result({ changeRequest: false, changes, note, unasked: unasked.length > 0 });
   };
   if (!request) return withoutRequest();
 

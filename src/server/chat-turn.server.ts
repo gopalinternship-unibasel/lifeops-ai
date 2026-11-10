@@ -769,6 +769,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       refs: replyRefs,
       emailNote,
       actionRequest: asksForCalendarAction(data.message),
+      changeNoteIsAside: reconciled?.unasked ?? false,
     });
   }
 

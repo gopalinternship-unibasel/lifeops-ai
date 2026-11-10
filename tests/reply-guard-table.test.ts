@@ -84,6 +84,18 @@ describe("claims and descriptions", () => {
     expect(removeActionClaims(sentence).removed).toBe(0);
   });
 
+  it("a change the model made unasked is left out; the answer to a question stands, with its times", () => {
+    const note = "The AI model also suggested changing **Dentist appointment** (Wed, Nov 11, 2:00 PM). I did not read your message as asking for that, so I left it out.";
+    const base = { timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], changeNote: note, year: 2026 };
+    expect(composeReply({ ...base, modelReply: "Your dentist appointment is on Wednesday at 14:00. I cancelled it.", changeNoteIsAside: true })).toBe(
+      `Your dentist appointment is on Wednesday at 14:00.\n\n${note} Nothing in your calendar was changed.`,
+    );
+    // After a request for something new, a sentence with a time would read as a confirmation.
+    expect(composeReply({ ...base, modelReply: "I'll remind you on Thursday at 1 PM.", changeNoteIsAside: true, actionRequest: true })).toBe(`${note} Nothing in your calendar was changed.`);
+    // A refused time is not an aside: the model's own times go.
+    expect(composeReply({ ...base, modelReply: "It will be at 4 AM on Thursday." })).toBe(`${note} Nothing in your calendar was changed.`);
+  });
+
   it("which messages ask for something new or a change", () => {
     for (const message of [
       "Set a reminder for my dentist appointment at 1 pm on Thursday.",

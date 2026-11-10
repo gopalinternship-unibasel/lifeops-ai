@@ -266,6 +266,11 @@ export function composeReply(opts: {
   year?: number;
   /** The user asked for something new or for a change, not a question (see ACTION_REQUEST_CLAIMS). */
   actionRequest?: boolean;
+  /**
+   * The change note is only about a change the model made unasked (it was left out). After a
+   * question ("When is my dentist appointment?") the model's answer, with its times, stands.
+   */
+  changeNoteIsAside?: boolean;
 }): string {
   const cleaned = stripInternalMarkers(opts.modelReply);
   const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
@@ -279,7 +284,8 @@ export function composeReply(opts: {
   let modelText = claims.text;
   if (opts.changeRequest) modelText = "";
   else if (calendarTurn) {
-    modelText = removeTimeStatements(modelText).text;
+    const answerStands = opts.changeNoteIsAside && !opts.actionRequest && opts.pendingEvents.length === 0 && opts.pendingEventChanges.length === 0;
+    if (!answerStands) modelText = removeTimeStatements(modelText).text;
     // "Ready to move your dentist appointment." next to a NEW event card (QA round 4): with no
     // change card, nothing is being moved or cancelled.
     if (opts.pendingEventChanges.length === 0) modelText = removeSentences(modelText, (sentence) => CHANGE_TALK.test(sentence)).text;
