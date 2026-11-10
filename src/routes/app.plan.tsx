@@ -43,7 +43,9 @@ function PlanPage() {
   const [approvedDates, setApprovedDates] = useState<Set<string>>(new Set());
   const [addedItems, setAddedItems] = useState<Record<string, number[]>>({});
   const [messages, setMessages] = useState<ChatTurn[]>([]);
-  const [busy, setBusy] = useState(false);
+  // The week this page is waiting for a draft of (the call that started it has not returned).
+  const [busyWeek, setBusyWeek] = useState<string | null>(null);
+  const busy = busyWeek !== null;
   const [approving, setApproving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const lastWeekFetched = useRef<string | null>(null);
@@ -101,7 +103,7 @@ function PlanPage() {
 
   // A draft that runs on the server without this page waiting for it (the page was reloaded or
   // opened in another tab): check until it is done, then show the plan and the reply.
-  const serverDrafting = request?.status === "running" && !busy;
+  const serverDrafting = request?.status === "running" && busyWeek !== monday;
   useEffect(() => {
     if (!serverDrafting) return;
     let stopped = false;
@@ -136,7 +138,9 @@ function PlanPage() {
     };
   }, [serverDrafting, request?.id, monday, timeZone]);
 
+  // One draft at a time from this page; `draftingHere` is the week on screen being drafted.
   const drafting = busy || request?.status === "running";
+  const draftingHere = busyWeek === monday || request?.status === "running";
 
   const shiftWeek = (delta: number) => {
     const d = new Date(monday + "T00:00:00");
@@ -167,7 +171,7 @@ function PlanPage() {
   const generate = async (instructions?: string) => {
     if (drafting) return;
     const week = monday;
-    setBusy(true);
+    setBusyWeek(week);
     setRequest({ id: "pending", kind: "create", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
     try {
       const r = await generateWeekPlan(
@@ -180,7 +184,7 @@ function PlanPage() {
       toast.error(getErrorMessage(e, "Failed to generate plan"));
       if (shownWeek.current === week) await resync();
     } finally {
-      setBusy(false);
+      setBusyWeek(null);
     }
   };
 
@@ -229,7 +233,7 @@ function PlanPage() {
     // Otherwise: refine
     if (drafting) return;
     const week = monday;
-    setBusy(true);
+    setBusyWeek(week);
     setRequest({ id: "pending", kind: "refine", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
     try {
       const r = await refineWeekPlan(
@@ -242,7 +246,7 @@ function PlanPage() {
       toast.error(getErrorMessage(e, "Failed to update plan"));
       if (shownWeek.current === week) await resync();
     } finally {
-      setBusy(false);
+      setBusyWeek(null);
     }
   };
 
@@ -328,9 +332,10 @@ function PlanPage() {
             variant={plan ? "outline" : "default"}
             onClick={() => generate(undefined)}
             disabled={drafting}
+            title={drafting && !draftingHere ? "A plan for another week is still being drafted." : undefined}
           >
             <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-            {drafting && !approving ? "Drafting…" : plan ? "Regenerate" : "Create plan"}
+            {draftingHere && !approving ? "Drafting…" : plan ? "Regenerate" : "Create plan"}
           </Button>
         </div>
       </div>
@@ -345,13 +350,13 @@ function PlanPage() {
           </span>
         </div>
       )}
-      {!loading && !busy && request?.status === "interrupted" && (
+      {!loading && busyWeek !== monday && request?.status === "interrupted" && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm" data-testid="plan-interrupted">
           The plan request started {fmtClock(request.startedAt)} did not finish: it was cut off, for example by a server restart.
           {plan ? " The plan below is the one from before." : ""} Create the plan again.
         </div>
       )}
-      {!loading && !busy && request?.status === "failed" && (
+      {!loading && busyWeek !== monday && request?.status === "failed" && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm" data-testid="plan-failed">
           The last plan request ({fmtClock(request.startedAt)}) failed: {request.error}
           {plan ? " The plan below is the one from before." : ""}
@@ -363,7 +368,7 @@ function PlanPage() {
         <div className="grid place-items-center py-24">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
         </div>
-      ) : !plan && drafting ? (
+      ) : !plan && draftingHere ? (
         <div className="rounded-2xl border border-dashed border-border bg-card/40 py-16 px-6 text-center" data-testid="plan-empty-drafting">
           <Loader2 className="h-6 w-6 mx-auto mb-3 animate-spin text-muted-foreground" />
           <h2 className="text-lg font-serif">MONDAY is drafting this week's plan…</h2>
