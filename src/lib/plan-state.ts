@@ -44,3 +44,27 @@ export function planCalendarState(plan: WeekPlan | null, events: BusyEvent[], no
   state.otherEvents = events.filter((event) => !itemKeys.has(key(event.title, event.starts_at, event.ends_at)));
   return state;
 }
+
+/**
+ * What a day card offers. "approve" only when an item is not in the calendar yet and still
+ * ahead; "added" when its items are there; "over" when nothing is left to add because the day
+ * or its items are over; "empty" for a day without items. QA round 4 saw an Approve button on
+ * Monday, a day that was over and had no items, next to days that read Added.
+ */
+export type PlanDayStatus = "approve" | "added" | "over" | "empty";
+
+export function planDayStatus(
+  day: { date: string; items: { starts_at: string }[] },
+  added: number[],
+  approved: boolean,
+  nowMs: number,
+): PlanDayStatus {
+  if (approved) return "added";
+  const approvable = day.items.some((item, index) => !added.includes(index) && Date.parse(item.starts_at) >= nowMs);
+  if (approvable) return "approve";
+  if (added.length > 0) return "added";
+  // The day's end in local time (the page runs in the browser's time zone).
+  const [year, month, date] = day.date.split("-").map(Number);
+  const dayOver = new Date(year, month - 1, date, 23, 59, 59).getTime() < nowMs;
+  return dayOver || day.items.length > 0 ? "over" : "empty";
+}

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import { Check, Calendar as CalIcon, Pencil, X as XIcon } from "lucide-react";
 import { formatLocalDate } from "@/lib/date";
+import { planDayStatus } from "@/lib/plan-state";
 
 interface Props {
   plan: WeekPlan | null;
@@ -49,26 +50,32 @@ function DayCard({ day, dayLabel, busy, approved, added, approving, onApprove, o
 }) {
   const dateObj = new Date(day.date + "T00:00:00");
   const subLabel = dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  // Approve only where there is something to add (see planDayStatus).
+  const status = planDayStatus(day, added, approved, Date.now());
 
   return (
-    <div className="rounded-2xl bg-card border border-border/60 p-5 shadow-sm flex flex-col min-h-[260px]" data-testid="plan-day" data-date={day.date} data-approved={approved ? "true" : "false"}>
+    <div className="rounded-2xl bg-card border border-border/60 p-5 shadow-sm flex flex-col min-h-[260px]" data-testid="plan-day" data-date={day.date} data-approved={approved ? "true" : "false"} data-status={status}>
       <div className="flex items-start justify-between">
         <div>
           <div className="text-2xl font-serif tracking-tight text-foreground">{dayLabel}</div>
           <div className="text-xs text-muted-foreground mt-0.5">{subLabel}</div>
         </div>
-        {approved ? (
+        {status === "added" ? (
           <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase text-emerald-600 dark:text-emerald-400">
             <Check className="h-3 w-3" /> Added
           </span>
-        ) : (
+        ) : status === "approve" ? (
           <button
             onClick={onApprove}
-            disabled={approving || day.items.length === 0}
+            disabled={approving}
             className="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded-md border border-border hover:bg-muted disabled:opacity-40 transition"
           >
             {approving ? "…" : "Approve"}
           </button>
+        ) : (
+          <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground" data-testid="plan-day-status">
+            {status === "over" ? "Past" : "Nothing to add"}
+          </span>
         )}
       </div>
 
