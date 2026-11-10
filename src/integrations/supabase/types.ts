@@ -256,6 +256,45 @@ export type Database = {
         }
         Relationships: []
       }
+      week_plan_requests: {
+        Row: {
+          created_at: string
+          error: string | null
+          finished_at: string | null
+          id: string
+          instructions: string | null
+          kind: string
+          reply: string | null
+          status: string
+          user_id: string
+          week_start: string
+        }
+        Insert: {
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          instructions?: string | null
+          kind?: string
+          reply?: string | null
+          status?: string
+          user_id: string
+          week_start: string
+        }
+        Update: {
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          instructions?: string | null
+          kind?: string
+          reply?: string | null
+          status?: string
+          user_id?: string
+          week_start?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           created_at: string

@@ -3,7 +3,7 @@ import { planCalendarState, planItemEventTitle } from "@/lib/plan-state";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { callAI, type AITool, type ChatMsg } from "@/server/ai/llm.server";
+import { callAI, resolveLLMConfig, type AITool, type ChatMsg } from "@/server/ai/llm.server";
 import { listCalendarEvents, insertCalendarEvent } from "@/server/google/calendar.server";
 import {
   createEvent as createMockCalendarEvent,
@@ -13,7 +13,8 @@ import {
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import type { Json } from "@/integrations/supabase/types";
-import { isRecord } from "@/lib/errors";
+import { getErrorMessage, isRecord } from "@/lib/errors";
+import { weekPlanRequestView, type WeekPlanRequestView } from "@/lib/week-plan-request";
 import {
   addDaysISO,
   mondayOfISODate,
@@ -47,6 +48,90 @@ async function isGoogleConnected(userId: string): Promise<boolean> {
     .maybeSingle();
   if (error) throw error;
   return !!data;
+}
+
+/**
+ * The longest a plan request can take: the model timeout (twice with a fallback model) plus the
+ * calendar and database work around it. A "running" request older than this was cut off.
+ */
+function maxPlanRequestMs(): number {
+  const config = resolveLLMConfig("plan");
+  return config.timeoutMs * (config.fallbackModel ? 2 : 1) + 120_000;
+}
+
+/** The newest plan request of this week, as the page shows it. */
+async function latestWeekPlanRequest(supabase: UserSupabaseClient, userId: string, monday: string): Promise<WeekPlanRequestView | null> {
+  const { data: row, error } = await supabase
+    .from("week_plan_requests")
+    .select("id, kind, status, reply, error, created_at, finished_at")
+    .eq("user_id", userId)
+    .eq("week_start", monday)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return row ? weekPlanRequestView(row, Date.now(), maxPlanRequestMs()) : null;
+}
+
+/**
+ * Draft (or refine) the week plan as a stored request: the row is written first, the model runs
+ * to the end on the server even when the page that asked reloads, and the plan and the outcome
+ * are stored with the service-role client, scoped to the authenticated user id. A slow local
+ * model can take longer than the rest of the browser's access token (1 hour); QA round 4 saw a
+ * plan the model had answered (689 s) never reach weekly_plans.
+ */
+async function runWeekPlanRequest(
+  context: { supabase: UserSupabaseClient; userId: string },
+  monday: string,
+  kind: "create" | "refine",
+  instructions: string | undefined,
+  draft: () => Promise<{ reply: string; plan: WeekPlan; events: BusyEvent[] }>,
+) {
+  const { supabase, userId } = context;
+  const running = await latestWeekPlanRequest(supabase, userId, monday);
+  if (running?.status === "running") {
+    throw new Error("A plan for this week is still being drafted. It appears on this page when it is ready.");
+  }
+  const { data: created, error: createError } = await supabase
+    .from("week_plan_requests")
+    .insert({ user_id: userId, week_start: monday, kind, instructions: instructions?.slice(0, 1500) ?? null })
+    .select("id")
+    .single();
+  if (createError) throw createError;
+  const finish = async (patch: { status: "done" | "failed"; reply?: string; error?: string }) => {
+    const { error } = await supabaseAdmin
+      .from("week_plan_requests")
+      .update({ ...patch, finished_at: new Date().toISOString() })
+      .eq("id", created.id)
+      .eq("user_id", userId);
+    if (error) throw error;
+  };
+  try {
+    const { reply, plan, events } = await draft();
+    const { error: savePlanError } = await supabaseAdmin.from("weekly_plans").upsert({
+      user_id: userId,
+      week_start: monday,
+      payload: JSON.parse(JSON.stringify(plan)) as Json,
+      approved_event_ids: [],
+    }, { onConflict: "user_id,week_start" });
+    if (savePlanError) throw savePlanError;
+    await finish({ status: "done", reply });
+    // Items already in the calendar (approved before) are shown as such, not twice.
+    const state = planCalendarState(plan, events, Date.now());
+    return {
+      reply,
+      plan,
+      busyEvents: state.otherEvents,
+      addedItems: state.addedItems,
+      approvedDates: state.approvedDates,
+      request: await latestWeekPlanRequest(supabaseAdmin, userId, monday),
+    };
+  } catch (error: unknown) {
+    await finish({ status: "failed", error: getErrorMessage(error, "Drafting the plan failed") }).catch((e: unknown) =>
+      console.error("Could not store the failed plan request", e),
+    );
+    throw error;
+  }
 }
 
 function toMondayISO(input: string): string {
@@ -381,33 +466,22 @@ export const generateWeekPlan = createServerFn({ method: "POST" })
     const timeZone = normalizeTimeZone(data.timeZone);
     const monday = toMondayISO(data.weekStart ?? todayInTimeZone(timeZone));
 
-    const { data: profile, error: profileError } = await supabase
-      .from("profiles").select("goals").eq("id", userId).maybeSingle();
-    if (profileError) throw profileError;
+    return runWeekPlanRequest(context, monday, "create", data.instructions, async () => {
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles").select("goals").eq("id", userId).maybeSingle();
+      if (profileError) throw profileError;
 
-    const { events, days: slots } = await buildBusyAndFree(supabase, userId, monday, timeZone);
+      const { events, days: slots } = await buildBusyAndFree(supabase, userId, monday, timeZone);
 
-    const { reply, days } = await callPlanAI({
-      monday,
-      goals: profile?.goals ?? "",
-      days: slots,
-      instructions: data.instructions,
-      timeZone,
+      const { reply, days } = await callPlanAI({
+        monday,
+        goals: profile?.goals ?? "",
+        days: slots,
+        instructions: data.instructions,
+        timeZone,
+      });
+      return { reply, plan: { week_start: monday, days }, events };
     });
-
-    const plan: WeekPlan = { week_start: monday, days };
-
-    const { error: savePlanError } = await supabase.from("weekly_plans").upsert({
-      user_id: userId,
-      week_start: monday,
-      payload: JSON.parse(JSON.stringify(plan)) as Json,
-      approved_event_ids: [],
-    }, { onConflict: "user_id,week_start" });
-    if (savePlanError) throw savePlanError;
-
-    // Items already in the calendar (approved before) are shown as such, not twice.
-    const state = planCalendarState(plan, events, Date.now());
-    return { reply, plan, busyEvents: state.otherEvents, addedItems: state.addedItems, approvedDates: state.approvedDates };
   });
 
 /* ============================================================
@@ -442,6 +516,8 @@ export const fetchWeekPlan = createServerFn({ method: "POST" })
       busyEvents: state.otherEvents,
       addedItems: state.addedItems,
       approvedDates: state.approvedDates,
+      // A draft still running on the server (started before a reload, or in another tab).
+      request: await latestWeekPlanRequest(supabase, userId, monday),
     };
   });
 
@@ -460,34 +536,28 @@ export const refineWeekPlan = createServerFn({ method: "POST" })
     const timeZone = normalizeTimeZone(data.timeZone);
     const monday = toMondayISO(data.weekStart);
 
-    const [profileResult, planResult] = await Promise.all([
-      supabase.from("profiles").select("goals").eq("id", userId).maybeSingle(),
-      supabase.from("weekly_plans").select("payload").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
-    ]);
-    if (profileResult.error) throw profileResult.error;
-    if (planResult.error) throw planResult.error;
-    const profile = profileResult.data;
-    const row = planResult.data;
+    return runWeekPlanRequest(context, monday, "refine", data.message, async () => {
+      const [profileResult, planResult] = await Promise.all([
+        supabase.from("profiles").select("goals").eq("id", userId).maybeSingle(),
+        supabase.from("weekly_plans").select("payload").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
+      ]);
+      if (profileResult.error) throw profileResult.error;
+      if (planResult.error) throw planResult.error;
+      const profile = profileResult.data;
+      const row = planResult.data;
 
-    const { events, days: slots } = await buildBusyAndFree(supabase, userId, monday, timeZone);
+      const { events, days: slots } = await buildBusyAndFree(supabase, userId, monday, timeZone);
 
-    const { reply, days } = await callPlanAI({
-      monday,
-      goals: profile?.goals ?? "",
-      days: slots,
-      instructions: data.message,
-      currentPlan: (row?.payload as unknown as WeekPlan | null) ?? null,
-      timeZone,
+      const { reply, days } = await callPlanAI({
+        monday,
+        goals: profile?.goals ?? "",
+        days: slots,
+        instructions: data.message,
+        currentPlan: (row?.payload as unknown as WeekPlan | null) ?? null,
+        timeZone,
+      });
+      return { reply, plan: { week_start: monday, days }, events: events as BusyEvent[] };
     });
-
-    const plan: WeekPlan = { week_start: monday, days };
-    const { error: savePlanError } = await supabase.from("weekly_plans").upsert({
-      user_id: userId, week_start: monday, payload: JSON.parse(JSON.stringify(plan)) as Json, approved_event_ids: [],
-    }, { onConflict: "user_id,week_start" });
-    if (savePlanError) throw savePlanError;
-
-    const state = planCalendarState(plan, events as BusyEvent[], Date.now());
-    return { reply, plan, busyEvents: state.otherEvents, addedItems: state.addedItems, approvedDates: state.approvedDates };
   });
 
 /* ============================================================
