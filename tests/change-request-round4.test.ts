@@ -65,7 +65,7 @@ describe("new-item requests that start with set / put / change are not moves", (
     });
     expect(r.changes).toEqual([]);
     expect(r.changeRequest).toBe(false);
-    expect(r.note).toContain("which your message did not ask for");
+    expect(r.note).toContain("I did not read your message as asking for that");
   });
 
   it("QA's probe variants: set aside, set up, put, set a call, change of plans, prep time, drop the idea, bring", () => {
@@ -92,10 +92,16 @@ describe("new-item requests that start with set / put / change are not moves", (
     }
   });
 
-  it("set / put / change / bring with a definite event still move it, by rule", () => {
+  it("change / bring / put off with a definite event still move it, by rule; set / put only when the model moved it too", () => {
     expect(move("Change my dentist appointment to 4 pm")).toMatchObject({ status: "resolved", starts_at: at("2026-11-11", 16), ends_at: at("2026-11-11", 17, 30), byRule: true });
-    expect(move("Set the team sync to 8 pm")).toMatchObject({ status: "resolved", starts_at: at("2026-11-10", 20), byRule: true });
-    expect(move("Put the dentist appointment on Friday")).toMatchObject({ starts_at: at("2026-11-13", 14), ends_at: at("2026-11-13", 15, 30) });
+    for (const [message, starts_at] of [["Set the team sync to 8 pm", at("2026-11-10", 20)], ["Put the dentist appointment on Friday", at("2026-11-13", 14)]] as const) {
+      const event = message.includes("sync") ? EVENTS[0] : dentist;
+      // The rules alone never make a move out of set / put ...
+      expect(reconcileCalendarChanges({ ...base, message, modelChanges: [], modelProposals: [] })).toMatchObject({ changeRequest: false, changes: [] });
+      // ... but a move of that event by the model is kept, with the time the message names.
+      const r = reconcileCalendarChanges({ ...base, message, modelChanges: [{ kind: "update", event, starts_at: at("2026-11-14", 9) }], modelProposals: [] });
+      expect(r.changes).toMatchObject([{ kind: "update", event: { id: event.id }, next: { starts_at }, byRule: true }]);
+    }
     expect(move("Bring the dentist appointment forward by an hour")).toMatchObject({ starts_at: at("2026-11-11", 13), ends_at: at("2026-11-11", 14, 30) });
     expect(move("Put off the dentist appointment by 30 minutes")).toMatchObject({ starts_at: at("2026-11-11", 14, 30) });
     expect(move("Postpone the team sync by 30 minutes")).toMatchObject({ starts_at: at("2026-11-10", 19, 30), ends_at: at("2026-11-10", 20, 30) });
