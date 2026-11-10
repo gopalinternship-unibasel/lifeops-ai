@@ -43,6 +43,12 @@ export interface ClockRef {
 
 export interface ChangeRequest {
   kind: "move" | "cancel";
+  /**
+   * The verb also starts ordinary new-item requests ("set", "put", "change", "bring", "pull",
+   * "drop"): the request counts only if its subject is an event in the calendar, named by words
+   * of that event's title alone ("my dentist appointment", not "a reminder for my dentist ...").
+   */
+  weak?: boolean;
   /** The words of the request that name the event ("my dentist appointment"). */
   subject: string;
   /** Title words of the subject, for matching against event titles. */
@@ -77,9 +83,62 @@ const MONTH_RE = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|ju
 
 // The verb must start a clause ("Move ...", "Please move ...", "Can you cancel ...", "..., then
 // move ..."): in "Block 3-5 pm for a gym push workout" the word "push" is not a request.
-const CLAUSE_START = "(?:^|[,;:]\\s*|\\b(?:please|pls|can you|could you|would you|will you|kindly|i want to|i'd like to|i would like to|i need to|i have to|i must|let's|lets|and|then|also|ok|okay|actually)\\s+)";
-const CANCEL_RE = new RegExp(`${CLAUSE_START}(cancel|delete|remove|call off|scrap|drop)\\b`);
-const MOVE_RE = new RegExp(`${CLAUSE_START}(move|reschedule|re-schedule|push|shift|postpone|delay|bring|pull|change|put|set|prepone)\\b`);
+const CLAUSE_START = "(?:^|[,;:.!?]\\s*|\\b(?:please|pls|can you|could you|would you|will you|kindly|i want to|i'd like to|i would like to|i need to|i have to|i must|let's|lets|and|then|also|ok|okay|actually)\\s+)";
+/** Verbs that only ever mean moving or cancelling an event. */
+const STRONG_MOVE_VERBS = ["move", "reschedule", "re-schedule", "push", "shift", "postpone", "delay", "prepone"];
+const STRONG_CANCEL_VERBS = ["cancel", "delete", "remove", "call off", "scrap"];
+/**
+ * Verbs that also start ordinary NEW-item requests: "Set a reminder for my dentist appointment at
+ * 1 pm", "Set up a gym session", "Set aside an hour", "Put a 1-hour gym session on Friday",
+ * "Change of plans: ...", "Bring snacks to the team sync", "Drop the idea of a run". QA round 4
+ * (10 Nov 2026) saw the reminder turned into a move of the dentist appointment. They count as a
+ * move or cancel only with a definite object that is an event in the calendar ("Change my dentist
+ * appointment to 4 pm", "Put the team sync on Friday"), never with "a"/"an", "up", "aside", "of".
+ */
+const WEAK_MOVE_VERBS = ["change", "put", "set", "bring", "pull"];
+const WEAK_CANCEL_VERBS = ["drop"];
+const verbAlternatives = (verbs: string[]) => verbs.map((verb) => verb.replace("-", "\\-")).join("|");
+const CANCEL_RE = new RegExp(`${CLAUSE_START}(${verbAlternatives([...STRONG_CANCEL_VERBS, ...WEAK_CANCEL_VERBS])})\\b`, "g");
+const MOVE_RE = new RegExp(`${CLAUSE_START}(${verbAlternatives([...STRONG_MOVE_VERBS, ...WEAK_MOVE_VERBS])})\\b`, "g");
+/** After a weak verb: a definite object ("the", "my", "it", "tomorrow's"), maybe after a particle. */
+const WEAK_OBJECT_OK = new RegExp(
+  `^\\s*(?:(?:back|forward|ahead|off)\\s+)?(?:the|my|our|your|this|that|these|those|it|today's|tomorrow's|tonight's|${WEEKDAY_RE}'s)\\b`,
+);
+/**
+ * Where a request's clause ends: "Move the dentist to 5 pm and block 3-5 pm tomorrow for the
+ * gym" names the destination "5 pm" only, and "Remove the gym session from my plan and block
+ * ..." the subject "the gym session from my plan".
+ */
+const NEXT_CLAUSE_RE =
+  /(?:[;.!?]\s+|,\s*(?:and\s+|then\s+|also\s+|but\s+)?(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check|what|when|how)\b)|\s(?:and|then|but|also|and then)\s+(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check)\b))/;
+
+function cutAtNextClause(text: string): string {
+  const m = NEXT_CLAUSE_RE.exec(text);
+  return m ? text.slice(0, m.index) : text;
+}
+
+/**
+ * The first move or cancel verb that really starts a change request: weak verbs only before a
+ * definite object (see WEAK_MOVE_VERBS). "put off" is "postpone".
+ */
+function findChangeVerb(text: string): { index: number; length: number; verb: string; kind: "move" | "cancel"; weak: boolean } | null {
+  const found: { index: number; length: number; verb: string; kind: "move" | "cancel"; weak: boolean }[] = [];
+  for (const [re, kind, weakVerbs] of [
+    [CANCEL_RE, "cancel", WEAK_CANCEL_VERBS],
+    [MOVE_RE, "move", WEAK_MOVE_VERBS],
+  ] as const) {
+    re.lastIndex = 0;
+    for (let m = re.exec(text); m; m = re.exec(text)) {
+      const verb = m[1];
+      const after = text.slice(m.index + m[0].length);
+      const weak = (weakVerbs as readonly string[]).includes(verb);
+      if (weak && !WEAK_OBJECT_OK.test(after)) continue;
+      found.push({ index: m.index, length: m[0].length, verb: verb === "put" && /^\s*off\b/.test(after) ? "postpone" : verb, kind, weak });
+    }
+  }
+  found.sort((a, b) => a.index - b.index || (a.kind === "cancel" ? -1 : 1));
+  return found[0] ?? null;
+}
 /** Words that make a message about the calendar even when no event title matches. */
 const CALENDAR_WORDS_RE =
   /\b(event|appointment|meeting|sync|lecture|class|session|call|interview|lunch|dinner|breakfast|workout|gym|run|block|stand-?up|calendar|dentist|doctor)\b/;
@@ -309,14 +368,20 @@ export function parseClock(text: string): {
  */
 export function parseChangeRequest(message: string, today: string): ChangeRequest | null {
   const text = normalizeRequest(message);
-  const cancel = CANCEL_RE.exec(text);
-  const move = MOVE_RE.exec(text);
-  if (!cancel && !move) return null;
+  const verb = findChangeVerb(text);
+  if (!verb) return null;
 
   // Where the destination starts: the first " to " (or "at" after put/set) after the verb that
   // is followed by a time, a day or "start"/"end"; or a shift phrase ("an hour later").
-  const verb = cancel && (!move || cancel.index <= move.index) ? cancel : move!;
-  const afterVerb = text.slice(verb.index + verb[0].length);
+  let afterVerb = cutAtNextClause(text.slice(verb.index + verb.length));
+  // A particle right after the verb ("push back the team sync an hour", "put off the dentist",
+  // "bring forward the lecture") gives the direction, it is not part of the event's name.
+  let particle = "";
+  const leading = /^\s*(back|forward|ahead|off)\s+/.exec(afterVerb);
+  if (leading) {
+    particle = leading[1] === "off" ? "later" : leading[1];
+    afterVerb = ` ${afterVerb.slice(leading[0].length)}`;
+  }
   const destinationWords = `(?=(?:start|begin|end|finish|the same day|same day|today|tonight|tomorrow|the day after|next|this|coming|on |noon|midday|midnight|\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b))`;
   // "to"/"until"/"for" first; "at" only when there is none ("move the 3 pm meeting at ... to 4 pm"
   // names the old time with "at").
@@ -326,22 +391,39 @@ export function parseChangeRequest(message: string, today: string): ChangeReques
 
   let subject = afterVerb;
   let destination = "";
-  const split = destStart.exec(afterVerb) ?? (/^(put|set|move|change)$/.test(verb[1]) ? atStart.exec(afterVerb) : null);
+  // A cancel has no destination: "Delete the team sync for tomorrow" names WHICH team sync.
+  // "on Friday" is the destination only when nothing else is ("Put the dentist appointment on
+  // Friday"); in "Move the dentist appointment on Wednesday to 4 pm" it names the event.
+  const onStart = new RegExp(`\\son\\s(?=(?:the )?(?:\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b))`);
+  const split =
+    verb.kind === "cancel"
+      ? null
+      : destStart.exec(afterVerb) ??
+        (/^(put|set|move|change)$/.test(verb.verb) ? atStart.exec(afterVerb) : null) ??
+        (/^(put|set|move|reschedule|re-schedule|shift)$/.test(verb.verb) ? onStart.exec(afterVerb) : null);
   if (split) {
     subject = afterVerb.slice(0, split.index);
     destination = afterVerb.slice(split.index).replace(/^\s(?:to|for|until|till|at)\s/, (word) => (/until|till/.test(word) ? " until " : " "));
-  } else {
-    const shift = shiftAnywhere.exec(afterVerb);
+  } else if (verb.kind === "move") {
+    // "Postpone the team sync by 30 minutes", "push back the team sync an hour": the verb gives
+    // the direction, the rest the amount.
+    const directional = Boolean(particle) || /^(push|delay|postpone|bring|pull|prepone)$/.test(verb.verb);
+    const shift =
+      shiftAnywhere.exec(afterVerb) ??
+      (directional ? /\b(?:by )?(?:\d+(?:\.\d+)?|an?|one|two|half an?) ?(?:hours?|hrs?|minutes?|mins?)\b/.exec(afterVerb) : null);
     if (shift) {
       subject = afterVerb.slice(0, shift.index);
       destination = afterVerb.slice(shift.index);
     }
   }
-  // "push ... back" / "bring ... forward" name the direction with the verb.
-  if (/^(push|delay|postpone)$/.test(verb[1]) && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += " later";
-  if (/^(bring|pull|prepone)$/.test(verb[1]) && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += " earlier";
+  if (verb.kind === "move") {
+    if (particle && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += ` ${particle}`;
+    // "push ... back" / "bring ... forward" name the direction with the verb.
+    if (/^(push|delay|postpone)$/.test(verb.verb) && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += " later";
+    if (/^(bring|pull|prepone)$/.test(verb.verb) && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += " earlier";
+  }
 
-  const kind: ChangeRequest["kind"] = verb === cancel && !destination.trim() ? "cancel" : move ? "move" : "cancel";
+  const kind: ChangeRequest["kind"] = verb.kind;
 
   // The subject may say which occurrence: "the dentist appointment on Wednesday", "the 3 pm meeting".
   const source = parseDay(subject, today);
@@ -359,6 +441,7 @@ export function parseChangeRequest(message: string, today: string): ChangeReques
 
   const request: ChangeRequest = {
     kind,
+    weak: verb.weak || undefined,
     subject: subjectRest,
     subjectWords: titleWords(subjectRest),
     sourceDay: source.day && source.day !== "same" ? source.day : undefined,
@@ -566,6 +649,11 @@ export interface Reconciled {
   changeRequest: boolean;
   changes: ReconciledChange[];
   proposals: ProposedBlock[];
+  /**
+   * New-event proposals that carry the title of an event already in the calendar: they would add
+   * a second one (the reply says so), they do not move the existing one.
+   */
+  sameTitleAs: { title: string; event: KnownEvent }[];
   /** A question back or the reason a requested change has no card. */
   note?: string;
   /** What the app corrected or dropped, for the server log. */
@@ -573,6 +661,13 @@ export interface Reconciled {
 }
 
 const MOVE_WORD_ANYWHERE = /\b(move|moved|reschedule|postpone|shift|push (?:it )?back|bring (?:it )?forward)\b/;
+/** Words that ask to change something that exists. */
+const CHANGE_WORD_ANYWHERE =
+  /\b(move[sd]?|moving|reschedul\w*|postpon\w*|shift\w*|push\w*|delay\w*|prepone|cancel\w*|delete|remove|call off|scrap|change|rename|later|earlier|instead|longer|shorter|extend|shorten)\b/;
+/** A request for something NEW: "Set a reminder ...", "Set up a call", "Add ...", "Book ...". */
+const CREATE_RE = new RegExp(
+  `${CLAUSE_START}(?:set (?:up|aside)|set an?|put an?|put in|pencil in|add|book|schedule|create|block|plan|make|remind|reserve|arrange|organi[sz]e|find (?:time|a slot))\\b`,
+);
 /** Words that allow a time between 00:00 and 05:59. */
 const EARLY_OK = /\b(\d{1,2}(?::\d{2})? ?am|morning|early|night|midnight|0[0-5]:\d{2}|[0-5]:\d{2})\b/;
 
@@ -583,6 +678,12 @@ function describe(event: KnownEvent, timeZone: string): string {
 function describeLocal(iso: string, timeZone: string): string {
   const local = localDateTime(iso, timeZone);
   return `${dayName(local.date)}, ${hhmm(local.minutes)}`;
+}
+
+/** Every title word of the request's subject is a word of the event's title. */
+function subjectIsTitleOf(request: ChangeRequest, event: KnownEvent): boolean {
+  const words = new Set(titleWords(event.title));
+  return request.subjectWords.length > 0 && request.subjectWords.every((word) => words.has(word));
 }
 
 /**
@@ -598,6 +699,8 @@ export function reconcileCalendarChanges(opts: {
   events: KnownEvent[];
   modelChanges: ModelChange[];
   modelProposals: ProposedBlock[];
+  /** Changes the model made for event ids that are not in the calendar (already dropped). */
+  unknownChangeRefs?: number;
 }): Reconciled {
   const { message, timeZone, nowMs, events } = opts;
   const text = normalizeRequest(message);
@@ -615,6 +718,28 @@ export function reconcileCalendarChanges(opts: {
   });
 
   const request = parseChangeRequest(message, opts.today);
+  /**
+   * The proposals that are left, as the user will see them: a reminder the model titled exactly
+   * like the event it is about is called "Reminder: ..." (QA round 4's "Set a reminder for my
+   * dentist appointment at 1 pm on Thursday" got a new "Dentist appointment" at 13:00), and any
+   * other new event with the title of an existing one is reported, so the reply can say it adds
+   * a second one.
+   */
+  const result = (base: Omit<Reconciled, "proposals" | "sameTitleAs" | "log" | "request">): Reconciled => {
+    const sameTitleAs: Reconciled["sameTitleAs"] = [];
+    const shown = proposals.map((proposal) => {
+      const same = events.find((event) => sameTitle(event.title, proposal.title));
+      if (!same) return proposal;
+      if (/\bremind/.test(text) && !/^\W*reminder\b/i.test(proposal.title)) {
+        log.push(`titled the model's new "${proposal.title}" as a reminder: the message asks for a reminder`);
+        return { ...proposal, title: `Reminder: ${proposal.title}`.slice(0, 200) };
+      }
+      sameTitleAs.push({ title: proposal.title, event: same });
+      return proposal;
+    });
+    return { request, ...base, proposals: shown, sameTitleAs, log };
+  };
+
   const finish = (target: KnownEvent | null, changes: ReconciledChange[], note?: string): Reconciled => {
     if (target) {
       // The event the user asked to move or cancel is never proposed again as a new event.
@@ -629,7 +754,7 @@ export function reconcileCalendarChanges(opts: {
         log.push(`dropped a model ${change.kind} of "${change.event.title}" that the request did not ask for`);
       }
     }
-    return { request, changeRequest: true, changes, proposals, note, log };
+    return result({ changeRequest: true, changes, note });
   };
 
   /** Checks every new time must pass, whoever chose it. */
@@ -666,9 +791,19 @@ export function reconcileCalendarChanges(opts: {
         ]);
       }
     }
+    // A request for something new that asks to change nothing ("Set a reminder for my dentist
+    // appointment at 1 pm", "Book lunch with Sam"): a move or cancel of an existing event is not
+    // what the user asked for, whatever the model returned.
+    const creating = CREATE_RE.test(text) && !CHANGE_WORD_ANYWHERE.test(text);
+    const unasked: KnownEvent[] = [];
     const changes: ReconciledChange[] = [];
     let note: string | undefined;
     for (const change of opts.modelChanges) {
+      if (creating) {
+        log.push(`dropped a model ${change.kind} of "${change.event.title}": the message asks for something new, not a change`);
+        if (!unasked.includes(change.event)) unasked.push(change.event);
+        continue;
+      }
       if (change.kind === "delete") {
         changes.push({ kind: "delete", event: change.event, byRule: false });
         continue;
@@ -692,12 +827,30 @@ export function reconcileCalendarChanges(opts: {
         byRule: false,
       });
     }
-    return { request, changeRequest: false, changes, proposals, note, log };
+    if (unasked.length > 0) {
+      note = `The AI model also suggested changing ${unasked.map((e) => describe(e, timeZone)).join(", ")}, which your message did not ask for, so I left that out. To move an event, say for example "Move ${unasked[0].title} to Friday at 3 pm".`;
+    } else if (!note && changes.length === 0 && (opts.unknownChangeRefs ?? 0) > 0) {
+      note = "The AI model referred to an event that is not in your calendar, so there is no change to save.";
+    }
+    return result({ changeRequest: false, changes, note });
   };
   if (!request) return withoutRequest();
 
   // Which event: the rules first, then the one event the model pointed at.
   const match = matchEvent(request, events, timeZone);
+  if (request.weak) {
+    // "Set a reminder for my dentist appointment" and "Put prep time for the Acme interview on
+    // Sunday" name an event without asking to change it: a weak verb ("set", "put", "change",
+    // "bring", "pull", "drop") is a change request only when its object IS an event.
+    const isEvent =
+      match.status === "one"
+        ? subjectIsTitleOf(request, match.event)
+        : match.status === "ambiguous" && match.candidates.every((event) => subjectIsTitleOf(request, event));
+    if (!isEvent) {
+      log.push(`read "${request.subject}" as a new item, not as an event to ${request.kind}`);
+      return withoutRequest();
+    }
+  }
   let target: KnownEvent | null = null;
   if (match.status === "ambiguous") {
     return finish(
@@ -721,11 +874,19 @@ export function reconcileCalendarChanges(opts: {
       target = [...referenced.values()][0];
     } else if (referenced.size > 1) {
       return finish(null, [], `I am not sure which event you mean: ${[...referenced.values()].map((e) => describe(e, timeZone)).join(", ")}. Please name it.`);
-    } else if (mentionsCalendar(message) || opts.modelChanges.length > 0) {
+    } else if (mentionsCalendar(message) || opts.modelChanges.length > 0 || (opts.unknownChangeRefs ?? 0) > 0) {
+      // Not in the calendar: a NEW event with that name is not what was asked for either
+      // ("Move my yoga class to 6 pm" must not offer a new yoga class at 6 pm as if it were the move).
+      const wanted = new Set(request.subjectWords);
+      proposals = proposals.filter((proposal) => {
+        const about = titleWords(proposal.title).some((word) => wanted.has(word));
+        if (about) log.push(`dropped a new-event proposal for "${proposal.title}": the request asked to ${request.kind} an event that is not in the calendar`);
+        return !about;
+      });
       return finish(null, [], `I could not find an event matching "${request.subject || message.trim()}" in your calendar for the next 7 days.`);
     } else {
-      // Not about the calendar after all ("Set a reminder ...", "Change my goals").
-      return { request, changeRequest: false, changes: [], proposals, log };
+      // Not about the calendar after all ("Change my goals").
+      return result({ changeRequest: false, changes: [] });
     }
   }
 
