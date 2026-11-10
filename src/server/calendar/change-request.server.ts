@@ -147,6 +147,8 @@ const DEFINITE_OBJECT = new RegExp(`^\\s*(?:(?:back|forward|ahead)\\s+)?${DEFINI
 const CREATE_RE = new RegExp(
   `${CLAUSE_START}(?:(?:set|put)\\b(?!\\s+(?:off\\b|${DEFINITE}\\b))|(?:pencil in|add|book|schedule|create|block|plan|make time|make an?|remind|reserve|arrange|organi[sz]e|find (?:time|a slot))\\b)`,
 );
+/** "Put the lecture on my calendar for Friday at 10 am", "Add it to my schedule": a request to add something. */
+const ADD_TO_CALENDAR_RE = /\b(?:put|set|add|enter|get|place|pop)\b[^.;!?]*\b(?:in|on|into|onto|to)\s+(?:my|the|our)\s+(?:calendar|schedule|agenda|diary|planner)\b/;
 /**
  * push / shift / delay / change / drop at the start of a clause without a definite object: a noun
  * or another verb ("Push workout tomorrow", "Change of plans", "Drop off the dry cleaning").
@@ -208,6 +210,8 @@ function findChangeVerbs(text: string): ChangeVerb[] {
       if (NEEDS_DEFINITE_OBJECT.has(verb) && !DEFINITE_OBJECT.test(after)) continue;
       // "Move on to the next task", "Move forward with the prep", "Postpone nothing": no object to change.
       if (/^\s*(?:nothing|none|no\b|on\b|over\b|out\b|along\b|away\b|in\b|(?:forward|ahead)\s+with\b)/.test(after)) continue;
+      // "Put the lecture on my calendar for Friday": adding to the calendar, not moving.
+      if (certainty === "model" && ADD_TO_CALENDAR_RE.test(`${verb} ${cutAtNextClause(after)}`)) continue;
       // "Bring my laptop to the team sync": only "bring/pull ... forward" (or back) moves an event.
       if ((verb === "bring" || verb === "pull") && !/\b(?:forward|earlier|ahead|back|later)\b/.test(cutAtNextClause(after))) continue;
       // The text of a new item or of a message to write: after a colon in a sentence that creates
@@ -961,7 +965,8 @@ export function reconcileCalendarChanges(opts: {
   const withoutRequest = (acceptChanges = true): Reconciled => {
     // A message about a reminder asks for a reminder, whatever verb it starts with; a message to
     // write or tell something ("Email the team that the sync is cancelled") asks for that.
-    const creating = CREATE_RE.test(text) || /\b(?:remind\w*|to-?dos?|note to self)\b/.test(text) || COMMUNICATE_RE.test(text);
+    const creating =
+      CREATE_RE.test(text) || /\b(?:remind\w*|to-?dos?|note to self)\b/.test(text) || COMMUNICATE_RE.test(text) || ADD_TO_CALENDAR_RE.test(text);
     const negated = NEGATED_CHANGE_RE.test(text);
     const question = /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) || (/\?\s*$/.test(message.trim()) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text));
     // "Move on", "moving forward with ..." and "Push workout" are not about changing an event.

@@ -112,6 +112,10 @@ const NEW_ITEMS: string[] = [
   "Tell Sam I need to move our lunch to Sunday.",
   "Move over, I need to add a lunch at noon tomorrow.",
   "Postpone nothing; just add lunch at noon tomorrow.",
+  "Put the lecture on my calendar for Friday at 10 am.",
+  "Put the dentist appointment in my calendar for Thursday at 1 pm.",
+  "Set the team sync in the calendar for Friday at 7 pm.",
+  "Please add the dentist appointment to my calendar on Friday at 9 am.",
 ];
 
 /**
@@ -199,7 +203,7 @@ describe("direction 1: new items, questions and refusals are never a move or a c
   it("'set' and 'put' never start a move by rule: only a move the model itself made of the event they name is kept", () => {
     const sync = byId("sync");
     const saturday = { kind: "update" as const, event: sync, starts_at: at("2026-11-14", 9), ends_at: at("2026-11-14", 10) };
-    for (const message of ["Put the team sync on Friday.", "Set the team sync for Friday at 7 pm.", "Put the team sync on my calendar for Friday at 7 pm."]) {
+    for (const message of ["Put the team sync on Friday.", "Set the team sync for Friday at 7 pm.", "Put the team sync at 7 pm on Friday."]) {
       // The model returned nothing, or a new event: no move. The new event is reported as a second one.
       expect(reconcile(message), message).toMatchObject({ changeRequest: false, changes: [] });
       expect(reconcile(message).note, message).toBeUndefined();
