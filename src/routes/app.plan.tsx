@@ -306,8 +306,8 @@ function PlanPage() {
             );
           })()}
           <div className="flex items-center">
-            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => shiftWeek(-1)}><ChevronLeft className="h-4 w-4" /></Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => shiftWeek(1)}><ChevronRight className="h-4 w-4" /></Button>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Previous week" onClick={() => shiftWeek(-1)}><ChevronLeft className="h-4 w-4" /></Button>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next week" onClick={() => shiftWeek(1)}><ChevronRight className="h-4 w-4" /></Button>
           </div>
           <h1 className="text-xl font-semibold tracking-tight">{weekLabel}</h1>
         </div>
