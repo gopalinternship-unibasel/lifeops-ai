@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { planCalendarState, planItemEventTitle } from "@/lib/plan-state";
+import { planCalendarState, planItemEmoji, planItemEventTitle } from "@/lib/plan-state";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
@@ -418,10 +418,7 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
       if (findConflicts({ starts_at: times.startsAt, ends_at: times.endsAt }, items).length > 0) continue;
 
       items.push({
-        emoji:
-          typeof candidateItem.emoji === "string"
-            ? candidateItem.emoji.slice(0, 4)
-            : "•",
+        emoji: planItemEmoji(candidateItem.emoji),
         title: title.trim().slice(0, 80),
         starts_at: times.startsAt,
         ends_at: times.endsAt,

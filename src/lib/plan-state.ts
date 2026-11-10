@@ -68,3 +68,14 @@ export function planDayStatus(
   const dayOver = new Date(year, month - 1, date, 23, 59, 59).getTime() < nowMs;
   return dayOver || day.items.length > 0 ? "over" : "empty";
 }
+
+/**
+ * The emoji of a plan item: the first emoji the model wrote, or a bullet. The real default model
+ * wrote " hal..." into the emoji field (10 Nov 2026), which was shown as the item's icon and would
+ * have become part of the calendar title ("hal Evening chill") on approval.
+ */
+export function planItemEmoji(value: unknown): string {
+  if (typeof value !== "string") return "•";
+  const match = /\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier}|\u200D\p{Extended_Pictographic}\uFE0F?)*/u.exec(value);
+  return match ? match[0] : "•";
+}

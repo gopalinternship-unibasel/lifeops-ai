@@ -3,7 +3,7 @@
  * a status), and a day with nothing to add must not offer Approve.
  */
 import { describe, expect, it } from "vitest";
-import { planDayStatus } from "@/lib/plan-state";
+import { planDayStatus, planItemEmoji } from "@/lib/plan-state";
 import { weekPlanRequestView } from "@/lib/week-plan-request";
 
 // Local times, whatever zone the tests run in.
@@ -22,6 +22,16 @@ describe("plan day cards", () => {
     expect(planDayStatus({ date: "2026-11-10", items: [items[0]] }, [], false, NOW)).toBe("over"); // only a past item
     expect(planDayStatus({ date: "2026-11-12", items: [] }, [], false, NOW)).toBe("empty");
     expect(planDayStatus({ date: "2026-11-12", items: [{ starts_at: local(2026, 11, 12, 9) }] }, [0], true, NOW)).toBe("added");
+  });
+});
+
+describe("plan item emoji", () => {
+  it("keeps the first emoji, drops text the model wrote instead (' hal' on 10 Nov 2026)", () => {
+    expect(planItemEmoji(" hal")).toBe("•");
+    expect(planItemEmoji("🏋️")).toBe("🏋️");
+    expect(planItemEmoji("🏞️ outdoors")).toBe("🏞️");
+    expect(planItemEmoji("☕")).toBe("☕");
+    expect(planItemEmoji(undefined)).toBe("•");
   });
 });
 
