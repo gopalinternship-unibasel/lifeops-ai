@@ -671,6 +671,13 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   model's change is kept only for a day the message names; otherwise the note says which day the
   model proposed and asks. Re-run on the corrected code, the reviewer's probes give no mismatch on
   the 600 day inputs, and every one of the 32 answers to questions is shown unchanged.
+  The chat now knows the calendar three weeks ahead (it was 7 days): an event moved to "Friday next
+  week" is found again afterwards, and a move beyond a week is checked for conflicts. Seen live on
+  11 Nov 2026: with the appointment moved to Fri 20 Nov and a "Reminder: Dentist appointment" on
+  Thursday, "Can we move the dentist appointment to Friday this week at 3 pm?" first proposed
+  moving the reminder (the only event with those words inside 7 days); with three weeks it proposes
+  the appointment itself, Fri 20 Nov to Fri 13 Nov, 3:00 PM. The model's prompt still lists the
+  next 7 days in full and later events in one line.
   Left open from that round (all need a click before anything changes): two requests in one message
   ("Drop the team sync from today and put it on Friday at 5 pm", "Reschedule X and cancel Y") are
   read as the first one only, a correction inside the message ("to tomorrow, no wait, Saturday") and

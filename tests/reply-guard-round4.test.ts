@@ -29,10 +29,10 @@ describe("short ids in replies", () => {
       pendingEvents: [],
       pendingEventChanges: [],
       changeRequest: true,
-      changeNote: 'I could not find an event matching "the hallucinated thing" in your calendar for the next 7 days.',
+      changeNote: 'I could not find an event matching "the hallucinated thing" in your calendar for the next 3 weeks.',
       refs,
     });
-    expect(reply).toBe('I could not find an event matching "the hallucinated thing" in your calendar for the next 7 days. Nothing in your calendar was changed.');
+    expect(reply).toBe('I could not find an event matching "the hallucinated thing" in your calendar for the next 3 weeks. Nothing in your calendar was changed.');
     // Even with no note at all, the claim does not survive.
     const bare = composeReply({ modelReply: "Moved E99.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], refs });
     expect(bare).not.toMatch(/E99|Moved/);

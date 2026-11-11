@@ -383,9 +383,11 @@ async function answerChatTurn(
       realEmails.sort((a, b) => Number(b.unread) - Number(a.unread));
     } catch (e) { console.error("Gmail fetch failed", e); }
     try {
-      // Fetch next 7 days so we can answer "tasks on Saturday" etc.
+      // Fetch the next three weeks: the rules read "Friday next week" and "the week after next",
+      // so an event moved there must still be found, and a move there checked for conflicts.
+      // (The prompt lists the next 7 days in full and later events in one line.)
       const weekStart = startOfToday(timeZone);
-      const weekEnd = endOfDaysFromNow(7, timeZone);
+      const weekEnd = endOfDaysFromNow(CALENDAR_DAYS, timeZone);
       const evs = await listCalendarEvents(userId, weekStart, weekEnd);
       upcomingEvents = evs.map(e => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at, notes: e.notes, busy: e.busy }));
       const todayEndMs = toMs(endOfToday(timeZone));
@@ -397,7 +399,7 @@ async function answerChatTurn(
   } else {
     await ensureSeedEvents(supabase, userId, timeZone);
     todayEvents = await listEventsForRange(supabase, userId, startOfToday(timeZone), endOfToday(timeZone));
-    upcomingEvents = await listEventsForRange(supabase, userId, startOfToday(timeZone), endOfDaysFromNow(7, timeZone));
+    upcomingEvents = await listEventsForRange(supabase, userId, startOfToday(timeZone), endOfDaysFromNow(CALENDAR_DAYS, timeZone));
   }
 
   const mockEmails = googleConnected ? [] : fetchMockEmails();
@@ -424,10 +426,23 @@ async function answerChatTurn(
   });
   const aliasOf = (event: KnownEvent) => `E${knownEvents.indexOf(event) + 1}`;
   const todayDate = todayInTimeZone(timeZone);
+  // The next 7 days in full; later events (up to three weeks ahead) in one line, so the model
+  // can refer to them by their ids without a long prompt.
+  const lastPromptDate = addDaysISO(todayDate, 7);
+  const soonEvents = knownEvents.filter((event) => localDateTime(event.starts_at, timeZone).date <= lastPromptDate);
+  const laterEvents = knownEvents.filter((event) => localDateTime(event.starts_at, timeZone).date > lastPromptDate);
+  const laterForPrompt = laterEvents.length === 0
+    ? ""
+    : `
+- Later events, up to three weeks ahead (id, date, start-end, title): ${laterEvents.slice(0, 15).map((event) => {
+        const start = localDateTime(event.starts_at, timeZone);
+        const end = localDateTime(event.ends_at, timeZone);
+        return `${aliasOf(event)} ${start.date} ${start.hhmm}-${end.hhmm} ${trim(event.title, 60)}`;
+      }).join("; ")}`;
   const calendarForPrompt = (() => {
-    if (knownEvents.length === 0) return "  (no events)";
+    if (soonEvents.length === 0) return "  (no events)";
     const groups = new Map<string, KnownEvent[]>();
-    for (const event of knownEvents) {
+    for (const event of soonEvents) {
       const date = localDateTime(event.starts_at, timeZone).date;
       if (!groups.has(date)) groups.set(date, []);
       groups.get(date)!.push(event);
@@ -495,7 +510,7 @@ CURRENT CONTEXT (all times local, 24-hour, time zone ${timeZone}):
 - Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
 
 - Calendar, today and the next 7 days (id, start-end, title):
-${calendarForPrompt}
+${calendarForPrompt}${laterForPrompt}
 
 - Recent emails (UNREAD marked):
 ${emailsForPrompt || "  (none)"}
@@ -815,6 +830,13 @@ export function startOfToday(timeZone = "UTC") {
 export function endOfToday(timeZone = "UTC") {
   return zonedDateTimeToISO(todayInTimeZone(timeZone), { hour: 23, minute: 59, second: 59, millisecond: 999 }, timeZone);
 }
+/**
+ * How far ahead the chat knows the calendar. Until 11 Nov 2026 it was 7 days: an event moved to
+ * "Friday next week" could not be found afterwards ("Move the dentist appointment back ..."
+ * picked the reminder for it instead), and a move beyond a week was not checked for conflicts.
+ */
+const CALENDAR_DAYS = 21;
+
 function endOfDaysFromNow(days: number, timeZone = "UTC") {
   const date = addDaysISO(todayInTimeZone(timeZone), days);
   return zonedDateTimeToISO(date, { hour: 23, minute: 59, second: 59, millisecond: 999 }, timeZone);

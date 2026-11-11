@@ -1403,7 +1403,7 @@ export function reconcileCalendarChanges(opts: {
         dayText.endsWith("'s") ? "" : dayText,
         clockText && !/^(?:at|from)\b/.test(clockText) ? `at ${clockText}` : clockText,
       ].filter(Boolean).join(" ");
-      return finish(null, [], `I could not find an event matching "${label}" in your calendar for the next 7 days.${hint}`);
+      return finish(null, [], `I could not find an event matching "${label}" in your calendar for the next 3 weeks.${hint}`);
     } else {
       // Not about the calendar after all ("Cancel my subscription", "Move on to the next task").
       return withoutRequest();

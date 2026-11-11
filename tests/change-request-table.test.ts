@@ -419,7 +419,7 @@ describe("a clear verb without a clear target or time: no card, a question or a 
   it("an event that is not in the calendar is not found, and no new event of that name is offered", () => {
     const yoga = reconcile("Move my yoga class to 6 pm", { proposals: [{ title: "Yoga class", starts_at: at("2026-11-10", 18), ends_at: at("2026-11-10", 19) }] });
     expect(yoga).toMatchObject({ changeRequest: true, changes: [], proposals: [] });
-    expect(yoga.note).toBe('I could not find an event matching "my yoga class" in your calendar for the next 7 days.');
+    expect(yoga.note).toBe('I could not find an event matching "my yoga class" in your calendar for the next 3 weeks.');
     const hallucinated = reconcile("Please move the hallucinated thing to tomorrow 9 am.", { unknownChangeRefs: 1 });
     expect(hallucinated.note).toContain('I could not find an event matching "the hallucinated thing"');
     // The model points at an event the message does not name: offered as a question, not a card.
