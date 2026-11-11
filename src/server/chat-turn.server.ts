@@ -472,6 +472,7 @@ INSTRUCTIONS:
 - When user re-ranks, return the FULL re-ranked list.
 - If calendar context is unavailable, do NOT populate "proposed_events" or "event_changes". Explain that the calendar could not be checked and ask the user to retry.
 - For NEW scheduling requests with a clear time ("Saturday 9–1", "3–5 pm"), populate "proposed_events". They are PROPOSED — never say they are saved; the user clicks Save.
+- A REMINDER, prep time or buffer for something, also for an EXISTING event ("set a reminder for my dentist appointment at 1 pm on Thursday"), is a NEW item: put it in "proposed_events" with the title "Reminder: <what>" at the day and time the user names (15 minutes unless a length is given). Leave the existing event as it is: no "event_changes" for it.
 - For requests to MOVE / RESCHEDULE / RENAME an EXISTING event (e.g. "move the 3 pm meeting to 4 pm"), use "event_changes" with kind="update" and that event's id from the calendar below (E1, E2, ...), with the new starts_at and ends_at. Keep the event's own date unless the user names another day ("the same day" means the event's own date). Never put a moved event into "proposed_events".
 - For requests to CANCEL / DELETE an event, use "event_changes" with kind="delete" and the event's id.
 - Never say that something "has been moved", "has been added" or "was sent": nothing changes until the user clicks. Never copy ids (E1, e1) into the reply.

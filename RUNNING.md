@@ -43,6 +43,12 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
   1.4-3.1 tokens/s; Qwen 3B 19 and 4-5.6 tokens/s; Llama 8B 7.6 and 0.7-0.9 tokens/s under that load.
   The app does not depend on the model for moves any more (see "What to try"), but the briefing,
   the planner's calendar blocks and the chat's own proposals do.
+  QA round 4's major defect (10 Nov 2026: "Set a reminder for my dentist appointment at 1 pm on
+  Thursday" offered as a move of the appointment) came from the app's own rules, not from the model:
+  the new time was the rules' reading, so it happened with any model. It is fixed in the rules (see
+  "What to try"). The model choice was not measured again in that round: the shared Ollama was busy
+  with another project's embedding and 3B-model work the whole time (its container at 800-900% CPU),
+  so new timings would not have been comparable; the measurement above still decides the default.
 - **Why 4 threads**, measured in the Ollama log on 9 Nov 2026: this CPU has 4 performance and 4
   low-power cores; `qwen2.5:3b` with Ollama's default (all 8 threads) generated 0.45 tokens/s while
   other work kept the PC busy, the same weights with 4 threads 4.2-5.6 tokens/s in the same hour.
@@ -80,7 +86,7 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 11 migrations in `supabase/migrations`
+1. starts the local Supabase stack and applies the 12 migrations in `supabase/migrations`
    (the first start downloads the Supabase images, several minutes); on every later run
    `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
@@ -136,9 +142,12 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-lifeops.ps1 -KeepSupabase 
 
 Every AI answer comes from the local model (`qwen2.5-7b-4threads`): about 1.5 to 4 minutes per answer on
 this PC when the shared Ollama is free (94-223 s measured), plus about 4 minutes for the first request
-after the model was idle for 5 minutes (loading it and reading the whole prompt), and 5 to 15 minutes
-when another project uses the shared Ollama at the same time (see "Known limits"). The UI shows
-"Thinking..." meanwhile, and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`).
+after the model was idle for 5 minutes (loading it and reading the whole prompt). When another project
+uses the shared Ollama at the same time it is much slower: QA round 4 (10 Nov 2026, two runners at
+about 325% CPU each, the PC at 100%) measured 415, 433, 534, 689, 846, 1371, 1390, 1500 and 1658 s
+(up to 27.6 minutes), and one first-visit briefing hit the 30-minute timeout and was answered by rules
+instead (see "Known limits"). The UI shows "Thinking..." (or "Drafting..." on the plan page) meanwhile,
+and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`).
 
 1. **Workspace** (`/app`): on the first visit MONDAY asks itself for an inbox and calendar briefing and
    ranks your priorities (stored in the `tasks` table, shown under *Priorities*). Then try
@@ -163,12 +172,61 @@ when another project uses the shared Ollama at the same time (see "Known limits"
      A new event the model proposes with the title of the event you asked to move becomes a move of
      that event (QA saw a second dentist appointment instead of a move), a model time before 06:00 is
      refused unless you asked for the early hours, and a time in the past is refused. Changes for event
-     ids that are not in your calendar are ignored.
+     ids that are not in your calendar are ignored, and the reply says the model named an event that
+     is not there ("Moved E99." is never shown).
+     **Which messages are read as a move or cancel** (QA round 4: "Set a reminder for my dentist
+     appointment at 1 pm on Thursday" was offered as a move of the appointment). The rules are
+     conservative: a message is a change request only when it clearly asks to move, reschedule, shift,
+     push, postpone, bring forward or cancel an event that it names. In detail:
+     - *Verbs.* "move", "reschedule", "postpone", "put off", "cancel", "call off" always ask for a
+       change. "push", "shift", "delay", "delete", "remove", "scrap" and "change", "bring/pull ...
+       forward", "drop" count only when their object is an event of the calendar ("Change my dentist
+       appointment to 4 pm", "Drop the team sync"), not in "Change of plans: ...", "Push workout
+       tomorrow", "Shift my focus to the lecture", "Bring snacks to the team sync", "Delete the note
+       about the lecture". "set" and "put" never start a move by rule ("Set a reminder ...", "Set up
+       ...", "Set aside ...", "Put a 1-hour gym session on Friday", "Put the lecture on my calendar
+       for Friday"); "Put the team sync on Friday" becomes a move only if the model itself returned a
+       move of that event (then with the day the message names), and a new event of that name is
+       offered as a second one, with a warning. "The block for the Acme interview" or "the meeting for
+       the dentist appointment" is not the interview or the appointment either.
+     - *The verb must start the request* ("Please ...", "Can you ...", "I need to ...", "..., then
+       ..."). Inside a reminder or a task ("Remind me to reschedule the dentist"), a message to write
+       ("Email Sam: cancel lunch on Saturday"), a refusal ("Don't cancel the team sync"), a question
+       ("Should I move ...?") or an idiom ("Move on") it is not a request.
+     - *The event must be named by words of its own title* ("my dentist appointment", "the dentist",
+       "the team sync meeting", "tomorrow's lecture", "my 2 pm"). "The reminder for my dentist
+       appointment", "the Acme interview prep" and "my dentist visit" are not that event: no card, and
+       the reply names the closest event ("I could not find an event matching ... The closest is
+       **Dentist appointment** (...). To move it, name it as it is in the calendar."). Two events in one
+       request ("Cancel the team sync and the lecture") get "one change per message".
+     - *The new time is read from the request itself, not from its reason*: "Move the dentist
+       appointment to Friday because I have a lecture on Wednesday at 4 pm" keeps the appointment's
+       own time on Friday. "Tuesday the 17th" and "the 13th" are read; a weekday that is not its
+       date's ("Thursday Nov 13") is asked about.
+     Everything else takes the ordinary path and keeps the model's own answer: new events and
+     reminders are offered as new cards (a reminder the model titles exactly like its event becomes
+     "Reminder: Dentist appointment"; any other new event with the title of an existing one says "...
+     is already in your calendar on ...; saving this adds a second one"). A move or cancel the model
+     returns although the message did not ask for one (a new-item request, a question, a refusal, a
+     message to write, an event the message does not mention) is left out and named: "The AI model
+     also suggested changing **Dentist appointment** (...). I did not read your message as asking for
+     that, so I left it out. To move or cancel an event, name it, for example ...". After a cancel a
+     new event of the same name is kept ("Cancel the dentist appointment and book a new one for
+     Friday at 2 pm"). `tests/change-request-table.test.ts` lists about 190 phrasings in both
+     directions with the worst answers a model can give for each.
      **The reply always matches the cards**: for a move or cancel it is written from the validated card
      only; with other proposals the model's sentences that name a day or time are replaced by one line
      per card with the card's own times, and a conflict is named ("overlaps … Save will be refused").
-     Internal ids, prompt template lines and claims like "has been moved" or "I sent" are removed from
-     every reply. Replies show times in your local time with the day ("Wed, Nov 11, 4:00 PM – 5:30 PM");
+     Internal ids, prompt template lines and claims like "has been moved", "Moved ...", "Reminder set
+     ...", "Done!" or "I sent" are removed from every reply, and so is a sentence whose weekday is not
+     its date's ("Thursday 2026-11-14"); a short id the prompt had becomes the event's title (or the
+     email), a sentence about an id it never had is removed. "Your gym session is scheduled for 6 pm"
+     counts as a claim only in the answer to a request for something new or for a change; in the
+     answer to a question ("When is my dentist appointment?" → "Your dentist appointment is scheduled
+     for Wednesday at 2 pm") it is a description and stays (`tests/reply-guard-table.test.ts`).
+     Without a change card nothing in the reply talks about moving or cancelling, and without a draft
+     card nothing says "Draft ready" (a reply to an email that is not in the inbox says so instead).
+     Replies show times in your local time with the day ("Wed, Nov 11, 4:00 PM – 5:30 PM");
      cards use your browser's format ("Tomorrow 3:00 PM–5:00 PM" or "Wed, 11 Nov 16:00–17:30").
    Reloading the page restores the chat history. Cards you saved, applied or dismissed stay that way
    (stored in the `chat_card_actions` table): they are not offered again after a reload or in another
@@ -178,6 +236,13 @@ when another project uses the shared Ollama at the same time (see "Known limits"
    *Today's schedule* lists only today; an event saved for another day is in the calendar.
    Messages are limited to 4,000 characters (the box stops there and shows a counter near the limit);
    if anything still sends a longer one, the answer is one sentence, not a JSON error.
+   The model's first-visit briefing is checked against the data: every unread email and today's events
+   must be in it, and its inbox block must have the right count, one bullet per unread email and no
+   read email (QA round 4 saw the read Stripe summary listed as a fifth unread one); otherwise the
+   inbox and today are listed from the data and the reply says so. Priority reasons may say "today"
+   only for today's events and must give an event's real length; a wrong one is rewritten from the
+   calendar or the email ("120 min block on Mon, Nov 16 (10:00 AM–12:00 PM); from Acme Recruiting's
+   email (high importance)" instead of the model's "biggest commitment today").
    If the model does not answer the automatic first-visit briefing (timeout, Ollama unreachable), the
    briefing is put together by rules instead and says so: unread emails, today's events, and
    priorities ranked by the same rule the model is given (stored as tasks with source `rules`). An
@@ -201,7 +266,20 @@ when another project uses the shared Ollama at the same time (see "Known limits"
    counted; items that now overlap an event (the calendar changed since the plan was made) are held back
    and named. Moving a plan item into the past is refused. Which items are approved is read from the
    calendar, so after a reload (or in another tab) an approved item is listed once, marked
-   "in calendar", and a day whose items are all in the calendar reads **Added** instead of Approve.
+   "in calendar", and a day whose items are all in the calendar reads **Added** instead of Approve. A
+   day with nothing left to add has no Approve button: **Past** for a day (or items) that is over,
+   "Nothing to add" for an empty day ahead.
+   **Drafting survives a reload** (QA round 4): every Create plan, Regenerate or refinement is stored
+   (table `week_plan_requests`) and runs to the end on the server; the plan is written with the
+   service-role client, scoped to your user id, so a model that takes longer than the browser's
+   1-hour access token still gets its plan stored (QA lost one that way). After a reload, or in
+   another tab, the page shows "Drafting your week plan (started ...)" with Create plan disabled,
+   checks every 4 s and then shows the plan and the model's reply; a failed or cut-off draft says so,
+   and a second draft while one runs is refused. You can look at another week meanwhile: it is not
+   shown as drafting, its Create plan button waits (one draft at a time), and when the draft returns it
+   does not replace the week on screen ("The plan for the week of Nov 9 is ready."). As in the chat, a
+   draft cut off by a server stop is shown as drafting until the longest a request can take (the model
+   timeout plus 2 minutes) has passed, then as "did not finish".
 3. **Calendar** (`/app/calendar`): week view of the demo calendar (badge "Demo data") or Google Calendar.
    The grid shows 06:00 to midnight and starts earlier when an event of the week does (an event at
    04:00 is drawn, not hidden); an event that runs past midnight shows on both days.
@@ -211,6 +289,10 @@ when another project uses the shared Ollama at the same time (see "Known limits"
    the same conflict check, email actions become drafts only, actions the model invents (for example
    "send_email") are dropped, and the *Execution log* shows where each action went. An approved action
    whose **Run** is refused (it overlaps an event, or its time has passed) can still be **Reject**ed.
+   A recipient in a planned draft is kept only if you wrote it (the address, or the name as a word of
+   your text): the planner has no address book, and the model invented "sam@example.com" for "draft an
+   email to Sam" (QA round 4). Such a draft reads "Draft to (recipient to fill in)", the plan's note
+   says so, and the saved draft has no address (a Gmail draft is then created without a To header).
    Reminders and tasks show one time (a point in time), not "17:45 – 17:45". *Top priorities* says who
    ranked them: "Ranked by the AI assistant ..." or, when the model returned no ranking and the
    rule-based fallback did it (`tasks.source = rules`), "Ranked by simple rules ..." with a "rule" mark
@@ -262,18 +344,22 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 95 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # 357 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
                          # meetings already over), reply and plan-request state, dates in the chat prompt,
                          # move/cancel requests checked against the model's answer (QA's three wrong moves),
                          # replies cleaned and written from the cards, priorities label, calendar grid hours,
-                         # plan approval state after a reload
+                         # plan approval state after a reload; QA round 4: which messages are a move or cancel
+                         # and which are not (tests/change-request-table.test.ts: about 190 phrasings in both
+                         # directions, each with the worst answers a model can give), claims and descriptions in
+                         # replies (tests/reply-guard-table.test.ts), unknown ids and draft claims, the briefing's
+                         # inbox block and priority reasons, plan day status and stored plan requests
 npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
 cd fastapi-backend
-.venv\Scripts\python.exe -m pytest     # 18 API tests with a temporary SQLite file and a fake LLM
+.venv\Scripts\python.exe -m pytest     # 20 API tests with a temporary SQLite file and a fake LLM
 ```
 
 `npm run check` runs lint, typecheck, unit tests and build in one go. The Google tests never touch the
@@ -392,6 +478,55 @@ node lifeops-fix5\run-block.mjs x                 # approve and run the planner'
 node lifeops-fix5\badge.mjs m2                    # after a restart: model badge, a saved move still there
 ```
 
+**Round-6 checks** (10 Nov 2026, the fixes after the fourth QA pass) live in `..\_e2e\lifeops-fix6\`, same
+layout (user files `.run\fix6-user-<suffix>.json`). Its `fake-llm.mjs` is the round-5 double plus QA round
+4's cases: a reminder for the dentist appointment answered with a new "Dentist appointment" (what the
+real model returned), the same request answered with a move of the appointment, new gym sessions with
+claims in the reply, "Moved E99." with an unknown event id, "Draft ready." with an unknown email id, a
+bad briefing for users named "...Quality..." (five inbox bullets with the read Stripe email, "biggest
+commitment today" for next Monday's interview) and week plans that take 45 s for users whose goals
+contain "SLOW".
+
+```powershell
+cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+powershell -ExecutionPolicy Bypass -File lifeops-fix6\start-fake.ps1
+node lifeops-fix6\round4.mjs chat c      # reminder stays a reminder (saved, appointment unchanged), model move refused,
+                                          # gym requests without "could not find", unknown ids, move example still a move
+node lifeops-fix6\round4.mjs quality q   # bad inbox block listed from the data, "today" reason rewritten
+node lifeops-fix6\round4.mjs plan p      # reload 8 s after Create plan: "Drafting", then the plan without another reload
+node lifeops-fix6\round4.mjs grid p      # after Approve entire week and a reload: no Approve button, Monday "Past"
+node lifeops-fix6\round4.mjs planner d   # the invented sam@example.com is not the draft's recipient
+node lifeops-fix6\rls.mjs d p            # row-level security of week_plan_requests between two users
+# with the DEFAULT config (start-lifeops.ps1, real local model):
+node lifeops-fix6\real.mjs <step> <suffix>   # reminder, gym, plan-reload (see the script's header)
+```
+
+**Round-7 checks** (10-11 Nov 2026, the conservative move/cancel rules and a review of every round-6
+change) live in `..\_e2e\lifeops-fix7\`, same layout (user files `.run\fix7-user-<suffix>.json`, made
+with `node scripts\create-test-user.mjs --new --file .run\fix7-user-c.json`). Its `fake-llm.mjs` adds
+the worst answers a model can give for the new rules: a delete of the dentist appointment for "Cancel
+the reminder for my dentist appointment" and for a question, a move of the lecture next to the new
+block of "Set aside an hour before the lecture ...", a move to the wrong day and a new event of the
+same name for "Put the team sync on Friday", a cancel for "Don't cancel the team sync" and for "Email
+Sam: cancel lunch on Saturday", and no calendar answer at all for a clear move.
+
+```powershell
+cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+powershell -ExecutionPolicy Bypass -File lifeops-fix7\start-fake.ps1
+node lifeops-fix7\round7.mjs chat c      # 26 checks: reminder stays a reminder (saved, appointment unchanged), unasked
+                                          # model moves left out and named, set/put only with the model's own move,
+                                          # the reminder (not the appointment) cancelled, questions keep their answer,
+                                          # unknown ids, clear moves by rule and saved, cancel + book a new one
+node lifeops-fix7\round7.mjs quality q   # bad inbox block listed from the data, "today" reason rewritten
+node lifeops-fix7\round7.mjs plan p      # reload after Create plan: "Drafting", then the plan; Regenerate and look at
+                                          # next week meanwhile: next week stays empty and is not overwritten
+node lifeops-fix7\round7.mjs grid p      # after Approve entire week and a reload: no Approve button, Mon/Tue "Past"
+node lifeops-fix7\round7.mjs planner d   # the invented sam@example.com is not the draft's recipient
+node lifeops-fix7\rls.mjs d p            # row-level security of week_plan_requests between two users
+# with the DEFAULT config (start-lifeops.ps1, real local model), one model answer per step:
+node lifeops-fix7\real.mjs <step> <suffix>   # reminder, move, gym, plan-reload (see the script's header)
+```
+
 The scripts read `$env:E2E_PROJECT` (project folder) and `$env:E2E_DB` (database container) to run
 against a fresh clone with its own `project_id`, as done on 9-10 Nov 2026 (`lifeops-fix5\fresh`,
 project `lifeopsfix5`; its stopped Supabase volumes are kept, remove them with Docker if not needed).
@@ -443,8 +578,12 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   request at a time per model, so a request waits while another one on the same model runs, and the
   PC's load changes the speed several times over: QA round 3 saw 110-505 s per answer with the old 3B
   model and one planner request that timed out at 900 s after waiting behind six requests from other
-  projects without ever starting. Requests now time out after 30 minutes. To allow more, or for answers
-  in seconds, use a hosted provider:
+  projects without ever starting. QA round 4 (10 Nov 2026, two users within a minute while another
+  project used the shared Ollama: two runners at about 325% CPU each, the Ollama container at 994%,
+  the PC at 100%) measured 415-1658 s per answer (generation 0.2-1.7 tokens/s, prompt reading 4.7
+  tokens/s), and one first-visit briefing hit the timeout at 1800 s and was answered by rules. That is
+  the environment, not the app: the fix is a free Ollama or a hosted model. Requests time out after 30
+  minutes. To allow more, or for answers in seconds, use a hosted provider:
   ```powershell
   node scripts\write-local-env.mjs --set LLM_TIMEOUT_MS=3600000 --backend-set LLM_TIMEOUT_SECONDS=3600
   ```
@@ -470,6 +609,28 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   cancels are read by rule where the request is unambiguous and checked against the request otherwise,
   so a wrong model answer cannot reach a card (see "What to try"). New proposals always wait for
   **Save** and pass the conflict check, but read them before saving.
+  Round-6 real-model checks (10 Nov 2026, default config after a clean start, the other project's
+  embedding and 3B-model jobs on the shared Ollama the whole time; `..\_e2e\lifeops-fix6\real.mjs`):
+  "Set a reminder for my dentist appointment at 1 pm on Thursday." gave no card and no change, the
+  appointment untouched (934.6 s for 2,083 prompt + 113 completion tokens, including loading the model
+  for 4 min 15 s next to the other runners), but the model's text claimed "Reminder set for Thursday
+  2026-11-14 13:00:00" (nothing was set, and Nov 14 is a Saturday); such a reply is now replaced by
+  "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try
+  again, naming the day and the time." "Set up a gym session tomorrow at 6 pm for an hour." gave the
+  right card and a reply without "could not find" (420.8 s). Create plan with a reload 60 s later
+  showed "Drafting your week plan" with Create plan disabled, then the plan (7 days, 24 items, Monday
+  "Past") and its reply without another reload, 1,177 s after the click (1,172 s in the model: 1,076
+  prompt + 1,214 completion tokens, after waiting about 6 minutes behind the gym request). Two of its
+  items had " hal" in the emoji field; an item's icon is now the first emoji or a bullet. A local 7B
+  model still sometimes answers a request with no proposal at all: ask again, or use a hosted model.
+- The rules that read a move or cancel are deliberately narrow (see "What to try"). They do not read
+  a paraphrased event name ("my dentist visit", "the Acme interview prep"), two events in one request,
+  "half past six", "one day earlier", "Move it" without an answer from the model that says which
+  event, or anything after "set" / "put". MONDAY then asks, names the closest event or leaves the
+  request to the model (whose own change is kept only if the message asks for a change and mentions
+  that event); it does not guess. "Move the couch with Sam on Saturday" is read as a calendar move
+  that names no event ("I could not find an event matching ...; the closest is Lunch with Sam"):
+  say "Add a block to move the couch ..." for a new item.
 - Success toasts appear over the top-right header buttons for a few seconds (they pause while the mouse is
   over them).
 - The planner service keeps its data in SQLite and creates tables at start-up without migrations; after
