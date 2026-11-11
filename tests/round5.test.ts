@@ -232,6 +232,14 @@ describe("a reply that says it is done, in a turn with no card", () => {
       "How many unread emails do I have?",
       "Did Sam reply about lunch?",
       "Summarise my inbox.",
+      "Can you tell me what is on my calendar tomorrow?",
+      "Tell me about my day.",
+      "Send me my schedule for Friday.",
+      "Write a summary of my week.",
+      "Draft a plan for my afternoon.",
+      "Do I have any reminders today?",
+      "What should I write to Sam?",
+      "Let me know when I am free on Friday.",
     ]) {
       expect(asksForAction(message), message).toBe(false);
     }

@@ -157,7 +157,12 @@ const CREATE_RE = new RegExp(
   `${CLAUSE_START}(?:(?:set|put)\\b(?!\\s+(?:off\\b|${DEFINITE}\\b))|(?:pencil in|add|book|schedule|create|block|plan|make time|make an?|remind|reserve|arrange|organi[sz]e|find (?:time|a slot))\\b)`,
 );
 /** "Confirm lunch with Sam for me", "Let Sam know I am late", "Forward it to Ana": something to send. */
-const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|let\\s+\\w+\\s+know)\\b`);
+const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|let\\s+(?!me\\b)\\w+\\s+know)\\b`);
+const MESSAGE_START = `^(?:${FILLER},?\\s+){0,3}(?:${ASK}\\s+)?(?:${FILLER}\\s+){0,2}`;
+/** A verb that sends something to someone, not followed by "me" ("Tell me ..." asks for an answer). */
+const OUTBOUND_RE = new RegExp(`${MESSAGE_START}(?:email|e-mail|mail|reply|respond|message|text|send|notify|tell|ask|answer)\\b(?!\\s+me\\b)`);
+const WRITING_RE = new RegExp(`${MESSAGE_START}(?:draft|write|compose)\\b(?!\\s+me\\b)`);
+const MAIL_WORDS_RE = /\b(?:e-?mails?|mail|repl(?:y|ies)|responses?|messages?|texts?|invites?|invitations?|notes?\s+to)\b|\b(?:write|draft|compose)\s+(?:back\s+)?to\b/;
 /** "Put the lecture on my calendar for Friday at 10 am", "Add it to my schedule": a request to add something. */
 const ADD_TO_CALENDAR_RE = /\b(?:put|set|add|enter|get|place|pop)\b[^.;!?]*\b(?:in|on|into|onto|to)\s+(?:my|the|our)\s+(?:calendar|schedule|agenda|diary|planner)\b/;
 /**
@@ -675,12 +680,23 @@ export function asksForCalendarAction(message: string): boolean {
  * prepared nothing, whatever the model's reply says (reply guard, QA round 5).
  */
 export function asksForAction(message: string): boolean {
-  if (asksForCalendarAction(message)) return true;
   const text = normalizeRequest(message);
+  // A question is answered, not carried out: "When is my dentist appointment?", "Do I have any
+  // reminders today?", "What should I write to Sam?".
+  const question =
+    /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) ||
+    (/\?\s*$/.test((message ?? "").trim()) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text));
+  if (question) return false;
+  if (asksForCalendarAction(message)) return true;
   return (
-    COMMUNICATE_RE.test(text) ||
+    // Something to send to someone else. "Tell me ...", "Send me my schedule" ask for an answer.
+    OUTBOUND_RE.test(text) ||
+    // "Draft a reply to the recruiter", "Write to Sam ..."; "Write a summary of my week" and
+    // "Draft a plan for my day" ask for text in the chat.
+    (WRITING_RE.test(text) && MAIL_WORDS_RE.test(text)) ||
     ADD_TO_CALENDAR_RE.test(text) ||
-    OTHER_ACTION_RE.test(text)
+    OTHER_ACTION_RE.test(text) ||
+    /\bremind(?:ers?)?\b/.test(text)
   );
 }
 
