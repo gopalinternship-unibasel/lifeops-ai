@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import {
   asksForAction,
+  asksForCalendarAction,
   followsUpOnAction,
   matchEvent,
   parseChangeRequest,
@@ -123,6 +124,33 @@ describe("the day that is asked for", () => {
     }
   });
 
+  it("a week named without a day", () => {
+    const thisWeek = [{ kind: "update" as const, event: EVENTS[2], starts_at: at("2026-11-14", 14), ends_at: at("2026-11-14", 15, 30) }];
+    const nextWeek = [{ kind: "update" as const, event: EVENTS[2], starts_at: at("2026-11-18", 14), ends_at: at("2026-11-18", 15, 30) }];
+    // The week alone: the model's day counts only if it lies in that week.
+    expect(card("Move the dentist appointment to next week.", nextWeek)).toEqual([["dentist", at("2026-11-18", 14), at("2026-11-18", 15, 30)]]);
+    expect(card("Move the dentist appointment to next week.", thisWeek)).toBe("Which day in the week of Mon, Nov 16 should **Dentist appointment** move to?");
+    expect(card("Move the dentist appointment to next week.")).toBe("Which day in the week of Mon, Nov 16 should **Dentist appointment** move to?");
+    // With "the same day" or a time, the event keeps its weekday.
+    expect(card("Move the dentist appointment to the same day next week.")).toEqual([["dentist", at("2026-11-20", 14), at("2026-11-20", 15, 30)]]);
+    expect(card("Move the dentist appointment to next week at 3 pm.")).toEqual([["dentist", at("2026-11-20", 15), at("2026-11-20", 16, 30)]]);
+    expect(card("Move the dentist appointment to the week after next at 3 pm.")).toEqual([["dentist", at("2026-11-27", 15), at("2026-11-27", 16, 30)]]);
+    // Counted from today.
+    expect(card("Move the dentist appointment to a week from tomorrow at 3 pm.")).toEqual([["dentist", at("2026-11-19", 15), at("2026-11-19", 16, 30)]]);
+    expect(card("Move the dentist appointment to tomorrow week at 3 pm.")).toEqual([["dentist", at("2026-11-19", 15), at("2026-11-19", 16, 30)]]);
+  });
+
+  it("a request the rules do not read: the model's day must be a day the message names", () => {
+    const message = "The dentist appointment needs to move to Friday next week at 3 pm.";
+    const wrong = [{ kind: "update" as const, event: EVENTS[2], starts_at: at("2026-11-13", 15), ends_at: at("2026-11-13", 16, 30) }];
+    const right = [{ kind: "update" as const, event: EVENTS[2], starts_at: at("2026-11-20", 15), ends_at: at("2026-11-20", 16, 30) }];
+    expect(card(message, wrong)).toBe("The AI model proposed Fri, Nov 13 for **Dentist appointment**, which is not a day your message names. Which day and time should it move to?");
+    expect(card(message, right)).toEqual([["dentist", at("2026-11-20", 15), at("2026-11-20", 16, 30)]]);
+    // No day in the message: the model's own day stands, as before.
+    expect(card("The dentist appointment needs to be later.", [{ kind: "update", event: EVENTS[2], starts_at: at("2026-11-13", 16), ends_at: at("2026-11-13", 17, 30) }]))
+      .toEqual([["dentist", at("2026-11-13", 16), at("2026-11-13", 17, 30)]]);
+  });
+
   it("'Can we move ...?' is a request the rules read", () => {
     // The model answers with this Friday: the rules correct it to the week that was asked for.
     const wrong = [{ kind: "update" as const, event: EVENTS[2], starts_at: at("2026-11-13", 15), ends_at: at("2026-11-13", 16, 30) }];
@@ -190,8 +218,26 @@ describe("the reply rule", () => {
       "Rename the team sync to Demo dry run.",
       "Update my dentist appointment to 4 pm.",
       "Could you set a reminder for the lecture?",
+      "Tomorrow at 6 pm add a yoga session.",
+      "Help me schedule a call with Ana on Friday at 2 pm.",
+      "The dentist appointment needs to move to Friday at 4 pm.",
+      "Follow up with the recruiter about the offer.",
     ]) {
       expect(asksForAction(message), message).toBe(true);
+    }
+  });
+
+  it("a request for information that starts with a calendar verb gets its answer unchanged", () => {
+    for (const [message, reply] of [
+      ["Remind me what is on my calendar tomorrow.", "Tomorrow you have the lecture at 10 am; the team sync is moved to 7 pm."],
+      ["Remind me when my dentist appointment is.", "Your dentist appointment is scheduled for Friday at 2 pm."],
+      ["Create a summary of my inbox.", "You have 3 unread emails. The onsite interview with Acme is confirmed for Monday at 10 am."],
+      ["Schedule for tomorrow?", "Tomorrow: the lecture is booked from 10 am to 12 pm."],
+    ]) {
+      expect(asksForCalendarAction(message), message).toBe(false);
+      expect(asksForAction(message), message).toBe(false);
+      const shown = composeReply({ modelReply: reply, timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], actionRequest: asksForCalendarAction(message), askedForAction: asksForAction(message) });
+      expect(shown, message).toBe(reply);
     }
   });
 

@@ -345,7 +345,7 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 382 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # 385 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
                          # meetings already over), reply and plan-request state, dates in the chat prompt,
@@ -664,6 +664,13 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   Friday of the month" gets the "could not tell which date" question; titles that contain these
   words are found again ("the Friday week in review", "the review for Last mile"); and "Can we
   move ... to Friday next week?" is read by the rules like "Can you ...".
+  A week named without a day is read too: "to the same day next week" and "to next week at 3 pm"
+  keep the event's weekday; for "to next week" alone the model's day counts only if it lies in that
+  week, otherwise MONDAY asks "Which day in the week of Mon, Nov 16 should ... move to?". And when
+  the rules do not read a request ("The dentist appointment needs to move to Friday next week") the
+  model's change is kept only for a day the message names; otherwise the note says which day the
+  model proposed and asks. Re-run on the corrected code, the reviewer's probes give no mismatch on
+  the 600 day inputs, and every one of the 32 answers to questions is shown unchanged.
   Left open from that round (all need a click before anything changes): two requests in one message
   ("Drop the team sync from today and put it on Friday at 5 pm", "Reschedule X and cancel Y") are
   read as the first one only, a correction inside the message ("to tomorrow, no wait, Saturday") and

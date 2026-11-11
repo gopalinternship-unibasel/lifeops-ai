@@ -91,6 +91,8 @@ export interface ChangeRequest {
    * "Friday two weeks later"): the date is not known, so no move is proposed from it.
    */
   dayUnclear?: boolean;
+  /** A week named without a day ("to next week"): the Monday of that week. */
+  weekStart?: string;
 }
 
 const WEEKDAYS: Record<string, number> = {
@@ -113,7 +115,7 @@ const MONTH_RE = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|ju
 const FILLER = "(?:please|pls|kindly|just|ok|okay|actually|yes|yeah|yep|sure|great|thanks|perfect|alright|right|well|so|now|hi|hey|hello|monday)";
 // "Can we move ...", "Can I ...", "Is it possible to ...", "I want you to ..." ask as well (review
 // of 11 Nov 2026: such a request was not read, so a wrong model date for it was shown).
-const ASK = "(?:(?:can|could|would|will|shall) (?:you|we|i)|is it possible to|would it be possible to|i (?:want|need|have) to|i (?:want|need) you to|i(?:'d| would) like (?:you )?to|i must|we (?:need|have) to|let's|lets|go ahead and)";
+const ASK = "(?:(?:can|could|would|will|shall) (?:you|we|i)|is it possible to|would it be possible to|i (?:want|need|have) to|i (?:want|need) you to|i(?:'d| would) like (?:you )?to|i must|we (?:need|have) to|let's|lets|go ahead and|help me(?: to)?)";
 const CLAUSE_START = `(?:(?:^|[,;:.!?]\\s*|\\b(?:and|then|also)\\s+)(?:${FILLER},?\\s+){0,3}(?:${ASK}\\s+)?(?:${FILLER}\\s+){0,2})`;
 /** A message that asks to write or tell something: "Email Sam: cancel lunch", "Draft a reply ...", "Tell Sam I need to move our lunch". */
 const COMMUNICATE_VERBS = "(?:email|e-mail|mail|draft|write|reply|respond|answer|tell|message|text|send|ask|notify)";
@@ -166,7 +168,7 @@ const CREATE_RE = new RegExp(
 const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|let\\s+(?!me\\b)\\w+\\s+know)\\b`);
 const MESSAGE_START = `^(?:${FILLER},?\\s+){0,3}(?:${ASK}\\s+)?(?:${FILLER}\\s+){0,2}`;
 /** A verb that sends something to someone, not followed by "me" ("Tell me ..." asks for an answer). */
-const OUTBOUND_RE = new RegExp(`${MESSAGE_START}(?:email|e-mail|mail|reply|respond|message|text|send|notify|tell|ask|answer)\\b(?!\\s+me\\b)`);
+const OUTBOUND_RE = new RegExp(`${MESSAGE_START}(?:email|e-mail|mail|reply|respond|message|text|send|notify|tell|ask|answer|follow up with|get back to)\\b(?!\\s+me\\b)`);
 const WRITING_RE = new RegExp(`${MESSAGE_START}(?:draft|write|compose)\\b`);
 /** "Can we move ...?", "Could you ...?", "Is it possible to ...?": a request in the form of a question. */
 const POLITE_ASK_RE = new RegExp(`^(?:${FILLER},?\\s+){0,3}(?:(?:can|could|would|will|shall|may) (?:you|we|i)|is it possible to|would it be possible to)\\b`);
@@ -341,6 +343,14 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
 
   let m = take(/\b(?:on |for )?(?:the )?same day\b/);
   if (m) return { day: "same", rest };
+  // "A week from tomorrow", "two weeks from today", "tomorrow week": a date, counted from today.
+  m = take(/\b(?:on |for )?(a|one|two|three|four|five|six|\d) weeks? from (today|tomorrow|now)\b/);
+  if (m) {
+    const days = 7 * (WEEK_COUNT[m[1]] ?? Number(m[1])) + (m[2] === "tomorrow" ? 1 : 0);
+    return { day: { dates: [addDaysISO(today, days)], text: m[0].trim(), exact: true }, rest };
+  }
+  m = take(/\b(?:on |for )?(today|tomorrow) week\b/);
+  if (m) return { day: { dates: [addDaysISO(today, 7 + (m[1] === "tomorrow" ? 1 : 0))], text: m[0].trim(), exact: true }, rest };
   m = take(/\b(?:on |for )?(?:the )?day after tomorrow('s)?\b/);
   if (m) return { day: { dates: [addDaysISO(today, 2)], text: m[0].trim(), exact: true }, rest };
   m = take(/\b(?:for |on )?(today|tonight|this (?:morning|afternoon|evening))('s)?\b/);
@@ -711,6 +721,18 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
     (clock.shiftDirectionMissing ?? false);
   // A day was read, but week or month words next to it were not ("Friday next month", "Friday
   // two weeks later"): the date is unknown.
+  // A week named without a day: "to next week", "to the same day next week", "to the week after
+  // next at 3 pm". The event keeps its weekday when a time or "same day" is given; with the week
+  // alone, the model's day counts only if it lies in that week, else MONDAY asks which day (the
+  // review of 11 Nov 2026 saw a model answer for THIS week accepted for "to next week").
+  if (request.day === undefined || request.day === "same") {
+    const weeks = /\bweek after next\b/.test(destination) ? 2 : /\b(?:next|following|coming) week\b/.test(destination) ? 1 : 0;
+    if (weeks > 0) {
+      const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+      request.weekStart = addDaysISO(today, 7 * weeks - ((todayWeekday + 6) % 7));
+      request.vagueTime = /\b(morning|afternoon|evening|night|weekend|month|before|asap|soon|sometime|free)\b/.test(leftover) || (clock.shiftDirectionMissing ?? false);
+    }
+  }
   // Only words that qualify the day itself count: a date ("Friday the 20th, next week",
   // "tomorrow like last week") is known whatever stands next to it, and "first thing in the
   // week" says nothing about which week (review of 11 Nov 2026).
@@ -727,8 +749,25 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
  * reads "Your gym session is scheduled for 6 pm" as a claim only then.
  */
 export function asksForCalendarAction(message: string): boolean {
+  if (asksForInformation(message)) return false;
   const text = normalizeRequest(message);
   return CREATE_RE.test(text) || findChangeVerbs(text).length > 0;
+}
+
+/**
+ * A question, or a request for text in the chat: "When is my dentist appointment?", "Do I have
+ * any reminders today?", "Schedule for tomorrow?", "Remind me what is on tomorrow", "Create a
+ * summary of my inbox", "Email summary, please", "Confirm that I am free on Friday". It is
+ * answered, not carried out, whatever verb it starts with (review of 11 Nov 2026: these got the
+ * "nothing was added" note under their answer). "Can we move ...?" is a request.
+ */
+export function asksForInformation(message: string): boolean {
+  const raw = (message ?? "").trim();
+  // "When you have a moment, add ...", "If possible, move ...": the request starts after the comma.
+  const text = normalizeRequest(message).replace(/^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/, "");
+  if (/^(?:what|when|where|which|who|whose|how|why)\b/.test(text)) return true;
+  if (/\?\s*$/.test(raw) && !POLITE_ASK_RE.test(text)) return true;
+  return TEXT_REQUEST_RE.test(text) || REMIND_QUESTION_RE.test(text) || NOUN_USE_OUTBOUND_RE.test(text) || CHECK_THAT_RE.test(text);
 }
 
 /**
@@ -737,20 +776,16 @@ export function asksForCalendarAction(message: string): boolean {
  * prepared nothing, whatever the model's reply says (reply guard, QA round 5).
  */
 export function asksForAction(message: string): boolean {
-  const raw = (message ?? "").trim();
+  // A question, or a request for text in the chat, is answered, not carried out.
+  if (asksForInformation(message)) return false;
   // "When you have a moment, add ...", "If possible, move ...": the request starts after the comma.
   const text = normalizeRequest(message).replace(/^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/, "");
-  // A request put as a question: "Can we move ...?", "Could you ...?", "Is it possible to ...?".
-  const polite = POLITE_ASK_RE.test(text);
-  // A question is answered, not carried out: "When is my dentist appointment?", "Do I have any
-  // reminders today?", "Schedule for tomorrow?", "What should I write to Sam?".
-  if (/^(?:what|when|where|which|who|whose|how|why)\b/.test(text)) return false;
-  if (/\?\s*$/.test(raw) && !polite) return false;
-  // Text in the chat, or a question in the form of a request: "Create a summary of my inbox",
-  // "Remind me what is on tomorrow", "Email summary, please", "Confirm that I am free on Friday".
-  if (TEXT_REQUEST_RE.test(text) || REMIND_QUESTION_RE.test(text) || NOUN_USE_OUTBOUND_RE.test(text) || CHECK_THAT_RE.test(text)) return false;
   if (asksForCalendarAction(text)) return true;
   return (
+    // "Tomorrow at 6 pm add a yoga session": the verb after a day or a time, with its object.
+    /\b(?:add|schedule|book|reschedule|cancel|postpone|move|block)\s+(?:a|an|the|my|our|this|that)\b/.test(text) ||
+    // "The dentist appointment needs to move to Friday", "... should be cancelled".
+    /\b(?:needs?|has|have) to (?:be )?(?:moved?|rescheduled?|cancell?ed|cancel|postponed?|shifted|shift)\b|\bshould be (?:moved|rescheduled|cancell?ed|postponed|shifted)\b/.test(text) ||
     // Something to send to someone else. "Tell me ...", "Send me my schedule" ask for an answer.
     OUTBOUND_RE.test(text) ||
     // "Draft a reply to the recruiter", "Write me an email to Sam", "Write to Sam ..."; "Write a
@@ -906,9 +941,26 @@ export function resolveMove(
     }
   }
 
-  const dates = request.day === "same" || request.day === undefined ? [original.date] : request.day.dates;
-  const dayGiven = request.day !== undefined;
+  let dates = request.day === "same" || request.day === undefined ? [original.date] : request.day.dates;
+  let dayGiven = request.day !== undefined;
   const timeGiven = Boolean(request.start);
+  if (request.weekStart && (request.day === undefined || request.day === "same")) {
+    if (request.day === "same" || timeGiven) {
+      // "The same day next week", "next week at 3 pm": the event's own weekday in that week.
+      const weekday = new Date(`${original.date}T12:00:00Z`).getUTCDay();
+      dates = [addDaysISO(request.weekStart, (weekday + 6) % 7)];
+      dayGiven = true;
+    } else {
+      // The week alone: the model's day, if it lies in that week; otherwise a question.
+      if (suggestion) {
+        const day = localDateTime(suggestion.starts_at, timeZone).date;
+        if (day >= request.weekStart && day <= addDaysISO(request.weekStart, 6) && Date.parse(suggestion.ends_at) > Date.parse(suggestion.starts_at)) {
+          return { status: "resolved", ...suggestion, byRule: false };
+        }
+      }
+      return { status: "unclear", question: `Which day in the week of ${dayName(request.weekStart)} should **${event.title}** move to?` };
+    }
+  }
   const at = (date: string, minutes: number) =>
     zonedDateTimeToISO(addDaysISO(date, Math.floor(minutes / 1440)), { hour: Math.floor((minutes % 1440) / 60), minute: minutes % 60 }, timeZone);
 
@@ -1181,6 +1233,17 @@ export function reconcileCalendarChanges(opts: {
         ]);
       }
     }
+    // Every day the message names (the event's own day, the day it should move to). A model
+    // change to another day is not what was asked: "The dentist appointment needs to move to
+    // Friday next week" with a model answer for this Friday (review of 11 Nov 2026).
+    const namedDates = new Set<string>();
+    let unread = text;
+    for (let i = 0; i < 3; i++) {
+      const found = parseDay(unread, opts.today);
+      if (!found.day || found.day === "same" || found.day.unclear) break;
+      found.day.dates.forEach((date) => namedDates.add(date));
+      unread = found.rest;
+    }
     const unasked: KnownEvent[] = [];
     const changes: ReconciledChange[] = [];
     let note: string | undefined;
@@ -1211,6 +1274,12 @@ export function reconcileCalendarChanges(opts: {
           log.push(`dropped a model update of "${change.event.title}": ${problem}`);
           continue;
         }
+        const newDay = localDateTime(startsAt, timeZone).date;
+        if (namedDates.size > 0 && !namedDates.has(newDay)) {
+          note = `The AI model proposed ${dayName(newDay)} for **${change.event.title}**, which is not a day your message names. Which day and time should it move to?`;
+          log.push(`dropped a model update of "${change.event.title}" to ${newDay}: the message names ${[...namedDates].join(", ")}`);
+          continue;
+        }
       }
       if (!timeChanged && !change.title) continue;
       changes.push({
@@ -1229,7 +1298,7 @@ export function reconcileCalendarChanges(opts: {
   };
   if (!request) return withoutRequest();
 
-  const readable = request.day !== undefined || request.start !== undefined || request.shiftMin !== undefined;
+  const readable = request.day !== undefined || request.start !== undefined || request.shiftMin !== undefined || request.weekStart !== undefined;
 
   // Which event: it must be named by its own title words. "the dentist appointment to after
   // lunch" names the dentist appointment; the words after it are not part of the name.
