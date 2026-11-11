@@ -292,7 +292,8 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
    A recipient in a planned draft is kept only if you wrote it (the address, or the name as a word of
    your text): the planner has no address book, and the model invented "sam@example.com" for "draft an
    email to Sam" (QA round 4). Such a draft reads "Draft to (recipient to fill in)", the plan's note
-   says so, and the saved draft has no address (a Gmail draft is then created without a To header).
+   says so. A Gmail draft is then created without a To header; the demo draft row keeps the text
+   "(recipient to fill in)" in its To field.
    Reminders and tasks show one time (a point in time), not "17:45 – 17:45". *Top priorities* says who
    ranked them: "Ranked by the AI assistant ..." or, when the model returned no ranking and the
    rule-based fallback did it (`tasks.source = rules`), "Ranked by simple rules ..." with a "rule" mark
@@ -344,7 +345,7 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 357 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # 369 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
                          # meetings already over), reply and plan-request state, dates in the chat prompt,
@@ -623,6 +624,28 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   prompt + 1,214 completion tokens, after waiting about 6 minutes behind the gym request). Two of its
   items had " hal" in the emoji field; an item's icon is now the first emoji or a bullet. A local 7B
   model still sometimes answers a request with no proposal at all: ask again, or use a hosted model.
+  QA round 5 (11 Nov 2026) found that the replacement above depended on a list of phrases: the model's
+  next wording ("Set a reminder for the dentist appointment at 13:00 on Thursday, 2026-11-12. This
+  reminder will appear in your notifications at the specified time.") was shown unchanged with no
+  card. The rule is now about the turn, not the wording: after a request to DO something (a calendar
+  entry or change, a reminder, an email or message) a turn that ends without any card prepared
+  nothing. Sentences that say it was done are removed; if nothing is left the reply is the notice
+  quoted above, and anything that is left (a question back, a plan in words, a wording no list has)
+  is followed by "Nothing was added to your calendar, saved or sent in this turn: the AI model gave
+  no proposal to approve. ...". Answers to questions ("When is my dentist appointment?") are not
+  touched by this rule.
+- **A week named next to a weekday** is read since QA round 5: "Friday next week", "next week on
+  Friday", "Thursday of next week", "a week from Friday", "Friday week", "Friday after next",
+  "Friday in two weeks" (weeks start on Monday; where two readings differ, as for "Monday in two
+  weeks" asked on a Wednesday, MONDAY asks which). Before, the week was ignored and this week's day
+  was proposed, also over a correct model answer. A destination that is over ("to yesterday", "to
+  last Friday") gets "... is already over. Which day should ... move to?", and week or month words
+  the rules cannot place ("Friday next month") get "I could not tell which date you mean ...".
+  Left open from that round (all need a click before anything changes): two requests in one message
+  ("Drop the team sync from today and put it on Friday at 5 pm", "Reschedule X and cancel Y") are
+  read as the first one only, a correction inside the message ("to tomorrow, no wait, Saturday") and
+  an alternative ("Saturday or Sunday") take the first day, "Postpone ... by a week" and "13.11. at
+  16:00" are not read, and "Move the lecture to 25:00" is answered "already at that time".
 - The rules that read a move or cancel are deliberately narrow (see "What to try"). They do not read
   a paraphrased event name ("my dentist visit", "the Acme interview prep"), two events in one request,
   "half past six", "one day earlier", "Move it" without an answer from the model that says which

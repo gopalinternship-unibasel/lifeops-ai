@@ -55,6 +55,33 @@ const CLAIMS: RegExp[] = [
   /\b(?:reminders?|alarms?)\s+(?:is\s+|are\s+|was\s+|were\s+)?(?:now\s+)?(?:set|created|added|scheduled|saved)\b(?!\s+to\b)/i,
   /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+set\s+(?:up\s+)?(?:a|an|the|your)\s+(?:[\w-]+\s+){0,3}?(?:reminders?|alarms?|events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?|time)\b/i,
   /\b(?:is|are)\s+(?:all\s+)?set(?:\s+up)?\s*(?:[.!]|$|for you\b)/i,
+  // QA round 5: claims the list above did not have, shown word for word next to no card.
+  // "You're all set!", "Consider it done."
+  /\b(?:you(?:'re|\s+are)|we(?:'re|\s+are)|that(?:'s|\s+is)|it(?:'s|\s+is)|everything(?:'s|\s+is))\s+all\s+set\b|\bconsider\s+it\s+done\b|\b(?:it(?:'s|\s+is)|that(?:'s|\s+is))\s+(?:been\s+)?taken\s+care\s+of\b/i,
+  // "I emailed Sam", "I've put it on your calendar", "I notified the team".
+  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+(?:successfully\s+|now\s+|just\s+)?(?:emailed|e-mailed|mailed|messaged|texted|notified|informed|replied\s+to|responded\s+to|confirmed|invited|reminded|put(?!\s+together)|placed|pencill?ed|dispatched|forwarded|noted)\b/i,
+  // "I'll remind you at 5 pm", "I will send it": MONDAY does nothing later on its own.
+  /\bI(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)\s+(?:remind|notify|alert|email|e-mail|send|message|text|let\s+\w+\s+know|add|move|schedule|book|cancel|put|set|create|block|reschedule|forward|confirm)\b/i,
+  // "This reminder will appear in your notifications", "You'll get a reminder": there are none.
+  /\b(?:will|'ll)\s+(?:appear|show\s+up|pop\s+up)\b|\byou(?:'ll|\s+will)\s+(?:be\s+(?:reminded|notified|alerted)|(?:get|receive|see)\s+an?\s+(?:reminder|notification|alert))\b/i,
+  // "The email was dispatched to Sam.", "Your calendar is updated."
+  /\b(?:e-?mail|reply|message|invite|invitation)\s+(?:has\s+been|was|is|got)\s+(?:successfully\s+)?(?:sent|dispatched|delivered|forwarded)\b/i,
+  /\byour\s+(?:calendar|schedule)\s+(?:is|was|has\s+been)\s+(?:now\s+)?(?:updated|changed)\b/i,
+];
+
+/**
+ * After a request to DO something, in a turn that produced no card at all: these say it was
+ * done. (After a question the same words can describe the calendar: "Your lecture was moved to
+ * room 5", "It is on your calendar on Friday".)
+ */
+const NO_CARD_CLAIMS: RegExp[] = [
+  // "Your appointment was moved to Friday at 4 pm.", "The session is booked."
+  new RegExp(`\\b(?:is|are|was|were|got|has\\s+been|have\\s+been)\\s+(?:now\\s+|already\\s+|successfully\\s+|just\\s+)?(?:${ACTION_VERBS}|set|confirmed|dispatched|emailed|notified|drafted)\\b`, "i"),
+  // "It's on your calendar now."
+  /\b(?:it|this|that|your\s+[\w' -]{1,40}?|the\s+[\w' -]{1,40}?)(?:'s|\s+is|\s+are)\s+(?:now\s+|already\s+)?(?:on|in)\s+your\s+(?:calendar|schedule|agenda)\b/i,
+  // The request echoed as if carried out: "Set a reminder for the dentist appointment at 13:00
+  // on Thursday." (the real default model, 11 Nov 2026).
+  /^[^\p{L}\d]*(?:set|added?|put|created?|scheduled?|booked?|blocked?|moved?|rescheduled?|cancell?(?:ed)?|sent|send|emailed?|drafted?|reminded?|reminder)\b\s+(?:up\s+)?(?:(?:a|an|the|your|you|for|set)\b|:)/iu,
 ];
 
 /**
@@ -245,6 +272,13 @@ export function resolveRefs(text: string, refs: ReplyRefs): { text: string; remo
   return { text: result.text.replace(idPattern, (id) => known(id) ?? id), removed: result.removed };
 }
 
+/** The whole reply when the model's text said only that something was done, and nothing was. */
+export const NOTHING_PREPARED =
+  "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.";
+/** Added under the model's text when an action was asked for and the turn has no card. */
+export const NOTHING_ADDED =
+  "Nothing was added to your calendar, saved or sent in this turn: the AI model gave no proposal to approve. If you expected one, please try again, naming the day and the time.";
+
 export function composeReply(opts: {
   modelReply: string;
   timeZone: string;
@@ -266,6 +300,12 @@ export function composeReply(opts: {
   year?: number;
   /** The user asked for something new or for a change, not a question (see ACTION_REQUEST_CLAIMS). */
   actionRequest?: boolean;
+  /**
+   * The user asked MONDAY to do something: a calendar entry or change, a reminder, an email or
+   * a message (asksForAction). When such a turn ends without any card, nothing was prepared:
+   * the reply says so, whatever the model wrote (QA round 5).
+   */
+  askedForAction?: boolean;
   /**
    * The change note is only about a change the model made unasked (it was left out). After a
    * question ("When is my dentist appointment?") the model's answer, with its times, stands.
@@ -298,6 +338,21 @@ export function composeReply(opts: {
     draftClaims = withoutDraftClaims.removed;
   }
 
+  // An action was asked for and the turn has no card and no note: nothing was prepared. The
+  // real default model answered "Set a reminder for the dentist appointment at 13:00 on
+  // Thursday. This reminder will appear in your notifications" with no card (QA round 5); a
+  // phrase list alone always misses some wording. So the sentences that say it was done are
+  // removed, and whatever is left (a question back, a plan in words) is followed by a plain
+  // statement that nothing was added, saved or sent.
+  const nothingPrepared =
+    opts.pendingEvents.length === 0 && opts.pendingEventChanges.length === 0 && !opts.emailDraft &&
+    !opts.changeNote && !opts.emailNote && !opts.hasOtherCards;
+  if (opts.askedForAction && nothingPrepared) {
+    const rest = removeSentences(modelText, (sentence) => NO_CARD_CLAIMS.some((re) => re.test(sentence))).text;
+    if (!rest) return NOTHING_PREPARED;
+    return `${rest}\n\n${NOTHING_ADDED}`;
+  }
+
   const lines: string[] = [];
   if (modelText) lines.push(modelText);
   if (opts.changeNote) lines.push(`${opts.changeNote} Nothing in your calendar was changed.`);
@@ -311,8 +366,6 @@ export function composeReply(opts: {
   if (draftClaims > 0 && claims.removed === 0 && resolved.removed === 0) {
     return "The AI model answered without a reply draft, so nothing was prepared. Please try again and say which email you want to answer.";
   }
-  if (claims.removed > 0 || resolved.removed > 0) {
-    return "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.";
-  }
+  if (claims.removed > 0 || resolved.removed > 0) return NOTHING_PREPARED;
   return "I'm not sure how to help with that. Could you rephrase it?";
 }

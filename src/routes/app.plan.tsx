@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { formatLocalDate, getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
 import type { WeekPlanRequestView } from "@/lib/week-plan-request";
+import { planDayStatus } from "@/lib/plan-state";
 
 /** How often the page checks a plan that is still being drafted on the server. */
 const DRAFT_POLL_MS = 4000;
@@ -320,7 +321,10 @@ function PlanPage() {
             <Button
               size="sm"
               onClick={() => approveDay(undefined)}
-              disabled={approving !== null || drafting}
+              // Nothing left to add (every day reads Added, Past or Nothing to add): the button
+              // did nothing but stayed enabled (QA round 5).
+              disabled={approving !== null || drafting || !plan.days.some((day) => planDayStatus(day, addedItems?.[day.date] ?? [], approvedDates.has(day.date), Date.now()) === "approve")}
+              title="Adds every day that still has something to add"
               style={{ background: "var(--gradient-brand)" }}
               className="text-primary-foreground"
             >

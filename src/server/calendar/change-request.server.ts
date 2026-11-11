@@ -42,6 +42,8 @@ export interface KnownEvent {
 export interface DayRef {
   dates: string[];
   text: string;
+  /** The words name a day that is over ("yesterday", "last Friday"). */
+  past?: boolean;
 }
 
 /** One or more possible clock times (minutes after local midnight); two means am/pm unknown. */
@@ -80,6 +82,11 @@ export interface ChangeRequest {
   shiftMin?: number;
   /** The destination has words the rules do not read ("next week", "Friday afternoon"). */
   vagueTime?: boolean;
+  /**
+   * A day was read, but words about the week or month next to it were not ("Friday next month",
+   * "Friday two weeks later"): the date is not known, so no move is proposed from it.
+   */
+  dayUnclear?: boolean;
 }
 
 const WEEKDAYS: Record<string, number> = {
@@ -90,6 +97,8 @@ const MONTHS: Record<string, number> = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
 };
 const WEEKDAY_RE = "(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)";
+/** "a week from Friday", "in two weeks", "three days ago". */
+const WEEK_COUNT: Record<string, number> = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
 const MONTH_RE = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
 
 // The verb must start a clause ("Move ...", "Please move ...", "Can you cancel ...", "..., then
@@ -147,6 +156,8 @@ const DEFINITE_OBJECT = new RegExp(`^\\s*(?:(?:back|forward|ahead)\\s+)?${DEFINI
 const CREATE_RE = new RegExp(
   `${CLAUSE_START}(?:(?:set|put)\\b(?!\\s+(?:off\\b|${DEFINITE}\\b))|(?:pencil in|add|book|schedule|create|block|plan|make time|make an?|remind|reserve|arrange|organi[sz]e|find (?:time|a slot))\\b)`,
 );
+/** "Confirm lunch with Sam for me", "Let Sam know I am late", "Forward it to Ana": something to send. */
+const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|let\\s+\\w+\\s+know)\\b`);
 /** "Put the lecture on my calendar for Friday at 10 am", "Add it to my schedule": a request to add something. */
 const ADD_TO_CALENDAR_RE = /\b(?:put|set|add|enter|get|place|pop)\b[^.;!?]*\b(?:in|on|into|onto|to)\s+(?:my|the|our)\s+(?:calendar|schedule|agenda|diary|planner)\b/;
 /**
@@ -311,6 +322,14 @@ export function parseDay(text: string, today: string): { day?: DayRef | "same"; 
   if (m) return { day: { dates: [today], text: m[0].trim() }, rest };
   m = take(/\b(?:for |on )?tomorrow('s)?\b/);
   if (m) return { day: { dates: [addDaysISO(today, 1)], text: m[0].trim() }, rest };
+  // Days that are over: as a destination they get a question back, not this week's day (QA
+  // round 5: "to yesterday at 3 pm" kept the event's own day).
+  m = take(/\b(?:on |for )?(?:the )?day before yesterday('s)?\b/);
+  if (m) return { day: { dates: [addDaysISO(today, -2)], text: m[0].trim(), past: true }, rest };
+  m = take(/\b(?:for |on )?yesterday('s)?\b/);
+  if (m) return { day: { dates: [addDaysISO(today, -1)], text: m[0].trim(), past: true }, rest };
+  m = take(/\b(a|one|two|three|four|five|six|\d{1,2}) days? ago\b/);
+  if (m) return { day: { dates: [addDaysISO(today, -(WEEK_COUNT[m[1]] ?? Number(m[1])))], text: m[0].trim(), past: true }, rest };
   // A date, maybe with its weekday ("Tuesday the 17th", "Fri, Nov 13"). A weekday that is not
   // the date's leaves two readings, so the user is asked which one is meant.
   const dated = (date: string, weekday: string | undefined, text: string): DayRef => {
@@ -345,6 +364,46 @@ export function parseDay(text: string, today: string): { day?: DayRef | "same"; 
     const inMonth = (y: number, mo: number) => `${mo > 12 ? y + 1 : y}-${String(mo > 12 ? 1 : mo).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
     const date = dayNumber >= todayNumber ? inMonth(year, month) : inMonth(year, month + 1);
     if (dayNumber >= 1 && validDate(date)) return { day: dated(date, m[1], m[0].trim()), rest };
+  }
+  // A weekday with a week named next to it: "Friday next week", "next week on Friday", "Thursday
+  // of next week", "a week from Friday", "Friday week", "Friday in two weeks", "Friday after
+  // next", and a weekday that is over ("last Friday", "Friday last week"). Until QA round 5 the
+  // week was not read and this week's day was proposed, also over a correct model answer. Weeks
+  // start on Monday.
+  const weekdayAt = new RegExp(`\\b${WEEKDAY_RE}\\b`).exec(rest);
+  if (weekdayAt) {
+    const weekday = WEEKDAYS[weekdayAt[1]];
+    const inWeek = (weekday + 6) % 7; // days after Monday
+    const thisMonday = addDaysISO(today, -((todayWeekday + 6) % 7));
+    const delta = (weekday - todayWeekday + 7) % 7; // days to the next such weekday (0 = today)
+    const weekdayWords = `(?:on |for )?(?:(?:this|next|coming) )?${WEEKDAY_RE}('s)?`;
+    // The weekday and the week together: "Friday week", "Friday after next", "last Friday".
+    let both = take(new RegExp(`\\b(?:on |for )?${WEEKDAY_RE} (?:week|after next)\\b`));
+    if (both) return { day: { dates: [addDaysISO(today, (delta === 0 ? 7 : delta) + 7)], text: both[0].trim() }, rest };
+    both = take(new RegExp(`\\b(?:on |for )?(?:last|this past|the past|previous) ${WEEKDAY_RE}('s)?\\b`));
+    if (both) return { day: { dates: [addDaysISO(today, -((todayWeekday - weekday + 7) % 7 || 7))], text: both[0].trim(), past: true }, rest };
+    // The week on its own, before or after the weekday.
+    let dates: string[] | undefined;
+    let past = false;
+    let week: RegExpExecArray | null;
+    if ((week = take(/\b(?:(?:of|in|during) )?(?:the )?week after next\b/))) dates = [addDaysISO(thisMonday, 14 + inWeek)];
+    else if ((week = take(/\b(?:(?:of|in|during) )?(?:the )?(?:next|following|coming) week('s)?\b/))) dates = [addDaysISO(thisMonday, 7 + inWeek)];
+    else if ((week = take(/\b(?:(?:of|in|during) )?(?:the )?(?:last|previous|past) week('s)?\b/))) {
+      dates = [addDaysISO(thisMonday, inWeek - 7)];
+      past = true;
+    } else if ((week = take(/\b(a|one|two|three|four|five|six|\d) weeks? (?:from|after|on)\b/))) {
+      // "A week from Friday": the next Friday, plus the weeks.
+      dates = [addDaysISO(today, delta + 7 * (WEEK_COUNT[week[1]] ?? Number(week[1])))];
+    } else if ((week = take(/\b(?:in|after) (a|one|two|three|four|five|six|\d) weeks?(?: time)?\b/))) {
+      // "Friday in two weeks": the Friday of the week two weeks on, or two weeks after the next
+      // Friday. They differ when that weekday of this week is already over; then the user is asked.
+      const n = WEEK_COUNT[week[1]] ?? Number(week[1]);
+      dates = [...new Set([addDaysISO(thisMonday, 7 * n + inWeek), addDaysISO(today, delta + 7 * n)])];
+    }
+    if (dates && week) {
+      const named = take(new RegExp(`\\b${weekdayWords}\\b`));
+      return { day: { dates, text: `${named?.[0].trim() ?? weekdayAt[1]} ${week[0].trim()}`, ...(past ? { past } : {}) }, rest };
+    }
   }
   m = take(new RegExp(`\\b(?:on |for )?(?:(this|next|coming) )?${WEEKDAY_RE}('s)?\\b`));
   if (m) {
@@ -503,7 +562,10 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
     particle = leading[1];
     afterVerb = ` ${afterVerb.slice(leading[0].length)}`;
   }
-  const destinationWords = `(?=(?:start|begin|end|finish|the same day|same day|the \\d|today|tonight|tomorrow|the day after|next|this|coming|on |noon|midday|midnight|\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b))`;
+  // Also the words for another week and for days that are over ("to a week from Friday", "to
+  // Friday week", "to yesterday", "to last Friday"): without them the day stayed in the
+  // subject and was read as the day of the event to move (QA round 5).
+  const destinationWords = `(?=(?:start|begin|end|finish|the same day|same day|the \\d|today|tonight|tomorrow|the day after|the day before|yesterday|next|this|coming|last|previous|the week|the following|following|(?:a|one|two|three|four|five|six) (?:weeks?|days?)\\b|in (?:a|one|two|three|four|five|six|\\d)\\b|on |noon|midday|midnight|\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b))`;
   // "to"/"until"/"for" first; "at" only when there is none ("move the 3 pm meeting at ... to 4 pm"
   // names the old time with "at").
   const destStart = new RegExp(`\\s(?:to|for|until|till)\\s${destinationWords}`);
@@ -589,6 +651,11 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
   request.vagueTime =
     /\b(morning|afternoon|evening|night|week|weekend|month|after|before|asap|soon|sometime|free)\b/.test(leftover) ||
     (clock.shiftDirectionMissing ?? false);
+  // A day was read, but week or month words next to it were not ("Friday next month", "Friday
+  // two weeks later"): the date is unknown.
+  request.dayUnclear =
+    dest.day !== undefined && dest.day !== "same" &&
+    /\b(?:next|last|previous|following|coming)\s+(?:weeks?|months?|year)\b|\b(?:weeks?|months?|fortnight)\b|\bago\b|\bafter next\b/.test(leftover);
   return request;
 }
 
@@ -600,6 +667,21 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
 export function asksForCalendarAction(message: string): boolean {
   const text = normalizeRequest(message);
   return CREATE_RE.test(text) || findChangeVerbs(text).length > 0;
+}
+
+/**
+ * Does the message ask MONDAY to do something (a calendar entry, a change, a reminder, an email
+ * or a message), as opposed to asking a question? After such a message a turn without any card
+ * prepared nothing, whatever the model's reply says (reply guard, QA round 5).
+ */
+export function asksForAction(message: string): boolean {
+  if (asksForCalendarAction(message)) return true;
+  const text = normalizeRequest(message);
+  return (
+    COMMUNICATE_RE.test(text) ||
+    ADD_TO_CALENDAR_RE.test(text) ||
+    OTHER_ACTION_RE.test(text)
+  );
 }
 
 /** Does a message talk about the calendar at all (for "I could not find that event")? */
@@ -715,6 +797,18 @@ export function resolveMove(
   if (request.shiftMin !== undefined) {
     const shift = request.shiftMin * 60_000;
     return { status: "resolved", starts_at: new Date(startMs + shift).toISOString(), ends_at: new Date(endMs + shift).toISOString(), byRule: true };
+  }
+
+  if (request.day !== undefined && request.day !== "same") {
+    // "to yesterday", "to last Friday": not a day anything can move to.
+    if (request.day.past) {
+      const days = request.day.dates.map(dayName).join(" or ");
+      return { status: "unclear", question: `${days} is already over. Which day should **${event.title}** move to?` };
+    }
+    // "Friday next month": the week or month next to the day was not read, so the date is unknown.
+    if (request.dayUnclear) {
+      return { status: "unclear", question: `I could not tell which date you mean. Which date should **${event.title}** move to?` };
+    }
   }
 
   const dates = request.day === "same" || request.day === undefined ? [original.date] : request.day.dates;
