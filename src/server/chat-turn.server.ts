@@ -25,6 +25,7 @@ import { findConflicts, parseUserDateTime, toMs } from "@/server/calendar/time-r
 import {
   asksForAction,
   asksForCalendarAction,
+  followsUpOnAction,
   reconcileCalendarChanges,
   type KnownEvent,
   type ModelChange,
@@ -775,7 +776,10 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       refs: replyRefs,
       emailNote,
       actionRequest: asksForCalendarAction(data.message),
-      askedForAction: asksForAction(data.message),
+      // Also a short answer to MONDAY's own question back or "nothing was added" notice.
+      askedForAction:
+        asksForAction(data.message) ||
+        followsUpOnAction([...(history ?? [])].reverse().find((entry) => entry.role === "assistant")?.content, data.message),
       changeNoteIsAside: reconciled?.unasked ?? false,
     });
   }

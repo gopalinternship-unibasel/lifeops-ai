@@ -55,18 +55,6 @@ const CLAIMS: RegExp[] = [
   /\b(?:reminders?|alarms?)\s+(?:is\s+|are\s+|was\s+|were\s+)?(?:now\s+)?(?:set|created|added|scheduled|saved)\b(?!\s+to\b)/i,
   /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+set\s+(?:up\s+)?(?:a|an|the|your)\s+(?:[\w-]+\s+){0,3}?(?:reminders?|alarms?|events?|meetings?|appointments?|blocks?|sessions?|workouts?|calls?|time)\b/i,
   /\b(?:is|are)\s+(?:all\s+)?set(?:\s+up)?\s*(?:[.!]|$|for you\b)/i,
-  // QA round 5: claims the list above did not have, shown word for word next to no card.
-  // "You're all set!", "Consider it done."
-  /\b(?:you(?:'re|\s+are)|we(?:'re|\s+are)|that(?:'s|\s+is)|it(?:'s|\s+is)|everything(?:'s|\s+is))\s+all\s+set\b|\bconsider\s+it\s+done\b|\b(?:it(?:'s|\s+is)|that(?:'s|\s+is))\s+(?:been\s+)?taken\s+care\s+of\b/i,
-  // "I emailed Sam", "I've put it on your calendar", "I notified the team".
-  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+(?:successfully\s+|now\s+|just\s+)?(?:emailed|e-mailed|mailed|messaged|texted|notified|informed|replied\s+to|responded\s+to|confirmed|invited|reminded|put(?!\s+together)|placed|pencill?ed|dispatched|forwarded|noted)\b/i,
-  // "I'll remind you at 5 pm", "I will send it": MONDAY does nothing later on its own.
-  /\bI(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)\s+(?:remind|notify|alert|email|e-mail|send|message|text|let\s+\w+\s+know|add|move|schedule|book|cancel|put|set|create|block|reschedule|forward|confirm)\b/i,
-  // "This reminder will appear in your notifications", "You'll get a reminder": there are none.
-  /\b(?:will|'ll)\s+(?:appear|show\s+up|pop\s+up)\b|\byou(?:'ll|\s+will)\s+(?:be\s+(?:reminded|notified|alerted)|(?:get|receive|see)\s+an?\s+(?:reminder|notification|alert))\b/i,
-  // "The email was dispatched to Sam.", "Your calendar is updated."
-  /\b(?:e-?mail|reply|message|invite|invitation)\s+(?:has\s+been|was|is|got)\s+(?:successfully\s+)?(?:sent|dispatched|delivered|forwarded)\b/i,
-  /\byour\s+(?:calendar|schedule)\s+(?:is|was|has\s+been)\s+(?:now\s+)?(?:updated|changed)\b/i,
 ];
 
 /**
@@ -82,6 +70,19 @@ const NO_CARD_CLAIMS: RegExp[] = [
   // The request echoed as if carried out: "Set a reminder for the dentist appointment at 13:00
   // on Thursday." (the real default model, 11 Nov 2026).
   /^[^\p{L}\d]*(?:set|added?|put|created?|scheduled?|booked?|blocked?|moved?|rescheduled?|cancell?(?:ed)?|sent|send|emailed?|drafted?|reminded?|reminder)\b\s+(?:up\s+)?(?:(?:a|an|the|your|you|for|set)\b|:)/iu,
+  // Claims in the first person, promises and notifications. They count only after a request to do
+  // something: after a question the same words can quote an email ("I'll send the deck tomorrow").
+  // "You're all set!", "Consider it done."
+  /\b(?:you(?:'re|\s+are)|we(?:'re|\s+are)|that(?:'s|\s+is)|it(?:'s|\s+is)|everything(?:'s|\s+is))\s+all\s+set\b|\bconsider\s+it\s+done\b|\b(?:it(?:'s|\s+is)|that(?:'s|\s+is))\s+(?:been\s+)?taken\s+care\s+of\b/i,
+  // "I emailed Sam", "I've put it on your calendar", "I notified the team".
+  /\bI(?:'ve|\s+have|\s+just|\s+already)?\s+(?:successfully\s+|now\s+|just\s+)?(?:emailed|e-mailed|mailed|messaged|texted|notified|informed|replied\s+to|responded\s+to|confirmed|invited|reminded|put(?!\s+together)|placed|pencill?ed|dispatched|forwarded|noted)\b/i,
+  // "I'll remind you at 5 pm", "I will send it": MONDAY does nothing later on its own.
+  /\bI(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)\s+(?:remind|notify|alert|email|e-mail|send|message|text|let\s+\w+\s+know|add|move|schedule|book|cancel|put|set|create|block|reschedule|forward|confirm)\b/i,
+  // "This reminder will appear in your notifications", "You'll get a reminder": there are none.
+  /\b(?:will|'ll)\s+(?:appear|show\s+up|pop\s+up)\b|\byou(?:'ll|\s+will)\s+(?:be\s+(?:reminded|notified|alerted)|(?:get|receive|see)\s+an?\s+(?:reminder|notification|alert))\b/i,
+  // "The email was dispatched to Sam.", "Your calendar is updated."
+  /\b(?:e-?mail|reply|message|invite|invitation)\s+(?:has\s+been|was|is|got)\s+(?:successfully\s+)?(?:sent|dispatched|delivered|forwarded)\b/i,
+  /\byour\s+(?:calendar|schedule)\s+(?:is|was|has\s+been)\s+(?:now\s+)?(?:updated|changed)\b/i,
 ];
 
 /**
@@ -278,6 +279,9 @@ export const NOTHING_PREPARED =
 /** Added under the model's text when an action was asked for and the turn has no card. */
 export const NOTHING_ADDED =
   "Nothing was added to your calendar, saved or sent in this turn: the AI model gave no proposal to approve. If you expected one, please try again, naming the day and the time.";
+/** The same when the turn has a reply draft but no calendar card for the calendar part of the request. */
+export const NOTHING_ON_CALENDAR =
+  "Nothing was added to or changed in your calendar in this turn: the AI model proposed no calendar entry. If you expected one, please try again, naming the day and the time.";
 
 export function composeReply(opts: {
   modelReply: string;
@@ -344,13 +348,20 @@ export function composeReply(opts: {
   // phrase list alone always misses some wording. So the sentences that say it was done are
   // removed, and whatever is left (a question back, a plan in words) is followed by a plain
   // statement that nothing was added, saved or sent.
-  const nothingPrepared =
-    opts.pendingEvents.length === 0 && opts.pendingEventChanges.length === 0 && !opts.emailDraft &&
-    !opts.changeNote && !opts.emailNote && !opts.hasOtherCards;
-  if (opts.askedForAction && nothingPrepared) {
-    const rest = removeSentences(modelText, (sentence) => NO_CARD_CLAIMS.some((re) => re.test(sentence))).text;
-    if (!rest) return NOTHING_PREPARED;
-    return `${rest}\n\n${NOTHING_ADDED}`;
+  //
+  // What counts is a card of the kind that was asked for (review of 11 Nov 2026): an insight or
+  // a priorities card next to "Add a yoga session ..." prepared no calendar entry either, and a
+  // reply draft next to "Add a yoga session and draft a reply" covers only the draft.
+  const noCalendarCard = opts.pendingEvents.length === 0 && opts.pendingEventChanges.length === 0;
+  const calendarMissing = Boolean(opts.actionRequest) && noCalendarCard;
+  const allMissing = Boolean(opts.askedForAction) && noCalendarCard && !opts.emailDraft;
+  let notice: string | null = null;
+  if (calendarMissing || allMissing) {
+    // Words the model quotes ("Sam wrote: \"I'll send the deck\"") are not its own claims.
+    const unquoted = (sentence: string) => sentence.replace(/"[^"\n]*"|“[^”\n]*”/g, " ");
+    modelText = removeSentences(modelText, (sentence) => NO_CARD_CLAIMS.some((re) => re.test(unquoted(sentence)))).text;
+    // A note about the change that was asked for already says that nothing changed.
+    if (!opts.changeNote && !opts.emailNote) notice = opts.emailDraft ? NOTHING_ON_CALENDAR : NOTHING_ADDED;
   }
 
   const lines: string[] = [];
@@ -360,6 +371,11 @@ export function composeReply(opts: {
   lines.push(...cardConfirmations(opts));
   if (opts.emailDraft && (claims.removed > 0 || !modelText)) {
     lines.push(`The reply to ${opts.emailDraft.to} is under **Insights** as a draft suggestion. Edit it and click **Save as draft**; nothing is sent.`);
+  }
+  if (notice) {
+    // Nothing else to show: the short notice. Another card on the right is not what was asked for.
+    if (lines.length === 0) return opts.hasOtherCards ? notice : NOTHING_PREPARED;
+    lines.push(notice);
   }
   if (lines.length > 0) return lines.join("\n\n");
   if (opts.hasOtherCards) return "See the card on the right.";

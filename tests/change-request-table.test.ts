@@ -223,7 +223,9 @@ describe("direction 1: new items, questions and refusals are never a move or a c
 
   it("without a verb the rules read, the model's own change is kept only when the message asks for a change", () => {
     const friday = { kind: "update" as const, event: byId("sync"), starts_at: at("2026-11-13", 19), ends_at: at("2026-11-13", 20) };
-    for (const message of ["The team sync needs to be on Friday instead.", "Can the team sync be on Friday instead?", "Can we push the team sync to Friday?", "Change the team sync"]) {
+    // "Can we push the team sync to Friday?" is read by rule since the review of 11 Nov 2026
+    // ("can we" asks, like "can you"): see tests/round6.test.ts.
+    for (const message of ["The team sync needs to be on Friday instead.", "Can the team sync be on Friday instead?", "Change the team sync"]) {
       const r = reconcile(message, { changes: [friday] });
       expect(r.changeRequest, message).toBe(false);
       expect(r.changes, message).toEqual([{ kind: "update", event: byId("sync"), next: { starts_at: friday.starts_at, ends_at: friday.ends_at, title: undefined }, byRule: false }]);

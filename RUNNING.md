@@ -345,7 +345,7 @@ always use the in-app assistant.
 
 ```powershell
 cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
-npm test                 # 369 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # 382 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
                          # meetings already over), reply and plan-request state, dates in the chat prompt,
@@ -634,6 +634,19 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   is followed by "Nothing was added to your calendar, saved or sent in this turn: the AI model gave
   no proposal to approve. ...". Answers to questions ("When is my dentist appointment?") are not
   touched by this rule.
+  A review of that change on the same day (about 90 replies, next to the version before it) led to
+  three corrections. The wider list of "done" wordings is applied only after a request to do
+  something, never to an answer to a question (it had removed sound sentences, for example three of
+  four emails from an inbox summary whose snippets read "I'll send the deck tomorrow"). What counts
+  is a card of the kind that was asked for: an insight or priorities card next to "Add a yoga
+  session ..." still gets the notice, and a reply draft next to "Add a yoga session and draft a
+  reply" gets "Nothing was added to or changed in your calendar in this turn ...". And more ways of
+  asking are seen as requests: "Can we move ...?", "Can I ...?", "Is it possible to ...?", "I want
+  you to ...", "When you have a moment, add ...", "Draft me a reply ...", "Extend / Rename / Update
+  the ...", and a short answer to MONDAY's own question back or notice ("6 pm.", "Yes, go ahead.").
+  Requests for text in the chat are not ("Remind me what is on tomorrow", "Create a summary of my
+  inbox", "Schedule for tomorrow?"). A request in a wording none of these know, answered by a model
+  that says "done" with no card, is still shown as the model wrote it.
 - **A week named next to a weekday** is read since QA round 5: "Friday next week", "next week on
   Friday", "Thursday of next week", "a week from Friday", "Friday week", "Friday after next",
   "Friday in two weeks" (weeks start on Monday; where two readings differ, as for "Monday in two
@@ -641,6 +654,16 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   was proposed, also over a correct model answer. A destination that is over ("to yesterday", "to
   last Friday") gets "... is already over. Which day should ... move to?", and week or month words
   the rules cannot place ("Friday next month") get "I could not tell which date you mean ...".
+  Corrected after the review of the same day (600 day inputs and 103 requests, next to the version
+  before it): "Friday this week" is this week's Friday (it had been refused); a date is taken as
+  it stands whatever week word is next to it ("Friday the 20th, next week", "tomorrow like last
+  week"); a week in a contrast or a reason is not the week asked for ("this Friday instead of next
+  week", "Friday, not next week", "Friday as next week is full", "Saturday, same as last
+  Saturday"); "the Friday of next week" and "the following Friday" are read (the second like
+  "next Friday": MONDAY asks which, or takes the model's answer if it is one of the two); "the last
+  Friday of the month" gets the "could not tell which date" question; titles that contain these
+  words are found again ("the Friday week in review", "the review for Last mile"); and "Can we
+  move ... to Friday next week?" is read by the rules like "Can you ...".
   Left open from that round (all need a click before anything changes): two requests in one message
   ("Drop the team sync from today and put it on Friday at 5 pm", "Reschedule X and cancel Y") are
   read as the first one only, a correction inside the message ("to tomorrow, no wait, Saturday") and

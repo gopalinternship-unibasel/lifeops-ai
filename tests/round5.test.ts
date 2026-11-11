@@ -194,10 +194,11 @@ describe("a reply that says it is done, in a turn with no card", () => {
     expect(
       composeReply({ modelReply: "Your dentist appointment is scheduled for Friday at 2 pm.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], askedForAction: false, actionRequest: false }),
     ).toBe("Your dentist appointment is scheduled for Friday at 2 pm.");
-    // After a question, a claim is still removed.
+    // After a question the answer stands as the model wrote it (review of 11 Nov 2026: the wider
+    // patterns removed sound sentences from answers; see tests/round6.test.ts).
     expect(
-      composeReply({ modelReply: "Yes. I'll remind you at 5 pm.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], askedForAction: false, actionRequest: false }),
-    ).toBe("Yes.");
+      composeReply({ modelReply: "According to his email, the plumber will show up between 2 and 4 pm on Thursday.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], askedForAction: false, actionRequest: false }),
+    ).toBe("According to his email, the plumber will show up between 2 and 4 pm on Thursday.");
     // With a card the reply is the card's confirmation, without the note.
     const withCard = compose("Done!", {
       pendingEvents: [{ id: "p1", title: "Yoga", starts_at: at("2026-11-12", 18), ends_at: at("2026-11-12", 19) }] as never,
@@ -207,8 +208,9 @@ describe("a reply that says it is done, in a turn with no card", () => {
     // A note about a refused change is a result of its own.
     const refused = compose("Moved it.", { changeRequest: true, changeNote: "I could not find an event matching \"the standup\"." });
     expect(refused).toBe("I could not find an event matching \"the standup\". Nothing in your calendar was changed.");
-    // Another card (an insight, priorities) is a result too.
-    expect(compose("Here are your priorities.", { hasOtherCards: true })).toBe("Here are your priorities.");
+    // Another card (an insight, priorities) is not the calendar entry that was asked for.
+    expect(compose("Here are your priorities.", { hasOtherCards: true })).toBe(`Here are your priorities.\n\n${NOTHING_ADDED}`);
+    expect(composeReply({ modelReply: "Here are your priorities.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], hasOtherCards: true })).toBe("Here are your priorities.");
   });
 
   it("asksForAction: requests to do something, not questions", () => {
