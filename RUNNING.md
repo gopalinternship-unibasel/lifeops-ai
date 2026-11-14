@@ -86,7 +86,7 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 12 migrations in `supabase/migrations`
+1. starts the local Supabase stack and applies the 13 migrations in `supabase/migrations`
    (the first start downloads the Supabase images, several minutes); on every later run
    `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
@@ -706,8 +706,11 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   differs from this PC and is off here: the demo limits `AI_CHAT_PER_HOUR`, `AI_PLANS_PER_DAY`,
   `AI_PLANNER_PER_HOUR` and `AI_CALLS_PER_DAY` (unset = unlimited, the default here), the notice on the
   sign-in page (`VITE_HOSTED_DEMO=true`), the Vercel build (`NITRO_PRESET=vercel`; plain
-  `npm run build` is unchanged and writes `dist\`), and the Supabase grants and clean-up migrations
-  (harmless on the local stack; the clean-up only acts where `pg_cron` exists, which it does not here).
+  `npm run build` is unchanged and writes `dist\`), and the nightly clean-up of anonymous users older
+  than 7 days. The clean-up is a one-off file for the hosted project, `supabase/hosted/cleanup_anonymous_users.sql`,
+  and not a migration: the local database image has `pg_cron` too, so as a migration it would delete
+  local anonymous users as well. The grants migration (`20261114120000_data_api_grants.sql`) is one of
+  the 13 migrations and runs here too, where it repeats grants that already exist.
   Limits of the hosted demo: the caps count stored requests, so a request that is cut off in the middle
   still counts, and the planner's `Plan it` that falls back to the in-app assistant counts as a planner
   request and a chat message; the global allowance is counted per UTC day across all users with three

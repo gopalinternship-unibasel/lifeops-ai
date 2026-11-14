@@ -10,7 +10,7 @@ not verified are marked "Not verified".
 | --- | --- | --- |
 | Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root | One function for server rendering and server functions, static files from the CDN. Node 22.x. |
 | Planner (FastAPI) | Vercel project `lifeops-planner`, root directory = `fastapi-backend` | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it. |
-| Database and sign-in | A new Supabase project (free plan), region Frankfurt | The 12 existing migrations plus the two new ones. The planner uses the same project through its own role and schema. |
+| Database and sign-in | A new Supabase project (free plan), region Frankfurt | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
 | AI model | Any OpenAI-compatible provider, set by `LLM_BASE_URL` | Not decided. Groq's free plan is the candidate. See section 2. |
 | Monitoring | GitHub Actions workflow `smoke.yml` | Once a day. |
 
@@ -141,7 +141,7 @@ first-visit briefing is never refused: it gives its rule-based answer instead.
 
 Other protection that does not need code: the 4,000-character message cap, the 1,500-character cap for
 plan instructions, Supabase's limit of 30 anonymous sign-ins per hour per IP, no billing on any of the
-three free plans, and the clean-up job in section 5. A CAPTCHA (for example Cloudflare Turnstile) is not
+three free plans, and the clean-up job in section 5.2. A CAPTCHA (for example Cloudflare Turnstile) is not
 wired in; it would need a change in `src/routes/login.tsx` and another account.
 
 The sign-in page shows one line when `VITE_HOSTED_DEMO=true`: demo data only, messages go to a hosted AI
@@ -151,23 +151,33 @@ provider, do not enter personal information.
 
 ### 5.1 Migrations
 
-`supabase db push` applies every file in `supabase/migrations` in order. The last two are new:
+`supabase db push` applies the 13 files in `supabase/migrations` in order. The last one is new:
 
 - `20261114120000_data_api_grants.sql` gives `authenticated` and `service_role` access to the tables
   (`service_role` alone for `google_oauth_tokens`; `anon` gets nothing). New Supabase projects no longer do
   this by themselves, and without it every query fails with "permission denied for table". Row level
   security still decides which rows a user sees. It does nothing where the roles do not exist, and it is
   harmless on the local stack and on an older project, where it repeats grants that are already there.
-- `20261114130000_cleanup_anonymous_users.sql` schedules a daily job (03:17 UTC) with `pg_cron` that deletes
-  anonymous users older than 7 days; their rows go with them through the foreign keys. Where `pg_cron` is
-  missing or cannot be enabled it only prints a notice. Not verified on a hosted project: that the
-  `postgres` role may delete from `auth.users` there. After the push, `select * from cron.job;` should list
-  `delete-old-anonymous-users`.
+
+### 5.2 Clean-up of old anonymous users (hosted project only)
+
+`supabase/hosted/cleanup_anonymous_users.sql` is not a migration, on purpose: the local stack's database
+image has `pg_cron` too, so as a migration the job would also run on every local database. Run the file
+once on the hosted project, after the migrations: paste it into the SQL Editor, or run it with `psql` as
+the `postgres` role. It enables `pg_cron` if needed, removes a job of the same name if one exists, and
+schedules `delete-old-anonymous-users`, a daily job (03:17 UTC) that deletes anonymous users older than
+7 days; their rows in the app's tables go with them through the foreign keys. Running it twice leaves one
+job. The last statement lists the job.
+
+Checked on a throw-away container of the local image (`supabase/postgres` 17.11) as the `postgres` role:
+the file runs twice without error and leaves one job. Not verified on a hosted project: that the `postgres`
+role may delete from `auth.users` there (the job's first run is the test; `select * from
+cron.job_run_details order by start_time desc limit 5;` shows its result the next day).
 
 No SQL seed is needed: demo calendar events are created per user by the app, and the demo inbox lives in
 the code.
 
-### 5.2 Planner role and schema
+### 5.3 Planner role and schema
 
 Run once in the SQL Editor (choose a long password and keep it for `DATABASE_URL`):
 
@@ -183,7 +193,7 @@ to `lifeops_planner.PROJECT_REF`, insert the new password, change the scheme to 
 add `?sslmode=require`. Not verified: that the pooler accepts this role and applies its `search_path`. If it
 does not, set `DATABASE_SCHEMA=planner` (already in the table above), or use the `postgres` user's pooler URI.
 
-### 5.3 Authentication settings
+### 5.4 Authentication settings
 
 In Dashboard, Authentication:
 
@@ -209,10 +219,11 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
    `supabase projects create`). Leave "Automatically expose new tables" off: the grants migration handles access.
 4. Merge this branch to `main` and let CI pass.
 5. `supabase link --project-ref PROJECT_REF`, then `supabase db push --dry-run`, then `supabase db push`. The
-   migration list should show 14 applied.
-6. Push the auth settings of section 5.3 (dashboard, or `supabase config push` from a scratch folder that
+   migration list should show 13 applied. Then apply `supabase/hosted/cleanup_anonymous_users.sql` once
+   (section 5.2).
+6. Push the auth settings of section 5.4 (dashboard, or `supabase config push` from a scratch folder that
    holds only the `[auth]` values; do not push the repository's own `config.toml`, whose Site URL is localhost).
-7. OWNER: create the planner role and schema (section 5.2) and build `DATABASE_URL`.
+7. OWNER: create the planner role and schema (section 5.3) and build `DATABASE_URL`.
 8. Link the planner folder: `cd fastapi-backend`, `npx vercel@latest link --yes --project lifeops-planner`. In the
    project settings set Root Directory to `fastapi-backend` if it is connected to Git, framework FastAPI,
    function region `fra1` (`vercel.json` already asks for it). Add the non-secret settings of section 3.2 with
