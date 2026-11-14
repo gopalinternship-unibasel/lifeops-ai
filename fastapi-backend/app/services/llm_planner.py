@@ -81,14 +81,22 @@ _RISK_LEVELS = {"low", "medium", "high"}
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
+    """The JSON object in a model's text answer: code fences are stripped and, when the text
+    holds more than the object (prose before or after it), the first JSON object is taken."""
     text = _FENCE_RE.sub("", raw or "").strip()
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
+        start = text.find("{")
+        if start < 0:
             raise
-        data = json.loads(text[start : end + 1])
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text, start)
+        except json.JSONDecodeError:
+            end = text.rfind("}")
+            if end <= start:
+                raise
+            data = json.loads(text[start : end + 1])
     if not isinstance(data, dict):
         raise ValueError("The model did not return a JSON object")
     return data
@@ -214,8 +222,12 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
     return PlannerOutput(summary=summary, tasks=tasks, actions=actions, execution_order=order), notes
 
 
-def _response_format() -> dict[str, Any]:
-    if settings.llm_response_format == "json_object":
+def _response_format() -> dict[str, Any] | None:
+    """The response_format of the request, or None to send none (LLM_RESPONSE_FORMAT=none)."""
+    mode = (settings.llm_response_format or "").strip().lower()
+    if mode == "none":
+        return None
+    if mode == "json_object":
         return {"type": "json_object"}
     return {
         "type": "json_schema",
@@ -274,6 +286,10 @@ def create_plan(
             timeout=settings.llm_timeout_seconds,
             max_retries=0,
         )
+        response_format = _response_format()
+        # With LLM_RESPONSE_FORMAT=none the key is left out; the prompt asks for JSON and
+        # _extract_json reads it from the text.
+        extra: dict[str, Any] = {"response_format": response_format} if response_format else {}
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -287,9 +303,9 @@ def create_plan(
                     ),
                 },
             ],
-            response_format=_response_format(),
             temperature=0.2,
             max_tokens=settings.llm_max_tokens,
+            **extra,
         )
         raw = response.choices[0].message.content or "{}"
         plan, notes = sanitize_plan(_extract_json(raw), user_input)

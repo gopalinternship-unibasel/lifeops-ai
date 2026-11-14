@@ -236,6 +236,41 @@ def test_llm_request_uses_the_configured_openai_compatible_endpoint(client, fake
     assert "Europe/Zurich" in call["request"]["messages"][1]["content"]
 
 
+def test_response_format_none_sends_no_response_format_and_reads_json_from_text(
+    client, fake_llm, use_settings
+):
+    use_settings(llm_response_format="none")
+    fake_llm.answer = (
+        "Here is your plan:\n```json\n"
+        + json.dumps({"summary": "ok", "tasks": [{"title": "Deep work"}], "actions": []})
+        + '\n```\nAlso {"summary": "second object"}'
+    )
+    plan = make_plan(client, text="deep work")
+    assert "response_format" not in fake_llm.calls[-1]["request"]
+    assert plan["planner"] == "llm"
+    assert plan["plan"]["summary"] == "ok"
+    assert [task["title"] for task in plan["plan"]["tasks"]] == ["Deep work"]
+
+
+def test_response_format_json_object_and_unknown_values_keep_working(client, fake_llm, use_settings):
+    fake_llm.answer = json.dumps({"summary": "ok", "tasks": [{"title": "One thing"}], "actions": []})
+    use_settings(llm_response_format="json_object")
+    make_plan(client, text="one thing")
+    assert fake_llm.calls[-1]["request"]["response_format"] == {"type": "json_object"}
+    use_settings(llm_response_format="something-else")
+    make_plan(client, text="one thing")
+    assert fake_llm.calls[-1]["request"]["response_format"]["type"] == "json_schema"
+
+
+def test_extract_json_takes_the_first_object_from_text():
+    assert llm_planner._extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert llm_planner._extract_json('Sure: {"a": {"b": 2}} and then {"c": 3}') == {"a": {"b": 2}}
+    with pytest.raises(ValueError):
+        llm_planner._extract_json("no json here")
+    with pytest.raises(ValueError):
+        llm_planner._extract_json("[1, 2]")
+
+
 def test_llm_failure_falls_back_to_keyword_planner(client, fake_llm):
     fake_llm.error = RuntimeError("connection refused")
     plan = make_plan(client)

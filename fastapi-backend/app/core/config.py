@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 120.0
     llm_max_tokens: int = 1200
     # "json_schema" = constrained decoding against the planner schema (Ollama, OpenAI);
-    # "json_object" = plain JSON mode for providers without schema support.
+    # "json_object" = plain JSON mode for providers without schema support;
+    # "none" = no response_format at all (Cloudflare Workers AI lists JSON mode only for older
+    # models): the prompt asks for JSON and the planner takes the first JSON object from the text.
+    # Any other value is treated as "json_schema".
     llm_response_format: str = "json_schema"
     # "auto" = use the LLM when one is configured; "keyword" = always the keyword demo planner.
     planner_mode: str = "auto"
