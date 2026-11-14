@@ -8,7 +8,10 @@ import pytest
 # Configure the app BEFORE it is imported: a throw-away SQLite file, no LLM (keyword planner),
 # no shared secret. Environment variables take precedence over fastapi-backend/.env.
 _tmp = Path(tempfile.mkdtemp(prefix="lifeops-tests-"))
-os.environ["DATABASE_URL"] = f"sqlite:///{(_tmp / 'test.db').as_posix()}"
+# LIFEOPS_TEST_DATABASE_URL (and optionally LIFEOPS_TEST_DATABASE_SCHEMA) runs the same tests against
+# a throw-away PostgreSQL database instead; it must be one that may be emptied.
+os.environ["DATABASE_URL"] = os.environ.get("LIFEOPS_TEST_DATABASE_URL") or f"sqlite:///{(_tmp / 'test.db').as_posix()}"
+os.environ["DATABASE_SCHEMA"] = os.environ.get("LIFEOPS_TEST_DATABASE_SCHEMA", "")
 os.environ["ENV"] = "test"
 os.environ["LLM_BASE_URL"] = ""
 os.environ["OPENAI_API_KEY"] = ""

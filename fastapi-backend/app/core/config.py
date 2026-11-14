@@ -4,7 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "LifeOps AI Backend"
     env: str = "development"
+    # SQLite file by default (local use and tests). For PostgreSQL use a URL such as
+    # postgresql+psycopg://USER:PASSWORD@HOST:5432/postgres?sslmode=require ("postgres://" and
+    # "postgresql://" are accepted too). On a serverless host the URL should point at a pooler.
     database_url: str = "sqlite:///./lifeops.db"
+    # PostgreSQL only: the schema that holds the planner's tables. Every connection puts it first
+    # on its search_path. The schema must exist. Leave unset to use the role's own search_path.
+    database_schema: str | None = None
     frontend_origin: str = "http://localhost:5190"
 
     # Provider-agnostic LLM (any OpenAI-compatible chat-completions API).
