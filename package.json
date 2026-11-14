@@ -87,6 +87,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^15.15.0",
+    "nitro": "3.0.261103-rc",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
@@ -97,5 +98,10 @@
   "packageManager": "npm@10.9.2",
   "engines": {
     "node": "22.x"
+  },
+  "overrides": {
+    "@lovable.dev/vite-tanstack-config": {
+      "nitro": "$nitro"
+    }
   }
 }

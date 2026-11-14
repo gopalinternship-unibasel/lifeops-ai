@@ -31,7 +31,18 @@ function longLlmRequests(): Plugin {
   };
 }
 
+/**
+ * Deployment target of "npm run build".
+ *
+ * Without a target the build is the plain TanStack Start output (dist/client and
+ * dist/server/server.js), exactly as before, and nitro is not used. Set NITRO_PRESET (for
+ * example "vercel") to build the nitro output for that host instead. Vercel sets VERCEL=1 during
+ * its builds, which selects the "vercel" preset when NITRO_PRESET is not set.
+ */
+const nitroPreset = process.env.NITRO_PRESET?.trim() || (process.env.VERCEL ? "vercel" : undefined);
+
 export default defineConfig({
+  nitro: nitroPreset ? { preset: nitroPreset } : false,
   vite: {
     plugins: [longLlmRequests()],
     // With an empty dependency cache (a fresh install) Vite found these TanStack Start internals
