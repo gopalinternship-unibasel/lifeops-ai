@@ -183,9 +183,17 @@ Run once in the SQL Editor (choose a long password and keep it for `DATABASE_URL
 
 ```sql
 create role lifeops_planner login password 'CHOOSE_A_LONG_PASSWORD';
+grant lifeops_planner to postgres;
 create schema planner authorization lifeops_planner;
 alter role lifeops_planner set search_path = planner;
 ```
+
+The second line is needed: on Supabase's Postgres 17 the `postgres` role is not a superuser, and without
+that grant `create schema ... authorization lifeops_planner` fails with `must be able to SET ROLE
+"lifeops_planner"`. Checked on a throw-away container of `supabase/postgres` 17.11 as the `postgres` role:
+the three lines without the grant fail with that error and create no schema; with it the schema is
+created, `lifeops_planner` signs in with `current_schema()` = `planner` and can create a table there, and
+`anon`, `authenticated` and `service_role` have no `USAGE` on the schema. Not yet run on the hosted project.
 
 The schema `planner` is not exposed by the Data API, so the planner tables cannot be reached with the
 publishable key. For `DATABASE_URL` open Dashboard, Connect, "Session pooler", copy the URI, change the user
