@@ -2,15 +2,15 @@
 
 MONDAY is the July 2026 TanStack Start rework of the Bobathon LifeOps AI project. Locally it runs as:
 
-| Part | URL / port | Notes |
-| --- | --- | --- |
-| Web app (TanStack Start, React) | http://localhost:5190 | Use `localhost`, not `127.0.0.1` (Vite listens on `localhost`). |
-| FastAPI planner service | http://127.0.0.1:8010 (docs: `/docs`) | `fastapi-backend/`, SQLite file `fastapi-backend/lifeops.db` |
-| Supabase API (auth + Postgres REST) | http://127.0.0.1:55321 | Docker, project id `lifeops` |
-| Supabase Postgres | 127.0.0.1:55322 | user `postgres` (local dev password, see `supabase status`) |
-| Supabase Studio (database browser) | http://127.0.0.1:55323 | |
-| Mailpit (auth emails) | http://127.0.0.1:55324 | local sign-ups need no email confirmation |
-| Ollama (local LLM, shared) | http://localhost:11434/v1 | container `cvfix-ollama`; local default model `qwen2.5-7b-4threads` |
+| Part                                | URL / port                            | Notes                                                               |
+| ----------------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
+| Web app (TanStack Start, React)     | http://localhost:5190                 | Use `localhost`, not `127.0.0.1` (Vite listens on `localhost`).     |
+| FastAPI planner service             | http://127.0.0.1:8010 (docs: `/docs`) | `fastapi-backend/`, SQLite file `fastapi-backend/lifeops.db`        |
+| Supabase API (auth + Postgres REST) | http://127.0.0.1:55321                | Docker, project id `lifeops`                                        |
+| Supabase Postgres                   | 127.0.0.1:55322                       | user `postgres` (local dev password, see `supabase status`)         |
+| Supabase Studio (database browser)  | http://127.0.0.1:55323                |                                                                     |
+| Mailpit (auth emails)               | http://127.0.0.1:55324                | local sign-ups need no email confirmation                           |
+| Ollama (local LLM, shared)          | http://localhost:11434/v1             | container `cvfix-ollama`; local default model `qwen2.5-7b-4threads` |
 
 Reserved but switched off in `supabase/config.toml` (the app does not use them): shadow DB 55320,
 analytics 55327, pooler 55329, edge-function inspector 8084.
@@ -29,11 +29,11 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
   (`..\_e2e\lifeops-fix5\measure.mjs`, raw answers in `model-measure.jsonl`). Raw model answers, before
   any of the app's checks:
 
-  | Model | Briefing (priorities, all 4 unread emails, no "inbox is clear") | Move (dentist to 16:00-17:30 the same day) | Planner (Thursday 14:00-16:00 block + draft to Sam) | Seconds per answer |
-  | --- | --- | --- | --- | --- |
-  | `qwen2.5-3b-4threads` (old default) | 0 of 2 (priorities, but "inbox is clear" next to 4 unread) | 0 of 2 (14:00-16:00; "16:00" without a date) | 0 of 2 (no block) | 33-212 |
-  | **`qwen2.5:7b`, 4 threads** | **2 of 2** | **2 of 2** | **2 of 2** | 94-223 |
-  | `llama3.1:8b`, 4 threads | 0 of 1 (no priorities, no emails) | 1 of 1 | 1 of 1 | 172-549 (*) |
+  | Model                               | Briefing (priorities, all 4 unread emails, no "inbox is clear") | Move (dentist to 16:00-17:30 the same day)   | Planner (Thursday 14:00-16:00 block + draft to Sam) | Seconds per answer |
+  | ----------------------------------- | --------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------- | ------------------ |
+  | `qwen2.5-3b-4threads` (old default) | 0 of 2 (priorities, but "inbox is clear" next to 4 unread)      | 0 of 2 (14:00-16:00; "16:00" without a date) | 0 of 2 (no block)                                   | 33-212             |
+  | **`qwen2.5:7b`, 4 threads**         | **2 of 2**                                                      | **2 of 2**                                   | **2 of 2**                                          | 94-223             |
+  | `llama3.1:8b`, 4 threads            | 0 of 1 (no priorities, no emails)                               | 1 of 1                                       | 1 of 1                                              | 172-549 (*)        |
 
   The 3B and 7B runs had the Ollama to themselves (no other project's requests, Docker VM load average
   5-9 from these runs). (*) Another project started using the shared Ollama during the Llama run, so its
@@ -49,6 +49,7 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
   "What to try"). The model choice was not measured again in that round: the shared Ollama was busy
   with another project's embedding and 3B-model work the whole time (its container at 800-900% CPU),
   so new timings would not have been comparable; the measurement above still decides the default.
+
 - **Why 4 threads**, measured in the Ollama log on 9 Nov 2026: this CPU has 4 performance and 4
   low-power cores; `qwen2.5:3b` with Ollama's default (all 8 threads) generated 0.45 tokens/s while
   other work kept the PC busy, the same weights with 4 threads 4.2-5.6 tokens/s in the same hour.
@@ -133,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-lifeops.ps1 -KeepSupabase 
   moment until the page has loaded its scripts; what you typed meanwhile is kept.) Its profile is filled in and it uses the demo inbox and calendar, so it lands
   in the workspace. `node scripts\create-test-user.mjs --new` makes another one (and overwrites the file).
 - **New account:** "Create account" on the login page. Locally there is no email confirmation; you go
-  through *Profile* then *Connectors*. On *Connectors* choose **Use demo inbox & calendar** (Google is not
+  through _Profile_ then _Connectors_. On _Connectors_ choose **Use demo inbox & calendar** (Google is not
   configured on this PC; the page says so and "Connect Google" explains what is missing).
 - **Anonymous demo:** "Try the live demo" on the login page (enabled by `VITE_ENABLE_ANONYMOUS_DEMO=true`
   in `.env.local`; anonymous sign-ins are on in `supabase/config.toml`).
@@ -150,15 +151,15 @@ instead (see "Known limits"). The UI shows "Thinking..." (or "Drafting..." on th
 and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`).
 
 1. **Workspace** (`/app`): on the first visit MONDAY asks itself for an inbox and calendar briefing and
-   ranks your priorities (stored in the `tasks` table, shown under *Priorities*). Then try
-   - "Block 3–5 pm tomorrow for a gym push workout." → a proposal appears under *Today*; nothing is saved
+   ranks your priorities (stored in the `tasks` table, shown under _Priorities_). Then try
+   - "Block 3–5 pm tomorrow for a gym push workout." → a proposal appears under _Today_; nothing is saved
      until you click **Save to Calendar**.
    - "Schedule 'Review lecture notes' tomorrow from 10:30 to 11:30." → overlaps the demo lecture
      (10:00–12:00); **Save** is refused with "This time overlaps ...".
-   - "Draft a reply to Sam's email about lunch on Saturday: yes, 1 pm works." → *Insights* shows the
+   - "Draft a reply to Sam's email about lunch on Saturday: yes, 1 pm works." → _Insights_ shows the
      reply; edit it and click **Save as draft**. It is stored as a draft (demo mailbox, or Gmail drafts
      when Google is connected). MONDAY has no send function at all.
-   - "Move my dentist appointment to start at 4 pm the same day." → an *Update event* card
+   - "Move my dentist appointment to start at 4 pm the same day." → an _Update event_ card
      "Dentist appointment: Wed 14:00–15:30 → Wed 16:00–17:30" and the reply "Ready to move **Dentist
      appointment** from Wed, Nov 11, 2:00 PM – 3:30 PM to Wed, Nov 11, 4:00 PM – 5:30 PM. Nothing changes
      until you click **Save changes**"; **Save changes** applies it. How a move or cancel is checked
@@ -167,8 +168,8 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
      "Nov 13", "4 pm", "16:00", "4:00-5:30 pm", "for an hour", "an hour later", "Cancel my team sync")
      and applies that, whatever the model returned; where the request leaves a choice ("to 3": 3 AM or
      3 PM? "Monday" on a Monday?) the model's answer is used only if it is one of the readings, else
-     MONDAY asks. Two matching events ("the dentist" with *Dentist appointment* and *Prepare for
-     dentist*) get a question, an event that is not in the calendar a refusal, and in both cases no card.
+     MONDAY asks. Two matching events ("the dentist" with _Dentist appointment_ and _Prepare for
+     dentist_) get a question, an event that is not in the calendar a refusal, and in both cases no card.
      A new event the model proposes with the title of the event you asked to move becomes a move of
      that event (QA saw a second dentist appointment instead of a move), a model time before 06:00 is
      refused unless you asked for the early hours, and a time in the past is refused. Changes for event
@@ -178,7 +179,7 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
      appointment at 1 pm on Thursday" was offered as a move of the appointment). The rules are
      conservative: a message is a change request only when it clearly asks to move, reschedule, shift,
      push, postpone, bring forward or cancel an event that it names. In detail:
-     - *Verbs.* "move", "reschedule", "postpone", "put off", "cancel", "call off" always ask for a
+     - _Verbs._ "move", "reschedule", "postpone", "put off", "cancel", "call off" always ask for a
        change. "push", "shift", "delay", "delete", "remove", "scrap" and "change", "bring/pull ...
        forward", "drop" count only when their object is an event of the calendar ("Change my dentist
        appointment to 4 pm", "Drop the team sync"), not in "Change of plans: ...", "Push workout
@@ -189,75 +190,75 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
        move of that event (then with the day the message names), and a new event of that name is
        offered as a second one, with a warning. "The block for the Acme interview" or "the meeting for
        the dentist appointment" is not the interview or the appointment either.
-     - *The verb must start the request* ("Please ...", "Can you ...", "I need to ...", "..., then
+     - _The verb must start the request_ ("Please ...", "Can you ...", "I need to ...", "..., then
        ..."). Inside a reminder or a task ("Remind me to reschedule the dentist"), a message to write
        ("Email Sam: cancel lunch on Saturday"), a refusal ("Don't cancel the team sync"), a question
        ("Should I move ...?") or an idiom ("Move on") it is not a request.
-     - *The event must be named by words of its own title* ("my dentist appointment", "the dentist",
+     - _The event must be named by words of its own title_ ("my dentist appointment", "the dentist",
        "the team sync meeting", "tomorrow's lecture", "my 2 pm"). "The reminder for my dentist
        appointment", "the Acme interview prep" and "my dentist visit" are not that event: no card, and
        the reply names the closest event ("I could not find an event matching ... The closest is
        **Dentist appointment** (...). To move it, name it as it is in the calendar."). Two events in one
        request ("Cancel the team sync and the lecture") get "one change per message".
-     - *The new time is read from the request itself, not from its reason*: "Move the dentist
+     - _The new time is read from the request itself, not from its reason_: "Move the dentist
        appointment to Friday because I have a lecture on Wednesday at 4 pm" keeps the appointment's
        own time on Friday. "Tuesday the 17th" and "the 13th" are read; a weekday that is not its
        date's ("Thursday Nov 13") is asked about.
-     Everything else takes the ordinary path and keeps the model's own answer: new events and
-     reminders are offered as new cards (a reminder the model titles exactly like its event becomes
-     "Reminder: Dentist appointment"; any other new event with the title of an existing one says "...
-     is already in your calendar on ...; saving this adds a second one"). A move or cancel the model
-     returns although the message did not ask for one (a new-item request, a question, a refusal, a
-     message to write, an event the message does not mention) is left out and named: "The AI model
-     also suggested changing **Dentist appointment** (...). I did not read your message as asking for
-     that, so I left it out. To move or cancel an event, name it, for example ...". After a cancel a
-     new event of the same name is kept ("Cancel the dentist appointment and book a new one for
-     Friday at 2 pm"). `tests/change-request-table.test.ts` lists about 190 phrasings in both
-     directions with the worst answers a model can give for each.
-     **The reply always matches the cards**: for a move or cancel it is written from the validated card
-     only; with other proposals the model's sentences that name a day or time are replaced by one line
-     per card with the card's own times, and a conflict is named ("overlaps … Save will be refused").
-     Internal ids, prompt template lines and claims like "has been moved", "Moved ...", "Reminder set
-     ...", "Done!" or "I sent" are removed from every reply, and so is a sentence whose weekday is not
-     its date's ("Thursday 2026-11-14"); a short id the prompt had becomes the event's title (or the
-     email), a sentence about an id it never had is removed. "Your gym session is scheduled for 6 pm"
-     counts as a claim only in the answer to a request for something new or for a change; in the
-     answer to a question ("When is my dentist appointment?" → "Your dentist appointment is scheduled
-     for Wednesday at 2 pm") it is a description and stays (`tests/reply-guard-table.test.ts`).
-     Without a change card nothing in the reply talks about moving or cancelling, and without a draft
-     card nothing says "Draft ready" (a reply to an email that is not in the inbox says so instead).
-     Replies show times in your local time with the day ("Wed, Nov 11, 4:00 PM – 5:30 PM");
-     cards use your browser's format ("Tomorrow 3:00 PM–5:00 PM" or "Wed, 11 Nov 16:00–17:30").
-   Reloading the page restores the chat history. Cards you saved, applied or dismissed stay that way
-   (stored in the `chat_card_actions` table): they are not offered again after a reload or in another
-   tab, and a second **Save** of the same card, from a tab that still shows it, is refused ("This
-   proposal was already saved.", "This reply is already saved as a draft (not sent)."), so no second
-   event or draft is written. A saved reply comes back read-only with the text you saved.
-   *Today's schedule* lists only today; an event saved for another day is in the calendar.
-   Messages are limited to 4,000 characters (the box stops there and shows a counter near the limit);
-   if anything still sends a longer one, the answer is one sentence, not a JSON error.
-   The model's first-visit briefing is checked against the data: every unread email and today's events
-   must be in it, and its inbox block must have the right count, one bullet per unread email and no
-   read email (QA round 4 saw the read Stripe summary listed as a fifth unread one); otherwise the
-   inbox and today are listed from the data and the reply says so. Priority reasons may say "today"
-   only for today's events and must give an event's real length; a wrong one is rewritten from the
-   calendar or the email ("120 min block on Mon, Nov 16 (10:00 AM–12:00 PM); from Acme Recruiting's
-   email (high importance)" instead of the model's "biggest commitment today").
-   If the model does not answer the automatic first-visit briefing (timeout, Ollama unreachable), the
-   briefing is put together by rules instead and says so: unread emails, today's events, and
-   priorities ranked by the same rule the model is given (stored as tasks with source `rules`). An
-   email task about one of today's remaining events is the same commitment and is ranked once, in the
-   event's line (the demo's 7 PM team sync and Alicia's "Team sync moved to 7 PM today" email: one
-   priority, "also in Alicia (manager)'s email ..."). Every other request shows the model's error as
-   a sentence, for example "Ollama is not available right now (HTTP 503: ...). Try again in a
-   moment.", with the provider's own message but never its raw JSON body (that goes to the server log).
-   **Reloading while MONDAY is still answering** (or opening the workspace in another tab) loses
-   nothing: every request runs to the end on the server and stores its answer, or its error, in the
-   chat. The page shows the message with "Thinking..." and "Still answering your last message",
-   keeps the box disabled, checks every 4 s and then shows the answer and its cards. A request that
-   was cut off (for example the dev server was stopped) is noted under the message once it is older
-   than the longest a request can take (the model timeout plus 2 minutes), so the page never waits
-   forever.
+       Everything else takes the ordinary path and keeps the model's own answer: new events and
+       reminders are offered as new cards (a reminder the model titles exactly like its event becomes
+       "Reminder: Dentist appointment"; any other new event with the title of an existing one says "...
+       is already in your calendar on ...; saving this adds a second one"). A move or cancel the model
+       returns although the message did not ask for one (a new-item request, a question, a refusal, a
+       message to write, an event the message does not mention) is left out and named: "The AI model
+       also suggested changing **Dentist appointment** (...). I did not read your message as asking for
+       that, so I left it out. To move or cancel an event, name it, for example ...". After a cancel a
+       new event of the same name is kept ("Cancel the dentist appointment and book a new one for
+       Friday at 2 pm"). `tests/change-request-table.test.ts` lists about 190 phrasings in both
+       directions with the worst answers a model can give for each.
+       **The reply always matches the cards**: for a move or cancel it is written from the validated card
+       only; with other proposals the model's sentences that name a day or time are replaced by one line
+       per card with the card's own times, and a conflict is named ("overlaps … Save will be refused").
+       Internal ids, prompt template lines and claims like "has been moved", "Moved ...", "Reminder set
+       ...", "Done!" or "I sent" are removed from every reply, and so is a sentence whose weekday is not
+       its date's ("Thursday 2026-11-14"); a short id the prompt had becomes the event's title (or the
+       email), a sentence about an id it never had is removed. "Your gym session is scheduled for 6 pm"
+       counts as a claim only in the answer to a request for something new or for a change; in the
+       answer to a question ("When is my dentist appointment?" → "Your dentist appointment is scheduled
+       for Wednesday at 2 pm") it is a description and stays (`tests/reply-guard-table.test.ts`).
+       Without a change card nothing in the reply talks about moving or cancelling, and without a draft
+       card nothing says "Draft ready" (a reply to an email that is not in the inbox says so instead).
+       Replies show times in your local time with the day ("Wed, Nov 11, 4:00 PM – 5:30 PM");
+       cards use your browser's format ("Tomorrow 3:00 PM–5:00 PM" or "Wed, 11 Nov 16:00–17:30").
+       Reloading the page restores the chat history. Cards you saved, applied or dismissed stay that way
+       (stored in the `chat_card_actions` table): they are not offered again after a reload or in another
+       tab, and a second **Save** of the same card, from a tab that still shows it, is refused ("This
+       proposal was already saved.", "This reply is already saved as a draft (not sent)."), so no second
+       event or draft is written. A saved reply comes back read-only with the text you saved.
+       _Today's schedule_ lists only today; an event saved for another day is in the calendar.
+       Messages are limited to 4,000 characters (the box stops there and shows a counter near the limit);
+       if anything still sends a longer one, the answer is one sentence, not a JSON error.
+       The model's first-visit briefing is checked against the data: every unread email and today's events
+       must be in it, and its inbox block must have the right count, one bullet per unread email and no
+       read email (QA round 4 saw the read Stripe summary listed as a fifth unread one); otherwise the
+       inbox and today are listed from the data and the reply says so. Priority reasons may say "today"
+       only for today's events and must give an event's real length; a wrong one is rewritten from the
+       calendar or the email ("120 min block on Mon, Nov 16 (10:00 AM–12:00 PM); from Acme Recruiting's
+       email (high importance)" instead of the model's "biggest commitment today").
+       If the model does not answer the automatic first-visit briefing (timeout, Ollama unreachable), the
+       briefing is put together by rules instead and says so: unread emails, today's events, and
+       priorities ranked by the same rule the model is given (stored as tasks with source `rules`). An
+       email task about one of today's remaining events is the same commitment and is ranked once, in the
+       event's line (the demo's 7 PM team sync and Alicia's "Team sync moved to 7 PM today" email: one
+       priority, "also in Alicia (manager)'s email ..."). Every other request shows the model's error as
+       a sentence, for example "Ollama is not available right now (HTTP 503: ...). Try again in a
+       moment.", with the provider's own message but never its raw JSON body (that goes to the server log).
+       **Reloading while MONDAY is still answering** (or opening the workspace in another tab) loses
+       nothing: every request runs to the end on the server and stores its answer, or its error, in the
+       chat. The page shows the message with "Thinking..." and "Still answering your last message",
+       keeps the box disabled, checks every 4 s and then shows the answer and its cards. A request that
+       was cut off (for example the dev server was stopped) is noted under the message once it is older
+       than the longest a request can take (the model timeout plus 2 minutes), so the page never waits
+       forever.
 2. **Plan** (`/app/plan`): **Create plan** fills only the free slots (07:00–22:00 minus your events) of
    the week that are still ahead: today's slots start at the next quarter hour, days that are over get
    none ("Day already over"). Items the model places outside a free slot, in the past or on top of an
@@ -284,17 +285,17 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
    The grid shows 06:00 to midnight and starts earlier when an event of the week does (an event at
    04:00 is drawn, not hidden); an event that runs past midnight shows on both days.
 4. **Dashboard** (`/app/dashboard`): productivity numbers, top priorities, next 7 days, recent drafts, and
-   the planner service: paste messy text into *From chaos to plan* → tasks and proposed actions appear in
-   the *Action approval center* → **Approve** → **Run**. Calendar blocks are written to your calendar after
+   the planner service: paste messy text into _From chaos to plan_ → tasks and proposed actions appear in
+   the _Action approval center_ → **Approve** → **Run**. Calendar blocks are written to your calendar after
    the same conflict check, email actions become drafts only, actions the model invents (for example
-   "send_email") are dropped, and the *Execution log* shows where each action went. An approved action
+   "send_email") are dropped, and the _Execution log_ shows where each action went. An approved action
    whose **Run** is refused (it overlaps an event, or its time has passed) can still be **Reject**ed.
    A recipient in a planned draft is kept only if you wrote it (the address, or the name as a word of
    your text): the planner has no address book, and the model invented "sam@example.com" for "draft an
    email to Sam" (QA round 4). Such a draft reads "Draft to (recipient to fill in)", the plan's note
    says so. A Gmail draft is then created without a To header; the demo draft row keeps the text
    "(recipient to fill in)" in its To field.
-   Reminders and tasks show one time (a point in time), not "17:45 – 17:45". *Top priorities* says who
+   Reminders and tasks show one time (a point in time), not "17:45 – 17:45". _Top priorities_ says who
    ranked them: "Ranked by the AI assistant ..." or, when the model returned no ranking and the
    rule-based fallback did it (`tasks.source = rules`), "Ranked by simple rules ..." with a "rule" mark
    per row. If the planner service is stopped, the page says so and the same text goes to the in-app
@@ -303,7 +304,7 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
    in-app assistant included, so a reload while it runs shows "Still planning ..." (Plan it disabled)
    and then the result; the last result stays on the page with its time. A failed or cut-off request
    says so.
-5. **Profile** (`/app/profile`): name, role and goals feed the prompts; *Manage Google connection*.
+5. **Profile** (`/app/profile`): name, role and goals feed the prompts; _Manage Google connection_.
 
 ## Switching the AI provider
 
@@ -320,15 +321,15 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
   both files. Avoid `Set-Content -Encoding utf8` in Windows PowerShell 5.1: it adds a byte-order mark.
   (The loaders now tolerate one, and every run of the start script rewrites both files without it.)
 
-| Provider | `LLM_BASE_URL` | `LLM_MODEL` (example) | `LLM_API_KEY` |
-| --- | --- | --- | --- |
-| Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended) | any (`ollama`) |
-| Hugging Face router (original) | `https://router.huggingface.co/v1` | `meta-llama/Llama-3.1-8B-Instruct` | `hf_...` token with inference credits |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `sk-...` |
+| Provider                                                         | `LLM_BASE_URL`                                                     | `LLM_MODEL` (example)                                                                                 | `LLM_API_KEY`                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local Ollama (default)                                           | `http://localhost:11434/v1`                                        | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended)     | any (`ollama`)                                                                                                                                                                                                                         |
+| Hugging Face router (original)                                   | `https://router.huggingface.co/v1`                                 | `meta-llama/Llama-3.1-8B-Instruct`                                                                    | `hf_...` token with inference credits                                                                                                                                                                                                  |
+| OpenAI                                                           | `https://api.openai.com/v1`                                        | `gpt-4o-mini`                                                                                         | `sk-...`                                                                                                                                                                                                                               |
 | Cloudflare Workers AI (hosted demo; not yet run against the API) | `https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1` | `@cf/zai-org/glm-4.7-flash` (web app and planner), `@cf/google/gemma-4-26b-a4b-it` (web app fallback) | Workers AI API token (Workers AI Read and Edit). Set `LLM_STRUCTURED_OUTPUT=tools_required` (web app) and `LLM_RESPONSE_FORMAT=none` (planner); free allowance 10,000 neurons a day per Cloudflare account; see `VERCEL_DEPLOYMENT.md` |
-| Groq (alternative; free-plan terms not checked) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback) | Groq key. Set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner) |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | a Gemini model | Gemini API key. Not for a public demo: the free tier may not be used for apps offered in the EEA, Switzerland or the UK |
-| Lovable AI gateway (original Lovable build) | `https://ai.gateway.lovable.dev/v1` | `google/gemini-2.5-flash` | Lovable-issued key |
+| Groq (alternative; free-plan terms not checked)                  | `https://api.groq.com/openai/v1`                                   | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback)                       | Groq key. Set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner)                                                                                                                                  |
+| Google Gemini                                                    | `https://generativelanguage.googleapis.com/v1beta/openai`          | a Gemini model                                                                                        | Gemini API key. Not for a public demo: the free tier may not be used for apps offered in the EEA, Switzerland or the UK                                                                                                                |
+| Lovable AI gateway (original Lovable build)                      | `https://ai.gateway.lovable.dev/v1`                                | `google/gemini-2.5-flash`                                                                             | Lovable-issued key                                                                                                                                                                                                                     |
 
 Web app extras: `LLM_STRUCTURED_OUTPUT=json_schema` (constrained JSON; keep it for Ollama), `tools`
 (OpenAI function calling, the original behaviour, works with OpenAI/Hugging Face) or `tools_required`
@@ -545,13 +546,13 @@ the owner's Google Cloud account:
 
 1. Open https://console.cloud.google.com/ with the Google account that owns the project, create a project
    (for example "MONDAY local").
-2. *APIs & Services → Library*: enable **Gmail API** and **Google Calendar API**.
-3. *APIs & Services → OAuth consent screen* (Google Auth Platform → Branding / Audience / Data access):
+2. _APIs & Services → Library_: enable **Gmail API** and **Google Calendar API**.
+3. _APIs & Services → OAuth consent screen_ (Google Auth Platform → Branding / Audience / Data access):
    user type **External**, app name "MONDAY", your support and developer email.
    Scopes: `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile`,
    `.../auth/gmail.readonly`, `.../auth/gmail.compose`, `.../auth/calendar.events`.
    Leave the app in **Testing** and add your own Gmail address under **Test users**.
-4. *Credentials → Create credentials → OAuth client ID*, type **Web application**:
+4. _Credentials → Create credentials → OAuth client ID_, type **Web application**:
    - Authorised JavaScript origins: `http://localhost:5190`
    - Authorised redirect URIs: `http://localhost:5190/api/public/google/callback` (exactly this)
 5. Put the two values into `.env.local` with a text editor (never into a `VITE_` variable):
@@ -560,7 +561,7 @@ the owner's Google Cloud account:
    GOOGLE_OAUTH_CLIENT_SECRET=<client secret>
    ```
    `GOOGLE_OAUTH_STATE_SECRET` is already there. Restart with the stop and start scripts.
-6. Sign in, open *Profile → Manage Google connection* (or the Connectors step) and click
+6. Sign in, open _Profile → Manage Google connection_ (or the Connectors step) and click
    **Connect Google**. Google warns that the app is unverified; continue as the test user. You come back
    to `/onboarding/connectors?google=connected`; Gmail and Calendar then replace the demo data.
 7. Disconnect from the same page (it also revokes the token at Google).

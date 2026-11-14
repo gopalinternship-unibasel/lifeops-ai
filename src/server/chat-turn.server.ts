@@ -16,12 +16,27 @@ import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, resolveLLMConfig, type AITool } from "@/server/ai/llm.server";
 import { checkAiAllowance } from "@/server/limits.server";
-import { briefingCoversInbox, buildRuleBasedBriefing, checkPriorityReasons } from "@/server/ai/briefing-fallback.server";
-import { listRecentMessages, listUnreadMessages, type GmailMsg } from "@/server/google/gmail.server";
+import {
+  briefingCoversInbox,
+  buildRuleBasedBriefing,
+  checkPriorityReasons,
+} from "@/server/ai/briefing-fallback.server";
+import {
+  listRecentMessages,
+  listUnreadMessages,
+  type GmailMsg,
+} from "@/server/google/gmail.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
 import { getErrorMessage, isRecord } from "@/lib/errors";
-import { addDaysISO, formatTimeInZone, localDateTime, normalizeTimeZone, todayInTimeZone, zonedDateTimeToISO } from "@/server/timezone.server";
+import {
+  addDaysISO,
+  formatTimeInZone,
+  localDateTime,
+  normalizeTimeZone,
+  todayInTimeZone,
+  zonedDateTimeToISO,
+} from "@/server/timezone.server";
 import { findConflicts, parseUserDateTime, toMs } from "@/server/calendar/time-ranges.server";
 import {
   asksForAction,
@@ -31,7 +46,13 @@ import {
   type KnownEvent,
   type ModelChange,
 } from "@/server/calendar/change-request.server";
-import { composeReply, describeRange, resolveRefs, stripInternalMarkers, type ReplyRefs } from "@/server/ai/reply-guard.server";
+import {
+  composeReply,
+  describeRange,
+  resolveRefs,
+  stripInternalMarkers,
+  type ReplyRefs,
+} from "@/server/ai/reply-guard.server";
 import type {
   EmailDraftSuggestion,
   InsightCard,
@@ -62,21 +83,35 @@ export function maxChatTurnMs(env: Record<string, string | undefined> = process.
 }
 
 /** The user's newest chat session, created on first use. */
-export async function ensureChatSessionFor(supabase: UserClient, userId: string): Promise<{ sessionId: string }> {
+export async function ensureChatSessionFor(
+  supabase: UserClient,
+  userId: string,
+): Promise<{ sessionId: string }> {
   const { data: existing, error: existingError } = await supabase
-    .from("chat_sessions").select("id").eq("user_id", userId)
-    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    .from("chat_sessions")
+    .select("id")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
   if (existingError) throw existingError;
   if (existing) return { sessionId: existing.id };
   const { data: created, error } = await supabase
-    .from("chat_sessions").insert({ user_id: userId }).select("id").single();
+    .from("chat_sessions")
+    .insert({ user_id: userId })
+    .select("id")
+    .single();
   if (error) throw error;
   return { sessionId: created.id };
 }
 
 /** True for an assistant message that records a failed turn (shown in the chat, not sent to the model). */
 export function isFailedTurn(message: { role: string; panel_payload?: unknown }): boolean {
-  return message.role === "assistant" && isRecord(message.panel_payload) && message.panel_payload.failed === true;
+  return (
+    message.role === "assistant" &&
+    isRecord(message.panel_payload) &&
+    message.panel_payload.failed === true
+  );
 }
 
 /**
@@ -99,7 +134,8 @@ const TOOL: AITool = {
   type: "function",
   function: {
     name: "respond",
-    description: "Return the assistant reply plus structured panel updates. Calendar events are PROPOSED only; the user must save them.",
+    description:
+      "Return the assistant reply plus structured panel updates. Calendar events are PROPOSED only; the user must save them.",
     parameters: {
       type: "object",
       properties: {
@@ -119,7 +155,8 @@ const TOOL: AITool = {
         },
         proposed_events: {
           type: "array",
-          description: "Events to PROPOSE for the user's calendar. ISO 8601 timestamps. The user must explicitly Save each one.",
+          description:
+            "Events to PROPOSE for the user's calendar. ISO 8601 timestamps. The user must explicitly Save each one.",
           items: {
             type: "object",
             properties: {
@@ -134,14 +171,21 @@ const TOOL: AITool = {
         },
         event_changes: {
           type: "array",
-          description: "PROPOSE moves, renames or deletes of EXISTING calendar events. The user must Save each one. Use the event id (E1, E2, ...) from the calendar list in the system context.",
+          description:
+            "PROPOSE moves, renames or deletes of EXISTING calendar events. The user must Save each one. Use the event id (E1, E2, ...) from the calendar list in the system context.",
           items: {
             type: "object",
             properties: {
               kind: { type: "string", enum: ["update", "delete"] },
-              event_id: { type: "string", description: "Event id from the calendar list, for example E3" },
+              event_id: {
+                type: "string",
+                description: "Event id from the calendar list, for example E3",
+              },
               title: { type: "string", description: "New title (update only, optional)" },
-              starts_at: { type: "string", description: "New start ISO 8601 (update only, optional)" },
+              starts_at: {
+                type: "string",
+                description: "New start ISO 8601 (update only, optional)",
+              },
               ends_at: { type: "string", description: "New end ISO 8601 (update only, optional)" },
             },
             required: ["kind", "event_id"],
@@ -169,10 +213,17 @@ const TOOL: AITool = {
         },
         email_reply: {
           type: "object",
-          description: "When the user asks to reply to a specific email, draft a suggestion. Never sends.",
+          description:
+            "When the user asks to reply to a specific email, draft a suggestion. Never sends.",
           properties: {
-            message_id: { type: "string", description: "id of the email being replied to (from the inbox list, for example e3)" },
-            body: { type: "string", description: "Reply body text. 3-6 sentences. Sign with the user's first name." },
+            message_id: {
+              type: "string",
+              description: "id of the email being replied to (from the inbox list, for example e3)",
+            },
+            body: {
+              type: "string",
+              description: "Reply body text. 3-6 sentences. Sign with the user's first name.",
+            },
           },
           required: ["message_id", "body"],
           additionalProperties: false,
@@ -206,7 +257,10 @@ function parseJsonValue(value: unknown): unknown {
   }
 }
 
-function parseRespondPayload(rawArguments: string | undefined, fallbackReply: string): RawRespondPayload {
+function parseRespondPayload(
+  rawArguments: string | undefined,
+  fallbackReply: string,
+): RawRespondPayload {
   if (!rawArguments) return { reply: fallbackReply };
   try {
     const parsed: unknown = JSON.parse(rawArguments);
@@ -328,7 +382,10 @@ export async function runChatTurn(
   }
 
   const { error: insertMessageError } = await supabase.from("chat_messages").insert({
-    session_id: sessionId, user_id: userId, role: "user", content: message,
+    session_id: sessionId,
+    user_id: userId,
+    role: "user",
+    content: message,
   });
   if (insertMessageError) throw insertMessageError;
 
@@ -380,12 +437,19 @@ async function answerChatTurn(
     .order("created_at", { ascending: false })
     .limit(40);
   if (historyError) throw historyError;
-  const history = (newestFirst ?? []).filter((entry) => !isFailedTurn(entry)).slice(0, 20).reverse();
+  const history = (newestFirst ?? [])
+    .filter((entry) => !isFailedTurn(entry))
+    .slice(0, 20)
+    .reverse();
 
   // 3. Live context
   const [profileResult, tasksResult, googleConnected] = await Promise.all([
     supabase.from("profiles").select("name, role, goals").eq("id", userId).maybeSingle(),
-    supabase.from("tasks").select("id, title, priority_rank, reason").eq("user_id", userId).order("priority_rank", { ascending: true }),
+    supabase
+      .from("tasks")
+      .select("id, title, priority_rank, reason")
+      .eq("user_id", userId)
+      .order("priority_rank", { ascending: true }),
     isGoogleConnected(userId),
   ]);
   if (profileResult.error) throw profileResult.error;
@@ -396,8 +460,21 @@ async function answerChatTurn(
   let realEmails: GmailMsg[] = [];
   let unreadCount = 0;
   let calendarContextAvailable = true;
-  let todayEvents: { id?: string; title: string; starts_at: string; ends_at: string; notes?: string | null }[] = [];
-  let upcomingEvents: { id?: string; title: string; starts_at: string; ends_at: string; notes?: string | null; busy?: boolean }[] = [];
+  let todayEvents: {
+    id?: string;
+    title: string;
+    starts_at: string;
+    ends_at: string;
+    notes?: string | null;
+  }[] = [];
+  let upcomingEvents: {
+    id?: string;
+    title: string;
+    starts_at: string;
+    ends_at: string;
+    notes?: string | null;
+    busy?: boolean;
+  }[] = [];
 
   if (googleConnected) {
     try {
@@ -417,7 +494,9 @@ async function answerChatTurn(
       unreadCount = unread.length;
       // Unread first
       realEmails.sort((a, b) => Number(b.unread) - Number(a.unread));
-    } catch (e) { console.error("Gmail fetch failed", e); }
+    } catch (e) {
+      console.error("Gmail fetch failed", e);
+    }
     try {
       // Fetch the next three weeks: the rules read "Friday next week" and "the week after next",
       // so an event moved there must still be found, and a move there checked for conflicts.
@@ -425,7 +504,14 @@ async function answerChatTurn(
       const weekStart = startOfToday(timeZone);
       const weekEnd = endOfDaysFromNow(CALENDAR_DAYS, timeZone);
       const evs = await listCalendarEvents(userId, weekStart, weekEnd);
-      upcomingEvents = evs.map(e => ({ id: e.id, title: e.title, starts_at: e.starts_at, ends_at: e.ends_at, notes: e.notes, busy: e.busy }));
+      upcomingEvents = evs.map((e) => ({
+        id: e.id,
+        title: e.title,
+        starts_at: e.starts_at,
+        ends_at: e.ends_at,
+        notes: e.notes,
+        busy: e.busy,
+      }));
       const todayEndMs = toMs(endOfToday(timeZone));
       todayEvents = upcomingEvents.filter((e) => toMs(e.starts_at) <= todayEndMs);
     } catch (e) {
@@ -434,8 +520,18 @@ async function answerChatTurn(
     }
   } else {
     await ensureSeedEvents(supabase, userId, timeZone);
-    todayEvents = await listEventsForRange(supabase, userId, startOfToday(timeZone), endOfToday(timeZone));
-    upcomingEvents = await listEventsForRange(supabase, userId, startOfToday(timeZone), endOfDaysFromNow(CALENDAR_DAYS, timeZone));
+    todayEvents = await listEventsForRange(
+      supabase,
+      userId,
+      startOfToday(timeZone),
+      endOfToday(timeZone),
+    );
+    upcomingEvents = await listEventsForRange(
+      supabase,
+      userId,
+      startOfToday(timeZone),
+      endOfDaysFromNow(CALENDAR_DAYS, timeZone),
+    );
   }
 
   const mockEmails = googleConnected ? [] : fetchMockEmails();
@@ -444,8 +540,18 @@ async function answerChatTurn(
   // 4. System prompt
   const trim = (s: string, n = 140) => (s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
   const emailsForPrompt = googleConnected
-    ? realEmails.map((e) => `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${trim(e.from, 60)} — "${trim(e.subject, 80)}" — ${trim(e.snippet, 140)}`).join("\n")
-    : mockEmails.map((e) => `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${e.from} — "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? ` (task: ${e.extractedTask.title}, importance ${e.extractedTask.importance})` : ""}`).join("\n");
+    ? realEmails
+        .map(
+          (e) =>
+            `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${trim(e.from, 60)} — "${trim(e.subject, 80)}" — ${trim(e.snippet, 140)}`,
+        )
+        .join("\n")
+    : mockEmails
+        .map(
+          (e) =>
+            `  • id=${e.id}${e.unread ? " (UNREAD)" : ""} ${e.from} — "${e.subject}" — ${trim(e.snippet)}${e.extractedTask ? ` (task: ${e.extractedTask.title}, importance ${e.extractedTask.importance})` : ""}`,
+        )
+        .join("\n");
 
   // Calendar events with short ids (E1, E2, ...) and local 24-hour wall-clock times, grouped by
   // date: "Wednesday 2026-11-11: E3 14:00-15:30 Dentist appointment". A small model copied long
@@ -465,16 +571,24 @@ async function answerChatTurn(
   // The next 7 days in full; later events (up to three weeks ahead) in one line, so the model
   // can refer to them by their ids without a long prompt.
   const lastPromptDate = addDaysISO(todayDate, 7);
-  const soonEvents = knownEvents.filter((event) => localDateTime(event.starts_at, timeZone).date <= lastPromptDate);
-  const laterEvents = knownEvents.filter((event) => localDateTime(event.starts_at, timeZone).date > lastPromptDate);
-  const laterForPrompt = laterEvents.length === 0
-    ? ""
-    : `
-- Later events, up to three weeks ahead (id, date, start-end, title): ${laterEvents.slice(0, 15).map((event) => {
-        const start = localDateTime(event.starts_at, timeZone);
-        const end = localDateTime(event.ends_at, timeZone);
-        return `${aliasOf(event)} ${start.date} ${start.hhmm}-${end.hhmm} ${trim(event.title, 60)}`;
-      }).join("; ")}`;
+  const soonEvents = knownEvents.filter(
+    (event) => localDateTime(event.starts_at, timeZone).date <= lastPromptDate,
+  );
+  const laterEvents = knownEvents.filter(
+    (event) => localDateTime(event.starts_at, timeZone).date > lastPromptDate,
+  );
+  const laterForPrompt =
+    laterEvents.length === 0
+      ? ""
+      : `
+- Later events, up to three weeks ahead (id, date, start-end, title): ${laterEvents
+          .slice(0, 15)
+          .map((event) => {
+            const start = localDateTime(event.starts_at, timeZone);
+            const end = localDateTime(event.ends_at, timeZone);
+            return `${aliasOf(event)} ${start.date} ${start.hhmm}-${end.hhmm} ${trim(event.title, 60)}`;
+          })
+          .join("; ")}`;
   const calendarForPrompt = (() => {
     if (soonEvents.length === 0) return "  (no events)";
     const groups = new Map<string, KnownEvent[]>();
@@ -501,7 +615,9 @@ async function answerChatTurn(
   // title or the email instead, and a sentence about an id the prompt never had is dropped.
   const replyRefs: ReplyRefs = {
     events: Object.fromEntries(knownEvents.map((event) => [aliasOf(event), event.title])),
-    emails: googleConnected ? undefined : Object.fromEntries(mockEmails.map((mail) => [mail.id, `the email "${mail.subject}"`])),
+    emails: googleConnected
+      ? undefined
+      : Object.fromEntries(mockEmails.map((mail) => [mail.id, `the email "${mail.subject}"`])),
   };
 
   // Static instructions first, the per-request context last: a local model (llama.cpp via
@@ -559,10 +675,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     role: entry.role === "assistant" ? ("assistant" as const) : ("user" as const),
     content: String(entry.content ?? "").slice(0, 1200),
   }));
-  const messagesPayload = [
-    { role: "system" as const, content: sys },
-    ...recentHistory,
-  ];
+  const messagesPayload = [{ role: "system" as const, content: sys }, ...recentHistory];
 
   const isFirst = !history || history.length <= 1;
   let parsed: RawRespondPayload;
@@ -572,7 +685,12 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   const briefingByRules = (reason: string) =>
     buildRuleBasedBriefing({
       emails: googleConnected
-        ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+        ? realEmails.map((mail) => ({
+            from: mail.from,
+            subject: mail.subject,
+            snippet: mail.snippet,
+            unread: mail.unread,
+          }))
         : mockEmails,
       unreadCount: googleConnected ? unreadCount : demoUnreadCount,
       todayEvents,
@@ -597,7 +715,10 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     // Only the automatic first-visit briefing degrades to a rule-based answer (inbox, today,
     // priorities by rule, all labelled as such); every other request reports the failure.
     if (!(data.briefing && isFirst)) throw error;
-    console.error("Briefing: the AI model failed; using the rule-based briefing", getErrorMessage(error));
+    console.error(
+      "Briefing: the AI model failed; using the rule-based briefing",
+      getErrorMessage(error),
+    );
     ruleBased = true;
     rulePriorities = true;
     parsed = briefingByRules(getErrorMessage(error, "no answer"));
@@ -615,7 +736,12 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     const prioritiesNote =
       "_The AI model returned no priorities, so the ones on the right are ranked by simple rules: today's remaining events by length, then the tasks in your emails by importance._";
     const briefingEmails = googleConnected
-      ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+      ? realEmails.map((mail) => ({
+          from: mail.from,
+          subject: mail.subject,
+          snippet: mail.snippet,
+          unread: mail.unread,
+        }))
       : mockEmails;
     const covered = briefingCoversInbox({
       reply: String(parsed.reply ?? ""),
@@ -632,23 +758,35 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
         todayEvents,
         timeZone,
         reason: "",
-        header: "ℹ️ The AI model's summary did not match your inbox or today's calendar (it left something out, or listed an email that is already read), so this briefing lists them straight from your data.",
+        header:
+          "ℹ️ The AI model's summary did not match your inbox or today's calendar (it left something out, or listed an email that is already read), so this briefing lists them straight from your data.",
         prioritiesNote: false,
       });
-      parsed = { ...parsed, reply: [listed.reply, rulePriorities ? prioritiesNote : ""].filter(Boolean).join("\n\n") };
+      parsed = {
+        ...parsed,
+        reply: [listed.reply, rulePriorities ? prioritiesNote : ""].filter(Boolean).join("\n\n"),
+      };
     } else if (rulePriorities) {
-      parsed = { ...parsed, reply: [String(parsed.reply ?? "").trim(), prioritiesNote].filter(Boolean).join("\n\n") };
+      parsed = {
+        ...parsed,
+        reply: [String(parsed.reply ?? "").trim(), prioritiesNote].filter(Boolean).join("\n\n"),
+      };
     }
     // The automatic briefing only reports; nobody asked for calendar changes or replies. A small
     // model proposed today's existing events again (one on a wrong day) as new ones (9 Nov 2026).
-    parsed = { ...parsed, proposed_events: undefined, event_changes: undefined, email_reply: undefined };
+    parsed = {
+      ...parsed,
+      proposed_events: undefined,
+      event_changes: undefined,
+      email_reply: undefined,
+    };
   }
   const attemptedProposedEvents = normalizeProposedEvents(parsed.proposed_events, timeZone);
   const attemptedEventChanges = parseJsonValue(parsed.event_changes);
-  const blockedCalendarActions = !calendarContextAvailable && (
-    attemptedProposedEvents.length > 0 ||
-    (Array.isArray(attemptedEventChanges) && attemptedEventChanges.length > 0)
-  );
+  const blockedCalendarActions =
+    !calendarContextAvailable &&
+    (attemptedProposedEvents.length > 0 ||
+      (Array.isArray(attemptedEventChanges) && attemptedEventChanges.length > 0));
   const insight = normalizeInsight(parsed.insight);
   const alternatives = normalizeAlternatives(parsed.alternatives);
   const rawEmailReply = parseJsonValue(parsed.email_reply);
@@ -660,21 +798,29 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   const modelChanges = calendarContextAvailable
     ? normalizeModelChanges(attemptedEventChanges, (ref) => eventByRef.get(ref), timeZone)
     : [];
-  const unknownChangeRefs = calendarContextAvailable ? countUnknownChangeRefs(attemptedEventChanges, (ref) => eventByRef.get(ref)) : 0;
-  const reconciled = calendarContextAvailable && !(data.briefing && isFirst)
-    ? reconcileCalendarChanges({
-        message: data.message,
-        today: todayDate,
-        timeZone,
-        nowMs: Date.now(),
-        events: knownEvents,
-        modelChanges,
-        modelProposals: attemptedProposedEvents,
-        unknownChangeRefs,
-      })
-    : null;
-  if (reconciled && reconciled.log.length > 0) console.info("Chat: calendar answer checked:", reconciled.log.join("; "));
-  const proposedEvents = calendarContextAvailable ? (reconciled ? reconciled.proposals : attemptedProposedEvents) : [];
+  const unknownChangeRefs = calendarContextAvailable
+    ? countUnknownChangeRefs(attemptedEventChanges, (ref) => eventByRef.get(ref))
+    : 0;
+  const reconciled =
+    calendarContextAvailable && !(data.briefing && isFirst)
+      ? reconcileCalendarChanges({
+          message: data.message,
+          today: todayDate,
+          timeZone,
+          nowMs: Date.now(),
+          events: knownEvents,
+          modelChanges,
+          modelProposals: attemptedProposedEvents,
+          unknownChangeRefs,
+        })
+      : null;
+  if (reconciled && reconciled.log.length > 0)
+    console.info("Chat: calendar answer checked:", reconciled.log.join("; "));
+  const proposedEvents = calendarContextAvailable
+    ? reconciled
+      ? reconciled.proposals
+      : attemptedProposedEvents
+    : [];
 
   // 5c. The model's priority reasons must match the data: "today" only for today's events, an
   // event's real length (QA round 4: "120 min block — biggest commitment today" for an interview
@@ -684,11 +830,17 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       todayEvents,
       upcomingEvents,
       emails: googleConnected
-        ? realEmails.map((mail) => ({ from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+        ? realEmails.map((mail) => ({
+            from: mail.from,
+            subject: mail.subject,
+            snippet: mail.snippet,
+            unread: mail.unread,
+          }))
         : mockEmails,
       timeZone,
     });
-    if (checked.corrected.length > 0) console.info("Chat: corrected priority reasons:", checked.corrected.join("; "));
+    if (checked.corrected.length > 0)
+      console.info("Chat: corrected priority reasons:", checked.corrected.join("; "));
     normalizedPriorities = checked.priorities;
   }
 
@@ -696,10 +848,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   let priorities: PriorityRow[] | undefined;
   if (normalizedPriorities.length > 0) {
     priorities = normalizedPriorities;
-    const { error: deleteTasksError } = await store
-      .from("tasks")
-      .delete()
-      .eq("user_id", userId);
+    const { error: deleteTasksError } = await store.from("tasks").delete().eq("user_id", userId);
     if (deleteTasksError) throw deleteTasksError;
 
     const { error: insertTasksError } = await store.from("tasks").insert(
@@ -727,7 +876,11 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     id: `change-${crypto.randomUUID()}`,
     kind: change.kind,
     event_id: change.event.id,
-    original: { title: change.event.title, starts_at: change.event.starts_at, ends_at: change.event.ends_at },
+    original: {
+      title: change.event.title,
+      starts_at: change.event.starts_at,
+      ends_at: change.event.ends_at,
+    },
     next: change.kind === "update" ? { ...change.next } : undefined,
   }));
 
@@ -737,24 +890,47 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   const busyEvents = upcomingEvents.filter((e) => e.busy !== false);
   for (const change of pendingEventChanges) {
     if (change.kind !== "update" || !change.next?.starts_at || !change.next.ends_at) continue;
-    const conflicts = findConflicts({ starts_at: change.next.starts_at, ends_at: change.next.ends_at }, busyEvents, { ignoreId: change.event_id });
+    const conflicts = findConflicts(
+      { starts_at: change.next.starts_at, ends_at: change.next.ends_at },
+      busyEvents,
+      { ignoreId: change.event_id },
+    );
     if (conflicts.length > 0) {
-      const names = conflicts.slice(0, 2).map((c) => `"${c.title}" (${fmtTime(c.starts_at, timeZone)}–${fmtTime(c.ends_at, timeZone)})`).join(", ");
-      cardNotes[change.id] = `Heads-up: the new time overlaps ${names}, so Save will be refused until you pick a free time.`;
+      const names = conflicts
+        .slice(0, 2)
+        .map(
+          (c) => `"${c.title}" (${fmtTime(c.starts_at, timeZone)}–${fmtTime(c.ends_at, timeZone)})`,
+        )
+        .join(", ");
+      cardNotes[change.id] =
+        `Heads-up: the new time overlaps ${names}, so Save will be refused until you pick a free time.`;
     }
   }
   for (const event of pendingEvents) {
     const notes: string[] = [];
     const conflicts = findConflicts(event, busyEvents);
-    if (conflicts.length > 0) notes.push(`overlaps ${conflicts.map((c) => `"${c.title}"`).slice(0, 2).join(", ")}: Save will be refused`);
+    if (conflicts.length > 0)
+      notes.push(
+        `overlaps ${conflicts
+          .map((c) => `"${c.title}"`)
+          .slice(0, 2)
+          .join(", ")}: Save will be refused`,
+      );
     // A new event with the title of one already in the calendar adds a second one; it does not
     // move the existing one (the reply says so, so the card cannot be mistaken for a move).
     // (Not when the same turn offers to cancel that one: "Cancel the dentist appointment and
     // book a new one for Friday at 2 pm".)
     const same = reconciled?.sameTitleAs.find(
-      (entry) => entry.title === event.title && !pendingEventChanges.some((change) => change.kind === "delete" && change.event_id === entry.event.id),
+      (entry) =>
+        entry.title === event.title &&
+        !pendingEventChanges.some(
+          (change) => change.kind === "delete" && change.event_id === entry.event.id,
+        ),
     );
-    if (same) notes.push(`**${same.event.title}** is already in your calendar on ${describeRange(same.event.starts_at, same.event.ends_at, timeZone)}; saving this adds a second one`);
+    if (same)
+      notes.push(
+        `**${same.event.title}** is already in your calendar on ${describeRange(same.event.starts_at, same.event.ends_at, timeZone)}; saving this adds a second one`,
+      );
     if (notes.length > 0) cardNotes[event.id] = notes.join("; ");
   }
 
@@ -766,14 +942,20 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     typeof rawEmailReply.message_id === "string" &&
     typeof rawEmailReply.body === "string"
   ) {
-    const messageId = rawEmailReply.message_id.replace(/^\[?\s*id\s*[:=]\s*/i, "").replace(/\]$/, "").trim();
+    const messageId = rawEmailReply.message_id
+      .replace(/^\[?\s*id\s*[:=]\s*/i, "")
+      .replace(/\]$/, "")
+      .trim();
     const orig =
       realEmails.find((mail) => mail.id === messageId) ??
       mockEmails.find((mail) => mail.id === messageId);
     const body = rawEmailReply.body.trim().slice(0, 10000);
     if (!orig) {
-      console.info(`Chat: dropped a reply draft for an email id that is not in the inbox: ${messageId.slice(0, 40)}`);
-      emailNote = "The AI model referred to an email that is not in your inbox, so no reply draft was prepared. Nothing was saved or sent.";
+      console.info(
+        `Chat: dropped a reply draft for an email id that is not in the inbox: ${messageId.slice(0, 40)}`,
+      );
+      emailNote =
+        "The AI model referred to an email that is not in your inbox, so no reply draft was prepared. Nothing was saved or sent.";
     }
     if (orig && body) {
       emailDraft = {
@@ -793,9 +975,26 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   if (isFirst) {
     panel.inbox = {
       emails: googleConnected
-        ? realEmails.map(e => ({ id: e.id, from: e.from, subject: e.subject, snippet: e.snippet, unread: e.unread }))
-        : mockEmails.map(e => ({ id: e.id, from: e.from, subject: e.subject, snippet: e.snippet, importance: e.extractedTask?.importance, unread: e.unread })),
-      todayEvents: todayEvents.map(e => ({ title: e.title, starts_at: e.starts_at, ends_at: e.ends_at })),
+        ? realEmails.map((e) => ({
+            id: e.id,
+            from: e.from,
+            subject: e.subject,
+            snippet: e.snippet,
+            unread: e.unread,
+          }))
+        : mockEmails.map((e) => ({
+            id: e.id,
+            from: e.from,
+            subject: e.subject,
+            snippet: e.snippet,
+            importance: e.extractedTask?.importance,
+            unread: e.unread,
+          })),
+      todayEvents: todayEvents.map((e) => ({
+        title: e.title,
+        starts_at: e.starts_at,
+        ends_at: e.ends_at,
+      })),
       unreadCount: googleConnected ? unreadCount : demoUnreadCount,
     };
   }
@@ -811,9 +1010,12 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
   // from the validated cards (for a move or cancel request, only from them). See reply-guard.
   let replyText: string;
   if (blockedCalendarActions) {
-    replyText = "I couldn't safely access your calendar, so I did not prepare any calendar changes. Please retry after reconnecting Google or checking the connector.";
+    replyText =
+      "I couldn't safely access your calendar, so I did not prepare any calendar changes. Please retry after reconnecting Google or checking the connector.";
   } else if (data.briefing && isFirst) {
-    replyText = resolveRefs(stripInternalMarkers(String(parsed.reply ?? "")), replyRefs).text || "Here is your briefing.";
+    replyText =
+      resolveRefs(stripInternalMarkers(String(parsed.reply ?? "")), replyRefs).text ||
+      "Here is your briefing.";
   } else {
     replyText = composeReply({
       modelReply: String(parsed.reply ?? ""),
@@ -831,14 +1033,19 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       // Also a short answer to MONDAY's own question back or "nothing was added" notice.
       askedForAction:
         asksForAction(data.message) ||
-        followsUpOnAction([...(history ?? [])].reverse().find((entry) => entry.role === "assistant")?.content, data.message),
+        followsUpOnAction(
+          [...(history ?? [])].reverse().find((entry) => entry.role === "assistant")?.content,
+          data.message,
+        ),
       changeNoteIsAside: reconciled?.unasked ?? false,
     });
   }
 
   // 10. Persist assistant msg
   const { error: assistantMessageError } = await store.from("chat_messages").insert({
-    session_id: sessionId, user_id: userId, role: "assistant",
+    session_id: sessionId,
+    user_id: userId,
+    role: "assistant",
     content: replyText,
     panel_payload: JSON.parse(JSON.stringify(panel)) as Json,
   });
@@ -856,7 +1063,10 @@ export function upcomingDates(timeZone = "UTC", days = 8): string {
   const today = todayInTimeZone(timeZone);
   return Array.from({ length: days }, (_, i) => {
     const date = addDaysISO(today, i);
-    const weekday = new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+    const weekday = new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+      weekday: "long",
+      timeZone: "UTC",
+    });
     return `${weekday} ${date}${i === 0 ? " (today)" : i === 1 ? " (tomorrow)" : ""}`;
   }).join(", ");
 }
@@ -865,7 +1075,11 @@ export function startOfToday(timeZone = "UTC") {
   return zonedDateTimeToISO(todayInTimeZone(timeZone), { hour: 0 }, timeZone);
 }
 export function endOfToday(timeZone = "UTC") {
-  return zonedDateTimeToISO(todayInTimeZone(timeZone), { hour: 23, minute: 59, second: 59, millisecond: 999 }, timeZone);
+  return zonedDateTimeToISO(
+    todayInTimeZone(timeZone),
+    { hour: 23, minute: 59, second: 59, millisecond: 999 },
+    timeZone,
+  );
 }
 /**
  * How far ahead the chat knows the calendar. Until 11 Nov 2026 it was 7 days: an event moved to
@@ -881,24 +1095,39 @@ function endOfDaysFromNow(days: number, timeZone = "UTC") {
 
 /** "Wednesday" for "2026-11-11". */
 function weekdayName(date: string) {
-  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    weekday: "long",
+    timeZone: "UTC",
+  });
 }
 function fmtTime(iso: string, timeZone = "UTC") {
   return formatTimeInZone(iso, timeZone);
 }
 function durationMinutes(startsAt: string, endsAt: string) {
-  return Math.max(0, Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000));
+  return Math.max(
+    0,
+    Math.round((new Date(endsAt).getTime() - new Date(startsAt).getTime()) / 60000),
+  );
 }
 
 /** The lookup key of a model's event id: "E3", "[E3]", "event_id:E3" -> "e3". */
 function changeRef(eventId: string): string {
-  return eventId.replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "").replace(/\]\s*$/, "").trim().toLowerCase();
+  return eventId
+    .replace(/^\[?\s*(?:event[_ ]?id\s*[:=]\s*)?/i, "")
+    .replace(/\]\s*$/, "")
+    .trim()
+    .toLowerCase();
 }
 
 /** How many of the model's event changes name an event id that is not in the calendar. */
-export function countUnknownChangeRefs(value: unknown, lookup: (ref: string) => KnownEvent | undefined): number {
+export function countUnknownChangeRefs(
+  value: unknown,
+  lookup: (ref: string) => KnownEvent | undefined,
+): number {
   if (!Array.isArray(value)) return 0;
-  return value.filter((raw) => isRecord(raw) && typeof raw.event_id === "string" && !lookup(changeRef(raw.event_id))).length;
+  return value.filter(
+    (raw) => isRecord(raw) && typeof raw.event_id === "string" && !lookup(changeRef(raw.event_id)),
+  ).length;
 }
 
 /**
@@ -913,22 +1142,37 @@ export function normalizeModelChanges(
   if (!Array.isArray(value)) return [];
   const changes: ModelChange[] = [];
   for (const raw of value) {
-    if (!isRecord(raw) || (raw.kind !== "update" && raw.kind !== "delete") || typeof raw.event_id !== "string") continue;
+    if (
+      !isRecord(raw) ||
+      (raw.kind !== "update" && raw.kind !== "delete") ||
+      typeof raw.event_id !== "string"
+    )
+      continue;
     const event = lookup(changeRef(raw.event_id));
     if (!event) continue; // a hallucinated id
     if (raw.kind === "delete") {
       changes.push({ kind: "delete", event });
       continue;
     }
-    const startsAt = typeof raw.starts_at === "string" ? parseUserDateTime(raw.starts_at, timeZone) ?? undefined : undefined;
-    const endsAt = typeof raw.ends_at === "string" ? parseUserDateTime(raw.ends_at, timeZone) ?? undefined : undefined;
+    const startsAt =
+      typeof raw.starts_at === "string"
+        ? (parseUserDateTime(raw.starts_at, timeZone) ?? undefined)
+        : undefined;
+    const endsAt =
+      typeof raw.ends_at === "string"
+        ? (parseUserDateTime(raw.ends_at, timeZone) ?? undefined)
+        : undefined;
     const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 200) : "";
     changes.push({
       kind: "update",
       event,
       // A new start alone keeps the event's length.
       starts_at: startsAt,
-      ends_at: endsAt ?? (startsAt ? new Date(toMs(startsAt) + toMs(event.ends_at) - toMs(event.starts_at)).toISOString() : undefined),
+      ends_at:
+        endsAt ??
+        (startsAt
+          ? new Date(toMs(startsAt) + toMs(event.ends_at) - toMs(event.starts_at)).toISOString()
+          : undefined),
       title: title && title !== event.title ? title : undefined,
     });
   }

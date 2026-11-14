@@ -7,13 +7,13 @@ been called from this code yet.
 
 ## 1. What runs where
 
-| Part | Where | Notes |
-| --- | --- | --- |
-| Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root | One function for server rendering and server functions, static files from the CDN. Node 22.x. |
-| Planner (FastAPI) | Vercel project `lifeops-planner`, root directory = `fastapi-backend` | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it. |
-| Database and sign-in | A new Supabase project (free plan), region Frankfurt | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
-| AI model | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. Not yet run against the API. See section 2. |
-| Monitoring | GitHub Actions workflow `smoke.yml` | Once a day. |
+| Part                            | Where                                                                     | Notes                                                                                                                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root             | One function for server rendering and server functions, static files from the CDN. Node 22.x.                                                                                                                     |
+| Planner (FastAPI)               | Vercel project `lifeops-planner`, root directory = `fastapi-backend`      | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it.                                                                                                                      |
+| Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
+| AI model                        | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. Not yet run against the API. See section 2.                                                                                                                                   |
+| Monitoring                      | GitHub Actions workflow `smoke.yml`                                       | Once a day.                                                                                                                                                                                                       |
 
 The web app is a full-stack app. It is not a static site: do not set an Output Directory and do not add
 a catch-all rewrite. The Lovable wrapper that wraps `vite.config.ts` does not make the build ready for
@@ -71,33 +71,33 @@ Cloudflare's pages on 14 Nov 2026; none of them has been run against the API yet
 Settings that begin with `VITE_` are read when the app is built and end up in the browser. Everything else
 is read by the server at run time. Change a setting, then redeploy.
 
-| Setting | Value | Secret | Meaning |
-| --- | --- | --- | --- |
-| `VITE_SUPABASE_URL` | `https://PROJECT_REF.supabase.co` | no | Supabase project URL (browser). |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...` | no | Publishable key (browser). |
-| `SUPABASE_URL` | same as `VITE_SUPABASE_URL` | no | Same URL for the server. |
-| `SUPABASE_PUBLISHABLE_KEY` | same as `VITE_SUPABASE_PUBLISHABLE_KEY` | no | Same key for the server. |
-| `SUPABASE_SECRET_KEY` | `sb_secret_...` | yes | Server-only key. Never put it in a `VITE_` setting. |
-| `VITE_ENABLE_ANONYMOUS_DEMO` | `true` | no | Shows "Try the live demo" (anonymous sign-in). |
-| `VITE_ENABLE_GOOGLE_SIGNIN` | `false` | no | Hides "Continue with Google". |
-| `VITE_HOSTED_DEMO` | `true` | no | Shows the one-line demo notice on the sign-in page. Leave unset locally. |
-| `LLM_BASE_URL` | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | no | Workers AI's OpenAI-compatible URL with the Cloudflare Account ID. |
-| `LLM_API_KEY` | the Workers AI API token | yes | |
-| `LLM_MODEL` | `@cf/zai-org/glm-4.7-flash` | no | Main model for chat and plans. |
-| `LLM_FALLBACK_MODEL` | `@cf/google/gemma-4-26b-a4b-it` | no | Tried after 401, 403, 404, 429 or 503 from the main model. |
-| `LLM_STRUCTURED_OUTPUT` | `tools_required` | no | `tools`, `tools_required` or `json_schema` (see section 2). Any other value means `tools`. |
-| `LLM_TIMEOUT_MS` | `60000` | no | Time allowed for one model call. A chat turn can take up to twice this plus 2 minutes (main model, then fallback). |
-| `LLM_MAX_TOKENS` | `1200` | no | Longest chat answer. |
-| `LLM_MAX_TOKENS_PLAN` | `2400` | no | Longest week plan. |
-| `LIFEOPS_BACKEND_URL` | `https://lifeops-planner.vercel.app` | no | The planner's address. `off` turns the planner off and the dashboard uses the in-app assistant. |
-| `LIFEOPS_BACKEND_TOKEN` | a random value | yes | Shared with the planner (same value in both projects). |
-| `LIFEOPS_BACKEND_TIMEOUT_MS` | `60000` | no | Time allowed for "Plan it". Default: `LLM_TIMEOUT_MS` plus 30 s. |
-| `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS` | `10000` | no | Time allowed for the planner's quick calls (dashboard read, approve, reject). Default 10000; a planner that was idle needs a cold start. |
-| `AI_CHAT_PER_HOUR` | `20` | no | See section 4. Unset = no limit. Whole numbers only. |
-| `AI_PLANS_PER_DAY` | `5` | no | See section 4. |
-| `AI_PLANNER_PER_HOUR` | `6` | no | See section 4. |
-| `AI_CALLS_PER_DAY` | `150` | no | See section 4. Sized for the shared free allowance of 10,000 neurons a day. |
-| `NITRO_PRESET` | `vercel` | no | Build target. Optional on Vercel, which sets `VERCEL=1`. |
+| Setting                                | Value                                                            | Secret | Meaning                                                                                                                                  |
+| -------------------------------------- | ---------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `VITE_SUPABASE_URL`                    | `https://PROJECT_REF.supabase.co`                                | no     | Supabase project URL (browser).                                                                                                          |
+| `VITE_SUPABASE_PUBLISHABLE_KEY`        | `sb_publishable_...`                                             | no     | Publishable key (browser).                                                                                                               |
+| `SUPABASE_URL`                         | same as `VITE_SUPABASE_URL`                                      | no     | Same URL for the server.                                                                                                                 |
+| `SUPABASE_PUBLISHABLE_KEY`             | same as `VITE_SUPABASE_PUBLISHABLE_KEY`                          | no     | Same key for the server.                                                                                                                 |
+| `SUPABASE_SECRET_KEY`                  | `sb_secret_...`                                                  | yes    | Server-only key. Never put it in a `VITE_` setting.                                                                                      |
+| `VITE_ENABLE_ANONYMOUS_DEMO`           | `true`                                                           | no     | Shows "Try the live demo" (anonymous sign-in).                                                                                           |
+| `VITE_ENABLE_GOOGLE_SIGNIN`            | `false`                                                          | no     | Hides "Continue with Google".                                                                                                            |
+| `VITE_HOSTED_DEMO`                     | `true`                                                           | no     | Shows the one-line demo notice on the sign-in page. Leave unset locally.                                                                 |
+| `LLM_BASE_URL`                         | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | no     | Workers AI's OpenAI-compatible URL with the Cloudflare Account ID.                                                                       |
+| `LLM_API_KEY`                          | the Workers AI API token                                         | yes    |                                                                                                                                          |
+| `LLM_MODEL`                            | `@cf/zai-org/glm-4.7-flash`                                      | no     | Main model for chat and plans.                                                                                                           |
+| `LLM_FALLBACK_MODEL`                   | `@cf/google/gemma-4-26b-a4b-it`                                  | no     | Tried after 401, 403, 404, 429 or 503 from the main model.                                                                               |
+| `LLM_STRUCTURED_OUTPUT`                | `tools_required`                                                 | no     | `tools`, `tools_required` or `json_schema` (see section 2). Any other value means `tools`.                                               |
+| `LLM_TIMEOUT_MS`                       | `60000`                                                          | no     | Time allowed for one model call. A chat turn can take up to twice this plus 2 minutes (main model, then fallback).                       |
+| `LLM_MAX_TOKENS`                       | `1200`                                                           | no     | Longest chat answer.                                                                                                                     |
+| `LLM_MAX_TOKENS_PLAN`                  | `2400`                                                           | no     | Longest week plan.                                                                                                                       |
+| `LIFEOPS_BACKEND_URL`                  | `https://lifeops-planner.vercel.app`                             | no     | The planner's address. `off` turns the planner off and the dashboard uses the in-app assistant.                                          |
+| `LIFEOPS_BACKEND_TOKEN`                | a random value                                                   | yes    | Shared with the planner (same value in both projects).                                                                                   |
+| `LIFEOPS_BACKEND_TIMEOUT_MS`           | `60000`                                                          | no     | Time allowed for "Plan it". Default: `LLM_TIMEOUT_MS` plus 30 s.                                                                         |
+| `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS` | `10000`                                                          | no     | Time allowed for the planner's quick calls (dashboard read, approve, reject). Default 10000; a planner that was idle needs a cold start. |
+| `AI_CHAT_PER_HOUR`                     | `20`                                                             | no     | See section 4. Unset = no limit. Whole numbers only.                                                                                     |
+| `AI_PLANS_PER_DAY`                     | `5`                                                              | no     | See section 4.                                                                                                                           |
+| `AI_PLANNER_PER_HOUR`                  | `6`                                                              | no     | See section 4.                                                                                                                           |
+| `AI_CALLS_PER_DAY`                     | `150`                                                            | no     | See section 4. Sized for the shared free allowance of 10,000 neurons a day.                                                              |
+| `NITRO_PRESET`                         | `vercel`                                                         | no     | Build target. Optional on Vercel, which sets `VERCEL=1`.                                                                                 |
 
 Leave these unset: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_STATE_SECRET`,
 `GOOGLE_OAUTH_REDIRECT_URI` (Gmail and Calendar stay off; the demo inbox and calendar are used and the
@@ -106,22 +106,22 @@ Connectors page says Google is not configured), `HUGGINGFACE_API_KEY`, `SUPABASE
 
 ### 3.2 Planner project `lifeops-planner` (Vercel, Production)
 
-| Setting | Value | Secret | Meaning |
-| --- | --- | --- | --- |
-| `ENV` | `production` | no | Turns off SQL logging. |
-| `DATABASE_URL` | `postgresql+psycopg://lifeops_planner.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require` | yes | Supabase session pooler, planner role. `postgres://` and `postgresql://` are also accepted. |
-| `DATABASE_SCHEMA` | `planner` | no | Optional. Every connection puts this schema first on its `search_path`. The role already has the same default, so this is a second safeguard. The schema must exist. |
-| `FRONTEND_ORIGIN` | `https://lifeops-ai.vercel.app` | no | For CORS. Only the web app's server calls the planner, so CORS is not used in practice. |
-| `LLM_BASE_URL` | same as the web app | no | |
-| `LLM_API_KEY` | same key | yes | |
-| `LLM_MODEL` | `@cf/zai-org/glm-4.7-flash` | no | The planner's model. |
-| `LLM_RESPONSE_FORMAT` | `none` | no | No `response_format` is sent; the plan is read from the first JSON object in the answer (section 2). Other values: `json_schema` (default), `json_object`. |
-| `LLM_TIMEOUT_SECONDS` | `45` | no | |
-| `LLM_MAX_TOKENS` | `1200` | no | |
-| `PLANNER_MODE` | `auto` | no | `keyword` always uses the keyword planner. Without a working model the planner falls back to it and the answer says "planner: demo". |
-| `LIFEOPS_BACKEND_TOKEN` | the same value as in the web project | yes | With it set, every `/api` call needs it. Without it every `/api` route is open: always set it. |
-| `GOOGLE_INTEGRATION_MODE` | `mock` | no | |
-| `EXECUTION_BACKEND` | `mock` | no | |
+| Setting                   | Value                                                                                                 | Secret | Meaning                                                                                                                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENV`                     | `production`                                                                                          | no     | Turns off SQL logging.                                                                                                                                               |
+| `DATABASE_URL`            | `postgresql+psycopg://lifeops_planner.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require` | yes    | Supabase session pooler, planner role. `postgres://` and `postgresql://` are also accepted.                                                                          |
+| `DATABASE_SCHEMA`         | `planner`                                                                                             | no     | Optional. Every connection puts this schema first on its `search_path`. The role already has the same default, so this is a second safeguard. The schema must exist. |
+| `FRONTEND_ORIGIN`         | `https://lifeops-ai.vercel.app`                                                                       | no     | For CORS. Only the web app's server calls the planner, so CORS is not used in practice.                                                                              |
+| `LLM_BASE_URL`            | same as the web app                                                                                   | no     |                                                                                                                                                                      |
+| `LLM_API_KEY`             | same key                                                                                              | yes    |                                                                                                                                                                      |
+| `LLM_MODEL`               | `@cf/zai-org/glm-4.7-flash`                                                                           | no     | The planner's model.                                                                                                                                                 |
+| `LLM_RESPONSE_FORMAT`     | `none`                                                                                                | no     | No `response_format` is sent; the plan is read from the first JSON object in the answer (section 2). Other values: `json_schema` (default), `json_object`.           |
+| `LLM_TIMEOUT_SECONDS`     | `45`                                                                                                  | no     |                                                                                                                                                                      |
+| `LLM_MAX_TOKENS`          | `1200`                                                                                                | no     |                                                                                                                                                                      |
+| `PLANNER_MODE`            | `auto`                                                                                                | no     | `keyword` always uses the keyword planner. Without a working model the planner falls back to it and the answer says "planner: demo".                                 |
+| `LIFEOPS_BACKEND_TOKEN`   | the same value as in the web project                                                                  | yes    | With it set, every `/api` call needs it. Without it every `/api` route is open: always set it.                                                                       |
+| `GOOGLE_INTEGRATION_MODE` | `mock`                                                                                                | no     |                                                                                                                                                                      |
+| `EXECUTION_BACKEND`       | `mock`                                                                                                | no     |                                                                                                                                                                      |
 
 The planner connects to the database for each unit of work and closes the connection again (no pool),
 so it can sit behind Supabase's pooler. On a cold start it creates its four tables (`appsettings`,
@@ -129,13 +129,13 @@ so it can sit behind Supabase's pooler. On a cold start it creates its four tabl
 
 ### 3.3 GitHub repository (for `smoke.yml`)
 
-| Name | Kind | Value |
-| --- | --- | --- |
-| `WEB_URL` | variable | `https://lifeops-ai.vercel.app` |
-| `PLANNER_URL` | variable | `https://lifeops-planner.vercel.app` |
-| `SUPABASE_URL` | variable | `https://PROJECT_REF.supabase.co` |
+| Name                       | Kind     | Value                                                       |
+| -------------------------- | -------- | ----------------------------------------------------------- |
+| `WEB_URL`                  | variable | `https://lifeops-ai.vercel.app`                             |
+| `PLANNER_URL`              | variable | `https://lifeops-planner.vercel.app`                        |
+| `SUPABASE_URL`             | variable | `https://PROJECT_REF.supabase.co`                           |
 | `SUPABASE_PUBLISHABLE_KEY` | variable | the publishable key (not secret; every browser receives it) |
-| `LIFEOPS_BACKEND_TOKEN` | secret | the same token as in both Vercel projects |
+| `LIFEOPS_BACKEND_TOKEN`    | secret   | the same token as in both Vercel projects                   |
 
 Set the variables with `gh variable set NAME --body VALUE -R OWNER/REPOSITORY`.
 
@@ -144,12 +144,12 @@ Set the variables with `gh variable set NAME --body VALUE -R OWNER/REPOSITORY`.
 All visitors share one AI key, so the web app can limit use. Each limit is active only when its setting is
 present. With none set (the local default) nothing is limited and no extra queries are made.
 
-| Setting | What it limits | Window |
-| --- | --- | --- |
-| `AI_CHAT_PER_HOUR` | chat messages one user sends | the last 60 minutes |
-| `AI_PLANS_PER_DAY` | week plans (new and refined) one user asks for | the last 24 hours |
-| `AI_PLANNER_PER_HOUR` | dashboard "Plan it" requests one user makes | the last 60 minutes |
-| `AI_CALLS_PER_DAY` | chat messages, week plans and planner requests of all users together | since midnight UTC |
+| Setting               | What it limits                                                       | Window              |
+| --------------------- | -------------------------------------------------------------------- | ------------------- |
+| `AI_CHAT_PER_HOUR`    | chat messages one user sends                                         | the last 60 minutes |
+| `AI_PLANS_PER_DAY`    | week plans (new and refined) one user asks for                       | the last 24 hours   |
+| `AI_PLANNER_PER_HOUR` | dashboard "Plan it" requests one user makes                          | the last 60 minutes |
+| `AI_CALLS_PER_DAY`    | chat messages, week plans and planner requests of all users together | since midnight UTC  |
 
 The rule: a request is allowed while the number of requests already stored in the window is below the
 limit, so a limit of 20 allows 20 and refuses the 21st. When a limit is reached the visitor gets a plain
@@ -322,7 +322,7 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
 - The planner's data survives a redeploy of the planner (earlier actions are still listed).
 - A second private window with another demo user sees none of the first user's chats, plans or planner rows.
 - The Vercel runtime logs of the web project show lines like `[llm] Cloudflare Workers AI @cf/zai-org/glm-4.7-flash: N
-  prompt + M completion tokens in X s`, and no "permission denied for table" or "Missing Supabase environment variable".
+prompt + M completion tokens in X s`, and no "permission denied for table" or "Missing Supabase environment variable".
 - With `AI_CHAT_PER_HOUR=20`, the 21st quick message from one demo user gets the limit sentence and no model call.
 
 ## 8. The daily smoke check

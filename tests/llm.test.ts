@@ -112,7 +112,13 @@ describe("structured output", () => {
 
   it("tools mode sends OpenAI function calling with a forced tool choice", () => {
     const config = resolveLLMConfig("chat", {});
-    const body = buildRequestBody({ config, model: "m", messages: [], tools: [TOOL], toolChoice: FORCE });
+    const body = buildRequestBody({
+      config,
+      model: "m",
+      messages: [],
+      tools: [TOOL],
+      toolChoice: FORCE,
+    });
     expect(body.tools).toEqual([TOOL]);
     expect(body.tool_choice).toEqual(FORCE);
     expect(body.response_format).toBeUndefined();
@@ -165,9 +171,9 @@ describe("structured output", () => {
     expect(resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "required" }).structuredOutput).toBe(
       "tools",
     );
-    expect(resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "TOOLS_REQUIRED" }).structuredOutput).toBe(
-      "tools",
-    );
+    expect(
+      resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "TOOLS_REQUIRED" }).structuredOutput,
+    ).toBe("tools");
   });
 
   it("turns a JSON answer in content into the tool-call shape callers read", () => {
@@ -185,7 +191,9 @@ describe("structured output", () => {
       { choices: [{ message: { content: '{"name":"respond","parameters":{"reply":"Hi"}}' } }] },
       "respond",
     );
-    expect(JSON.parse(normalized.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "{}")).toEqual({
+    expect(
+      JSON.parse(normalized.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "{}"),
+    ).toEqual({
       reply: "Hi",
     });
   });
@@ -199,18 +207,29 @@ describe("structured output", () => {
 
 describe("callAI", () => {
   it("posts to {LLM_BASE_URL}/chat/completions with the key and returns the tool arguments", async () => {
-    setEnv({ LLM_BASE_URL: "http://llm.test/v1", LLM_API_KEY: "k-123", LLM_MODEL: "test-model", LLM_STRUCTURED_OUTPUT: "json_schema" });
+    setEnv({
+      LLM_BASE_URL: "http://llm.test/v1",
+      LLM_API_KEY: "k-123",
+      LLM_MODEL: "test-model",
+      LLM_STRUCTURED_OUTPUT: "json_schema",
+    });
     const fetchMock = vi.fn(async () => completion({ content: '{"reply":"Planned."}' }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await callAI({ messages: [{ role: "user", content: "plan" }], tools: [TOOL], toolChoice: FORCE });
+    const result = await callAI({
+      messages: [{ role: "user", content: "plan" }],
+      tools: [TOOL],
+      toolChoice: FORCE,
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("http://llm.test/v1/chat/completions");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer k-123");
     expect(JSON.parse(String(init.body)).model).toBe("test-model");
-    expect(JSON.parse(result.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "{}")).toEqual({
+    expect(
+      JSON.parse(result.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "{}"),
+    ).toEqual({
       reply: "Planned.",
     });
   });
@@ -234,8 +253,13 @@ describe("callAI", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await callAI({ messages: [{ role: "user", content: "hi" }] });
     expect(result.choices?.[0]?.message?.content).toBe("ok");
-    const models = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)).model);
-    expect(models).toEqual(["meta-llama/Llama-3.1-8B-Instruct", "meta-llama/Meta-Llama-3-8B-Instruct"]);
+    const models = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call[1] as RequestInit).body)).model,
+    );
+    expect(models).toEqual([
+      "meta-llama/Llama-3.1-8B-Instruct",
+      "meta-llama/Meta-Llama-3-8B-Instruct",
+    ]);
   });
 
   it("tries the fallback model when the first one hits its rate limit (429)", async () => {
@@ -254,15 +278,24 @@ describe("callAI", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await callAI({ messages: [{ role: "user", content: "hi" }] });
     expect(result.choices?.[0]?.message?.content).toBe("ok");
-    const models = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)).model);
+    const models = fetchMock.mock.calls.map(
+      (call) => JSON.parse(String((call[1] as RequestInit).body)).model,
+    );
     expect(models).toEqual(["big-model", "small-model"]);
   });
 
   it("names the provider in the message when both models are rate limited", async () => {
-    setEnv({ LLM_BASE_URL: "https://api.groq.com/openai/v1", LLM_MODEL: "a", LLM_FALLBACK_MODEL: "b" });
+    setEnv({
+      LLM_BASE_URL: "https://api.groq.com/openai/v1",
+      LLM_MODEL: "a",
+      LLM_FALLBACK_MODEL: "b",
+    });
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow down", { status: 429 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("slow down", { status: 429 })),
+    );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       "Groq rate limit reached. Please wait a moment and try again.",
     );
@@ -270,13 +303,19 @@ describe("callAI", () => {
 
   it("explains exhausted credits (HTTP 402) and an unreachable provider", async () => {
     setEnv({ HUGGINGFACE_API_KEY: "hf_test", LLM_FALLBACK_MODEL: "none" });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("payment required", { status: 402 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("payment required", { status: 402 })),
+    );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       "Hugging Face credits exhausted for this token.",
     );
 
     setEnv({});
-    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("fetch failed"))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(new TypeError("fetch failed"))),
+    );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       /Could not reach Ollama at http:\/\/localhost:11434\/v1/,
     );
@@ -288,7 +327,10 @@ describe("callAI", () => {
     const headersTimeout = Object.assign(new TypeError("fetch failed"), {
       cause: Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
     });
-    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(headersTimeout)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(headersTimeout)),
+    );
     const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
     await expect(failure).rejects.toThrow(/Node's 5-minute fetch limit/);
     await expect(failure).rejects.not.toThrow(/Could not reach/);
@@ -297,7 +339,9 @@ describe("callAI", () => {
 
 describe("provider errors are sentences, never raw provider JSON", () => {
   it("providerErrorDetail keeps the message inside a JSON error body and drops everything else", () => {
-    expect(providerErrorDetail('{"error":{"message":"QA double: model unavailable"}}')).toBe("QA double: model unavailable");
+    expect(providerErrorDetail('{"error":{"message":"QA double: model unavailable"}}')).toBe(
+      "QA double: model unavailable",
+    );
     expect(providerErrorDetail(`{"error":"model 'x' not found"}`)).toBe("model 'x' not found");
     expect(providerErrorDetail('{"detail":[{"msg":"field required"}]}')).toBe("field required");
     expect(providerErrorDetail("Service Unavailable")).toBe("Service Unavailable");
@@ -312,7 +356,10 @@ describe("provider errors are sentences, never raw provider JSON", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response('{"error":{"message":"QA double: model unavailable"}}', { status: 503 })),
+      vi.fn(
+        async () =>
+          new Response('{"error":{"message":"QA double: model unavailable"}}', { status: 503 }),
+      ),
     );
     const failure = callAI({ messages: [{ role: "user", content: "hi" }] });
     await expect(failure).rejects.toThrow(
@@ -320,7 +367,10 @@ describe("provider errors are sentences, never raw provider JSON", () => {
     );
     await expect(failure).rejects.not.toThrow(/[{}"]/);
 
-    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"error":{"code":500}}', { status: 500 })),
+    );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       /^The AI provider is not available right now \(HTTP 500\)\. Try again in a moment\.$/,
     );
@@ -331,13 +381,22 @@ describe("provider errors are sentences, never raw provider JSON", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response('{"error":{"message":"invalid response_format","type":"invalid_request_error"}}', { status: 400 })),
+      vi.fn(
+        async () =>
+          new Response(
+            '{"error":{"message":"invalid response_format","type":"invalid_request_error"}}',
+            { status: 400 },
+          ),
+      ),
     );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       "Ollama could not process the request (HTTP 400: invalid response_format).",
     );
 
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>proxy error</html>", { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>proxy error</html>", { status: 200 })),
+    );
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       "Ollama sent an answer that is not valid JSON. Try again in a moment.",
     );

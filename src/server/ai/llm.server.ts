@@ -179,7 +179,10 @@ export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env)
   const hfKey = envValue(env, "HUGGINGFACE_API_KEY");
   const useLegacyHf = !explicitBaseUrl && !!hfKey;
 
-  const baseUrl = (explicitBaseUrl ?? (useLegacyHf ? HF_ROUTER_BASE_URL : OLLAMA_BASE_URL)).replace(/\/+$/, "");
+  const baseUrl = (explicitBaseUrl ?? (useLegacyHf ? HF_ROUTER_BASE_URL : OLLAMA_BASE_URL)).replace(
+    /\/+$/,
+    "",
+  );
   const isHf = baseUrl.includes("huggingface.co");
   const apiKey = envValue(env, "LLM_API_KEY") ?? (isHf ? hfKey : undefined) ?? null;
 
@@ -214,7 +217,10 @@ export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env)
 /** Strip ```json fences and return the first JSON object found in a model's text answer. */
 export function extractJsonObject(text: string | null | undefined): Record<string, unknown> | null {
   if (!text) return null;
-  const unfenced = text.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+  const unfenced = text
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
   const candidates = [unfenced];
   const first = unfenced.indexOf("{");
   const last = unfenced.lastIndexOf("}");
@@ -234,7 +240,10 @@ export function extractJsonObject(text: string | null | undefined): Record<strin
  * Llama models sometimes answer a forced function call with the call written as text,
  * e.g. {"name":"respond","parameters":{...}}. Unwrap that to the arguments object.
  */
-function unwrapToolEnvelope(value: Record<string, unknown>, toolName: string): Record<string, unknown> {
+function unwrapToolEnvelope(
+  value: Record<string, unknown>,
+  toolName: string,
+): Record<string, unknown> {
   if (value.name === toolName) {
     const inner = value.parameters ?? value.arguments;
     if (isRecord(inner)) return inner;
@@ -244,7 +253,10 @@ function unwrapToolEnvelope(value: Record<string, unknown>, toolName: string): R
 }
 
 /** Ensure the completion carries the structured answer as a tool call for `toolName`. */
-export function normalizeToolCompletion(completion: AIChatCompletion, toolName: string): AIChatCompletion {
+export function normalizeToolCompletion(
+  completion: AIChatCompletion,
+  toolName: string,
+): AIChatCompletion {
   const choice = completion.choices?.[0];
   const message = choice?.message;
   const existing = message?.tool_calls?.find((call) => call.function?.arguments);
@@ -282,7 +294,10 @@ export function normalizeToolCompletion(completion: AIChatCompletion, toolName: 
   };
 }
 
-function forcedToolName(tools: AITool[] | undefined, toolChoice: ToolChoice | undefined): string | null {
+function forcedToolName(
+  tools: AITool[] | undefined,
+  toolChoice: ToolChoice | undefined,
+): string | null {
   if (!tools || tools.length === 0) return null;
   if (toolChoice && toolChoice !== "auto") return toolChoice.function.name;
   return tools.length === 1 ? tools[0].function.name : null;
@@ -303,7 +318,9 @@ export function buildRequestBody(opts: {
     max_tokens: opts.config.maxTokens,
   };
   const toolName = forcedToolName(opts.tools, opts.toolChoice);
-  const tool = toolName ? opts.tools?.find((candidate) => candidate.function.name === toolName) : undefined;
+  const tool = toolName
+    ? opts.tools?.find((candidate) => candidate.function.name === toolName)
+    : undefined;
 
   if (opts.config.structuredOutput === "json_schema" && tool) {
     // Constrained decoding: the provider must return a JSON object matching the schema.
@@ -354,7 +371,9 @@ async function singleCall(opts: {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     // The raw body goes to the server log only; users get a sentence from friendly().
-    console.error(`[llm] ${opts.config.provider} ${opts.model}: HTTP ${res.status}: ${text.slice(0, 500)}`);
+    console.error(
+      `[llm] ${opts.config.provider} ${opts.model}: HTTP ${res.status}: ${text.slice(0, 500)}`,
+    );
     const detail = providerErrorDetail(text);
     throw new HttpStatusError(
       `${opts.config.provider} answered HTTP ${res.status}${detail ? `: ${detail}` : ""}`,
@@ -364,11 +383,15 @@ async function singleCall(opts: {
   }
 
   const responseText = await res.text();
-  let completion: AIChatCompletion & { usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  let completion: AIChatCompletion & {
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
   try {
     completion = JSON.parse(responseText) as typeof completion;
   } catch {
-    console.error(`[llm] ${opts.config.provider} ${opts.model}: answer is not JSON: ${responseText.slice(0, 300)}`);
+    console.error(
+      `[llm] ${opts.config.provider} ${opts.model}: answer is not JSON: ${responseText.slice(0, 300)}`,
+    );
     const who = opts.config.provider.charAt(0).toUpperCase() + opts.config.provider.slice(1);
     throw new Error(`${who} sent an answer that is not valid JSON. Try again in a moment.`);
   }
@@ -422,7 +445,10 @@ function fetchCauseCode(e: unknown): string | undefined {
   return isRecord(cause) && typeof cause.code === "string" ? cause.code : undefined;
 }
 
-export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseUrl" | "timeoutMs">): Error {
+export function friendly(
+  e: unknown,
+  config: Pick<LLMConfig, "provider" | "baseUrl" | "timeoutMs">,
+): Error {
   // The provider's name at the start of a sentence ("the AI provider" for an unknown host).
   const who = config.provider.charAt(0).toUpperCase() + config.provider.slice(1);
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
@@ -444,7 +470,8 @@ export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseU
       `Could not reach ${config.provider} at ${config.baseUrl}. Is it running? (For local Ollama: docker ps shows the Ollama container on port 11434.)`,
     );
   }
-  if (status === 429) return new Error(`${who} rate limit reached. Please wait a moment and try again.`);
+  if (status === 429)
+    return new Error(`${who} rate limit reached. Please wait a moment and try again.`);
   if (status === 401 || status === 403)
     return new Error(
       config.provider === "Hugging Face"
@@ -457,7 +484,8 @@ export function friendly(e: unknown, config: Pick<LLMConfig, "provider" | "baseU
     // Every other HTTP status: a sentence with the provider's own message (never its raw body).
     const detail = e instanceof HttpStatusError ? e.detail : "";
     const code = `HTTP ${status}${detail ? `: ${detail}` : ""}`;
-    if (status === 413) return new Error(`${who} refused the request as too large (${code}). Try a shorter message.`);
+    if (status === 413)
+      return new Error(`${who} refused the request as too large (${code}). Try a shorter message.`);
     if (status >= 500) {
       return new Error(`${who} is not available right now (${code}). Try again in a moment.`);
     }

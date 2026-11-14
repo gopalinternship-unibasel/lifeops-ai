@@ -32,7 +32,8 @@ export interface CapUsage {
   global: number;
 }
 
-export type CapDecision = { allowed: true } | { allowed: false; scope: "user" | "global"; message: string };
+export type CapDecision =
+  { allowed: true } | { allowed: false; scope: "user" | "global"; message: string };
 
 type Env = Record<string, string | undefined>;
 
@@ -90,7 +91,8 @@ function userMessage(kind: AiRequestKind, limit: number): string {
   return `You have reached this demo's limit of ${plural(limit, "planner request", "planner requests")} per hour. Please try again later.`;
 }
 
-const GLOBAL_MESSAGE = "This demo's AI allowance for today is used up. It starts again at midnight UTC. Please try again tomorrow.";
+const GLOBAL_MESSAGE =
+  "This demo's AI allowance for today is used up. It starts again at midnight UTC. Please try again tomorrow.";
 
 /**
  * The counting rule. The user's own limit is checked first, then the global one. A limit that is
@@ -136,14 +138,22 @@ async function countRows(
       .gte("created_at", sinceIso);
     result = await (userId ? query.eq("user_id", userId) : query);
   } else {
-    const query = client.from(table).select("id", { count: "exact", head: true }).gte("created_at", sinceIso);
+    const query = client
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", sinceIso);
     result = await (userId ? query.eq("user_id", userId) : query);
   }
   if (result.error) throw result.error;
   return result.count ?? 0;
 }
 
-async function countUserRequests(client: Client, kind: AiRequestKind, userId: string, since: Date): Promise<number> {
+async function countUserRequests(
+  client: Client,
+  kind: AiRequestKind,
+  userId: string,
+  since: Date,
+): Promise<number> {
   if (kind === "chat") return countRows(client, "chat_messages", since, userId);
   if (kind === "plan") return countRows(client, "week_plan_requests", since, userId);
   return countRows(client, "planner_requests", since, userId);
@@ -167,7 +177,12 @@ export async function checkAiAllowance(
 
   const usage: CapUsage = { user: 0, global: 0 };
   if (limit !== null) {
-    usage.user = await countUserRequests(client, kind, userId, new Date(now.getTime() - userWindowMs(kind)));
+    usage.user = await countUserRequests(
+      client,
+      kind,
+      userId,
+      new Date(now.getTime() - userWindowMs(kind)),
+    );
     // Do not count the whole demo when the user is over their own limit already.
     const early = decideCap(kind, usage, { ...caps, callsPerDay: null });
     if (!early.allowed) return early;

@@ -3,6 +3,7 @@
 A FastAPI backend for the LifeOps AI hackathon project.
 
 It turns chaotic user input into:
+
 - tasks
 - prioritized execution plan
 - calendar block proposals
@@ -10,6 +11,7 @@ It turns chaotic user input into:
 - safe action execution workflow
 
 The backend is designed for a frontend dashboard with:
+
 - input box
 - before/after view
 - task list
@@ -61,6 +63,7 @@ Example body:
 ```
 
 2. Backend creates:
+
 - tasks
 - action proposals
 - calendar block proposals
@@ -87,12 +90,14 @@ POST /api/actions/{action_id}/execute
 ## Safety model
 
 Low-risk actions:
+
 - create task
 - create reminder
 - create calendar block
 - create email draft
 
 High-risk actions:
+
 - send email
 - delete calendar event
 - cancel/reschedule existing meetings
@@ -103,13 +108,13 @@ The MVP only creates drafts and calendar proposals. Sending emails is intentiona
 
 The planner calls any OpenAI-compatible chat-completions API (settings in `.env`, see `.env.example`):
 
-| Setting | Meaning |
-| --- | --- |
-| `LLM_BASE_URL` | e.g. `http://localhost:11434/v1` (local Ollama), `https://router.huggingface.co/v1`, `https://api.openai.com/v1` |
-| `LLM_API_KEY` | key for hosted providers (any value for Ollama) |
-| `LLM_MODEL` | e.g. `llama3.1:8b` |
-| `LLM_RESPONSE_FORMAT` | `json_schema` (constrained output), `json_object`, or `none` (no `response_format` sent; the first JSON object in the answer's text is used, as for Cloudflare Workers AI in the hosted demo) |
-| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS` | limits per call |
+| Setting                                 | Meaning                                                                                                                                                                                       |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLM_BASE_URL`                          | e.g. `http://localhost:11434/v1` (local Ollama), `https://router.huggingface.co/v1`, `https://api.openai.com/v1`                                                                              |
+| `LLM_API_KEY`                           | key for hosted providers (any value for Ollama)                                                                                                                                               |
+| `LLM_MODEL`                             | e.g. `llama3.1:8b`                                                                                                                                                                            |
+| `LLM_RESPONSE_FORMAT`                   | `json_schema` (constrained output), `json_object`, or `none` (no `response_format` sent; the first JSON object in the answer's text is used, as for Cloudflare Workers AI in the hosted demo) |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS` | limits per call                                                                                                                                                                               |
 
 If no LLM is configured (`LLM_BASE_URL` and `OPENAI_API_KEY` unset), or the model call fails or returns
 nothing usable, the deterministic keyword planner runs so the demo always works. Each plan response says
