@@ -1,0 +1,112 @@
+name: Smoke check of the hosted demo
+
+# Once a day, and by hand. It checks the live web app, the database and the planner, and the
+# daily planner call is a real database query, which keeps a free Supabase project from being
+# paused for inactivity.
+#
+# Settings: repository variables WEB_URL, PLANNER_URL, SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY
+# (none of them is secret; the publishable key is shipped to every browser). The planner token is
+# the only secret: LIFEOPS_BACKEND_TOKEN. While the variables are not set the run ends with a
+# notice and counts as passed.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Only for the last step, which switches the workflow back on (see there).
+  actions: write
+
+jobs:
+  smoke:
+    name: Smoke check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WEB_URL: ${{ vars.WEB_URL }}
+      PLANNER_URL: ${{ vars.PLANNER_URL }}
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+      LIFEOPS_BACKEND_TOKEN: ${{ secrets.LIFEOPS_BACKEND_TOKEN }}
+    steps:
+      - name: Check that the settings exist
+        id: config
+        run: |
+          missing=""
+          for name in WEB_URL PLANNER_URL SUPABASE_URL SUPABASE_PUBLISHABLE_KEY; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::notice title=Smoke check skipped::Repository variables not set:$missing. Nothing was checked."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$LIFEOPS_BACKEND_TOKEN" ]; then
+            echo "::warning title=No planner token::The secret LIFEOPS_BACKEND_TOKEN is not set, so the planner database check and the weekly plan check are skipped."
+            echo "token=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "token=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Web app answers on /login
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -fsS --retry 3 --retry-delay 10 --max-time 60 "${WEB_URL%/}/login" -o login.html
+          grep -q "MONDAY" login.html
+          echo "The sign-in page loads and names MONDAY."
+
+      - name: Supabase auth is healthy
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -fsS --retry 3 --retry-delay 10 --max-time 60 \
+            -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" \
+            "${SUPABASE_URL%/}/auth/v1/health" -o /dev/null
+          echo "Supabase auth health answered 200."
+
+      - name: Planner is up and uses a model
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -fsS --retry 3 --retry-delay 10 --max-time 60 "${PLANNER_URL%/}/" -o planner.json
+          cat planner.json
+          echo
+          jq -e '.status == "ok" and .planner == "llm"' planner.json > /dev/null
+
+      - name: Planner reads its database
+        # A real database query in the Supabase project: this is the daily activity.
+        if: steps.config.outputs.ready == 'true' && steps.config.outputs.token == 'true'
+        run: |
+          curl -fsS --retry 3 --retry-delay 10 --max-time 60 \
+            -H "Authorization: Bearer ${LIFEOPS_BACKEND_TOKEN}" \
+            -H "X-LifeOps-User: smoke-check" \
+            "${PLANNER_URL%/}/api/dashboard" -o dashboard.json
+          jq -e '.metrics' dashboard.json > /dev/null
+          echo "The planner dashboard answered 200."
+
+      - name: Planner makes a plan with the model (Mondays)
+        # One real model call a week.
+        if: steps.config.outputs.ready == 'true' && steps.config.outputs.token == 'true'
+        run: |
+          if [ "$(date -u +%u)" != "1" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Not Monday: no model call today."
+            exit 0
+          fi
+          curl -fsS --retry 2 --retry-delay 10 --max-time 120 \
+            -X POST \
+            -H "Authorization: Bearer ${LIFEOPS_BACKEND_TOKEN}" \
+            -H "X-LifeOps-User: smoke-check" \
+            -H "Content-Type: application/json" \
+            -d '{"user_input":"Block Thursday 2-4 pm for deep work","timezone":"Europe/Zurich","autonomous_mode":false}' \
+            "${PLANNER_URL%/}/api/plan" -o plan.json
+          jq -e '.planner == "llm"' plan.json > /dev/null
+          echo "The planner answered with the model."
+
+      - name: Keep the schedule switched on
+        # GitHub turns scheduled workflows off in a public repository after 60 days without
+        # repository activity. Enabling the workflow again from inside a run resets that clock.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/smoke.yml/enable
