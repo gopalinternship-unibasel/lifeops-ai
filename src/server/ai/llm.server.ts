@@ -7,9 +7,13 @@ import { isRecord } from "@/lib/errors";
  * `POST {LLM_BASE_URL}/chat/completions` API, so switching provider is an env change:
  *
  *   Local Ollama (default)   LLM_BASE_URL=http://localhost:11434/v1        LLM_MODEL=llama3.1:8b
+ *   Cloudflare Workers AI    LLM_BASE_URL=https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1
+ *     (hosted demo)          LLM_MODEL=@cf/zai-org/glm-4.7-flash  LLM_STRUCTURED_OUTPUT=tools_required
+ *                            LLM_FALLBACK_MODEL=@cf/google/gemma-4-26b-a4b-it
+ *                            LLM_API_KEY = a Workers AI API token (not yet run against the API)
  *   Hugging Face router      LLM_BASE_URL=https://router.huggingface.co/v1 LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
  *   OpenAI                   LLM_BASE_URL=https://api.openai.com/v1        LLM_MODEL=gpt-4o-mini
- *   Groq                     LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
+ *   Groq (alternative)       LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
  *   Any other OpenAI-compatible host works the same way: set LLM_BASE_URL, LLM_MODEL and LLM_API_KEY.
  *   (A free Google Gemini key may not be used for an app offered to users in the EEA, Switzerland or UK.)
  *
@@ -18,6 +22,9 @@ import { isRecord } from "@/lib/errors";
  *
  * Structured output: the app describes each structured answer as a function ("tool").
  *   LLM_STRUCTURED_OUTPUT=tools        → OpenAI function calling with a forced tool choice.
+ *   LLM_STRUCTURED_OUTPUT=tools_required → for providers that do not accept a named function in
+ *                                        tool_choice (Cloudflare Workers AI): a forced call sends
+ *                                        only that one tool with `tool_choice: "required"`.
  *   LLM_STRUCTURED_OUTPUT=json_schema  → `response_format: json_schema` (constrained decoding);
  *                                        the JSON answer is returned in the same tool-call shape.
  * Callers always read `choices[0].message.tool_calls[0].function.arguments`.
@@ -31,7 +38,7 @@ export const FALLBACK_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct";
 export const DEFAULT_LOCAL_MODEL = "llama3.1:8b";
 
 export type LLMRole = "chat" | "plan" | "draft" | "backend";
-export type StructuredOutputMode = "tools" | "json_schema";
+export type StructuredOutputMode = "tools" | "tools_required" | "json_schema";
 
 export interface LLMConfig {
   provider: string;
@@ -141,6 +148,7 @@ const HOSTED_PROVIDERS: Array<[host: string, name: string]> = [
   ["huggingface.co", "Hugging Face"],
   ["api.openai.com", "OpenAI"],
   ["generativelanguage.googleapis.com", "Google Gemini"],
+  ["api.cloudflare.com", "Cloudflare Workers AI"],
   ["api.groq.com", "Groq"],
   ["api.cerebras.ai", "Cerebras"],
   ["openrouter.ai", "OpenRouter"],
@@ -198,7 +206,8 @@ export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env)
       4000,
     ),
     temperature: Number.isFinite(temperature) ? temperature : 0.4,
-    structuredOutput: structured === "json_schema" ? "json_schema" : "tools",
+    structuredOutput:
+      structured === "json_schema" || structured === "tools_required" ? structured : "tools",
   };
 }
 
@@ -308,6 +317,14 @@ export function buildRequestBody(opts: {
       first?.role === "system"
         ? [{ ...first, content: `${first.content}\n\n${instruction}` }, ...rest]
         : [{ role: "system", content: instruction }, ...opts.messages];
+    return body;
+  }
+
+  if (opts.config.structuredOutput === "tools_required" && tool) {
+    // Some providers (Cloudflare Workers AI) accept tool_choice none/auto/required only, not a
+    // named function. Sending just the forced tool with "required" leaves the model no other choice.
+    body.tools = [tool];
+    body.tool_choice = "required";
     return body;
   }
 

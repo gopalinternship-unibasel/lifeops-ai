@@ -118,6 +118,58 @@ describe("structured output", () => {
     expect(body.response_format).toBeUndefined();
   });
 
+  it("tools_required mode sends only the forced tool with tool_choice required", () => {
+    const other: AITool = {
+      type: "function",
+      function: { name: "other", description: "Another tool.", parameters: { type: "object" } },
+    };
+    const config = resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "tools_required" });
+    expect(config.structuredOutput).toBe("tools_required");
+    const body = buildRequestBody({
+      config,
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [other, TOOL],
+      toolChoice: FORCE,
+    });
+    expect(body.tools).toEqual([TOOL]);
+    expect(body.tool_choice).toBe("required");
+    expect(body.response_format).toBeUndefined();
+    expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+
+    // Exactly one tool and no tool choice also counts as forcing that tool.
+    const single = buildRequestBody({ config, model: "m", messages: [], tools: [TOOL] });
+    expect(single.tools).toEqual([TOOL]);
+    expect(single.tool_choice).toBe("required");
+  });
+
+  it("tools_required mode leaves a request that forces nothing unchanged", () => {
+    const other: AITool = {
+      type: "function",
+      function: { name: "other", description: "Another tool.", parameters: { type: "object" } },
+    };
+    const required = resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "tools_required" });
+    const plain = resolveLLMConfig("chat", {});
+    const opts = { model: "m", messages: [], tools: [other, TOOL], toolChoice: "auto" as const };
+    const body = buildRequestBody({ ...opts, config: required });
+    expect(body).toEqual(buildRequestBody({ ...opts, config: plain }));
+    expect(body.tools).toEqual([other, TOOL]);
+    expect(body.tool_choice).toBe("auto");
+
+    const noTools = buildRequestBody({ config: required, model: "m", messages: [] });
+    expect(noTools.tools).toBeUndefined();
+    expect(noTools.tool_choice).toBeUndefined();
+  });
+
+  it("an unknown LLM_STRUCTURED_OUTPUT value falls back to tools", () => {
+    expect(resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "required" }).structuredOutput).toBe(
+      "tools",
+    );
+    expect(resolveLLMConfig("chat", { LLM_STRUCTURED_OUTPUT: "TOOLS_REQUIRED" }).structuredOutput).toBe(
+      "tools",
+    );
+  });
+
   it("turns a JSON answer in content into the tool-call shape callers read", () => {
     const normalized = normalizeToolCompletion(
       { choices: [{ message: { content: '```json\n{"reply":"Hello"}\n```' } }] },
@@ -298,6 +350,9 @@ describe("providerName", () => {
     expect(providerName("https://api.cerebras.ai/v1")).toBe("Cerebras");
     expect(providerName("https://openrouter.ai/api/v1")).toBe("OpenRouter");
     expect(providerName("https://api.openai.com/v1")).toBe("OpenAI");
+    expect(providerName("https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1")).toBe(
+      "Cloudflare Workers AI",
+    );
     expect(providerName("http://localhost:11434/v1")).toBe("Ollama");
   });
 
