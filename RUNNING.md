@@ -325,13 +325,15 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
 | Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended) | any (`ollama`) |
 | Hugging Face router (original) | `https://router.huggingface.co/v1` | `meta-llama/Llama-3.1-8B-Instruct` | `hf_...` token with inference credits |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `sk-...` |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` | Gemini API key |
+| Groq (hosted demo) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback) | Groq key. With Groq set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner); see `VERCEL_DEPLOYMENT.md` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | a Gemini model | Gemini API key. Not for a public demo: the free tier may not be used for apps offered in the EEA, Switzerland or the UK |
 | Lovable AI gateway (original Lovable build) | `https://ai.gateway.lovable.dev/v1` | `google/gemini-2.5-flash` | Lovable-issued key |
 
 Web app extras: `LLM_STRUCTURED_OUTPUT=json_schema` (constrained JSON; keep it for Ollama) or `tools`
 (OpenAI function calling, the original behaviour, works with OpenAI/Hugging Face); per-role models
 `LLM_MODEL_CHAT`, `LLM_MODEL_PLAN`, `LLM_MODEL_DRAFT`; `LLM_FALLBACK_MODEL` (Hugging Face defaults to
-`meta-llama/Meta-Llama-3-8B-Instruct`); `LLM_TIMEOUT_MS`; `LLM_MAX_TOKENS` and `LLM_MAX_TOKENS_PLAN`
+`meta-llama/Meta-Llama-3-8B-Instruct`; a rate-limit answer (HTTP 429) also switches to it, because hosted
+providers count the limit per model); `LLM_TIMEOUT_MS`; `LLM_MAX_TOKENS` and `LLM_MAX_TOKENS_PLAN`
 (2400, a week plan is long). Leaving `LLM_BASE_URL` empty and setting only `HUGGINGFACE_API_KEY` gives the
 original Hugging Face setup. Note: the Hugging Face router needs an account with inference
 credits; without them it answers HTTP 402 and the app shows "Hugging Face credits exhausted for this token."
@@ -694,7 +696,22 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
 - Success toasts appear over the top-right header buttons for a few seconds (they pause while the mouse is
   over them).
 - The planner service keeps its data in SQLite and creates tables at start-up without migrations; after
-  pulling schema changes delete `fastapi-backend\lifeops.db`.
+  pulling schema changes delete `fastapi-backend\lifeops.db`. With `DATABASE_URL` set to a PostgreSQL
+  URL (hosted deployment) it uses PostgreSQL the same way: `create_all` adds missing tables when the
+  service starts, and it never changes a table that exists. Its tests also pass against PostgreSQL
+  (`LIFEOPS_TEST_DATABASE_URL`, and `LIFEOPS_TEST_DATABASE_SCHEMA` for a schema other than the role's
+  own; the database is emptied by the tests, so use a throw-away one).
+- **Hosted deployment (Vercel, Supabase, a hosted model)** is described in `VERCEL_DEPLOYMENT.md` and was
+  checked only by builds, unit tests and throw-away databases; it has not been deployed yet. What
+  differs from this PC and is off here: the demo limits `AI_CHAT_PER_HOUR`, `AI_PLANS_PER_DAY`,
+  `AI_PLANNER_PER_HOUR` and `AI_CALLS_PER_DAY` (unset = unlimited, the default here), the notice on the
+  sign-in page (`VITE_HOSTED_DEMO=true`), the Vercel build (`NITRO_PRESET=vercel`; plain
+  `npm run build` is unchanged and writes `dist\`), and the Supabase grants and clean-up migrations
+  (harmless on the local stack; the clean-up only acts where `pg_cron` exists, which it does not here).
+  Limits of the hosted demo: the caps count stored requests, so a request that is cut off in the middle
+  still counts, and the planner's `Plan it` that falls back to the in-app assistant counts as a planner
+  request and a chat message; the global allowance is counted per UTC day across all users with three
+  count queries; Google Gmail and Calendar stay off there (demo inbox and calendar).
 - The planner's own Gmail/Calendar adapters are still mock (as in the hackathon). Real writes happen in the
   web app when you click **Run** on the dashboard.
 - `fastapi-backend/lifeos/` is an unrelated Next.js prototype from the hackathon; it is not used or built.
