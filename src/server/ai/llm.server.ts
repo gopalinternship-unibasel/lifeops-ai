@@ -9,7 +9,9 @@ import { isRecord } from "@/lib/errors";
  *   Local Ollama (default)   LLM_BASE_URL=http://localhost:11434/v1        LLM_MODEL=llama3.1:8b
  *   Hugging Face router      LLM_BASE_URL=https://router.huggingface.co/v1 LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
  *   OpenAI                   LLM_BASE_URL=https://api.openai.com/v1        LLM_MODEL=gpt-4o-mini
- *   Google Gemini            LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai  LLM_MODEL=gemini-2.0-flash
+ *   Groq                     LLM_BASE_URL=https://api.groq.com/openai/v1  LLM_MODEL=llama-3.3-70b-versatile
+ *   Any other OpenAI-compatible host works the same way: set LLM_BASE_URL, LLM_MODEL and LLM_API_KEY.
+ *   (A free Google Gemini key may not be used for an app offered to users in the EEA, Switzerland or UK.)
  *
  * Backwards compatibility: when LLM_BASE_URL is not set but HUGGINGFACE_API_KEY is, the
  * original Hugging Face router setup is used (Llama 3.1 8B with Llama 3 8B as fallback).
@@ -134,11 +136,29 @@ function positiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function providerName(baseUrl: string): string {
+/** Hosted providers, recognised by their API host so messages name the one that was called. */
+const HOSTED_PROVIDERS: Array<[host: string, name: string]> = [
+  ["huggingface.co", "Hugging Face"],
+  ["api.openai.com", "OpenAI"],
+  ["generativelanguage.googleapis.com", "Google Gemini"],
+  ["api.groq.com", "Groq"],
+  ["api.cerebras.ai", "Cerebras"],
+  ["openrouter.ai", "OpenRouter"],
+  ["api.together.xyz", "Together AI"],
+  ["api.mistral.ai", "Mistral"],
+];
+
+export function providerName(baseUrl: string): string {
   const url = baseUrl.toLowerCase();
-  if (url.includes("huggingface.co")) return "Hugging Face";
-  if (url.includes("api.openai.com")) return "OpenAI";
-  if (url.includes("generativelanguage.googleapis.com")) return "Google Gemini";
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    host = "";
+  }
+  for (const [suffix, name] of HOSTED_PROVIDERS) {
+    if (host ? host === suffix || host.endsWith(`.${suffix}`) : url.includes(suffix)) return name;
+  }
   if (url.includes("lovable")) return "Lovable AI gateway";
   if (url.includes(":11434")) return "Ollama";
   return "the AI provider";
@@ -361,9 +381,12 @@ export async function callAI(opts: {
     const status = errorStatus(e);
     // 401/403 = gated/unauthorized for the primary model → try the fallback.
     // 404 = model not available. 503 = cold-start; try fallback once.
+    // 429 = rate limit: hosted providers count it per model, so the fallback model can still answer.
     const fallback = config.fallbackModel;
     const shouldFallback =
-      !!fallback && primary !== fallback && (status === 401 || status === 403 || status === 404 || status === 503);
+      !!fallback &&
+      primary !== fallback &&
+      (status === 401 || status === 403 || status === 404 || status === 429 || status === 503);
     if (shouldFallback && fallback) {
       console.warn(`[llm] ${primary} failed (${status}); falling back to ${fallback}`);
       try {

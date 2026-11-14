@@ -5,6 +5,7 @@ import {
   extractJsonObject,
   normalizeToolCompletion,
   providerErrorDetail,
+  providerName,
   resolveLLMConfig,
   type AITool,
 } from "@/server/ai/llm.server";
@@ -185,6 +186,36 @@ describe("callAI", () => {
     expect(models).toEqual(["meta-llama/Llama-3.1-8B-Instruct", "meta-llama/Meta-Llama-3-8B-Instruct"]);
   });
 
+  it("tries the fallback model when the first one hits its rate limit (429)", async () => {
+    setEnv({
+      LLM_BASE_URL: "https://api.groq.com/openai/v1",
+      LLM_API_KEY: "test-key",
+      LLM_MODEL: "big-model",
+      LLM_FALLBACK_MODEL: "small-model",
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"error":{"message":"rate limit"}}', { status: 429 }))
+      .mockResolvedValueOnce(completion({ content: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await callAI({ messages: [{ role: "user", content: "hi" }] });
+    expect(result.choices?.[0]?.message?.content).toBe("ok");
+    const models = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)).model);
+    expect(models).toEqual(["big-model", "small-model"]);
+  });
+
+  it("names the provider in the message when both models are rate limited", async () => {
+    setEnv({ LLM_BASE_URL: "https://api.groq.com/openai/v1", LLM_MODEL: "a", LLM_FALLBACK_MODEL: "b" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow down", { status: 429 })));
+    await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      "Groq rate limit reached. Please wait a moment and try again.",
+    );
+  });
+
   it("explains exhausted credits (HTTP 402) and an unreachable provider", async () => {
     setEnv({ HUGGINGFACE_API_KEY: "hf_test", LLM_FALLBACK_MODEL: "none" });
     vi.stubGlobal("fetch", vi.fn(async () => new Response("payment required", { status: 402 })));
@@ -258,5 +289,20 @@ describe("provider errors are sentences, never raw provider JSON", () => {
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
       "Ollama sent an answer that is not valid JSON. Try again in a moment.",
     );
+  });
+});
+
+describe("providerName", () => {
+  it("names a hosted provider from the host of its API URL", () => {
+    expect(providerName("https://api.groq.com/openai/v1")).toBe("Groq");
+    expect(providerName("https://api.cerebras.ai/v1")).toBe("Cerebras");
+    expect(providerName("https://openrouter.ai/api/v1")).toBe("OpenRouter");
+    expect(providerName("https://api.openai.com/v1")).toBe("OpenAI");
+    expect(providerName("http://localhost:11434/v1")).toBe("Ollama");
+  });
+
+  it("does not take a name from the path or from a look-alike host", () => {
+    expect(providerName("https://example.org/api.groq.com/v1")).toBe("the AI provider");
+    expect(providerName("https://api.groq.com.example.org/v1")).toBe("the AI provider");
   });
 });

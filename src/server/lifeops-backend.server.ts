@@ -90,6 +90,16 @@ export function planTimeoutMs(env: Record<string, string | undefined> = process.
   return (Number.isFinite(llm) && llm > 0 ? llm : 120_000) + 30_000;
 }
 
+/**
+ * Timeout for the planner's quick calls (dashboard read, approve, reject and so on).
+ * LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS; default 10 s, because a planner that was idle on a
+ * serverless host needs a cold start and a first database connection.
+ */
+export function quickTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+  const explicit = Number.parseInt(env.LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : 10_000;
+}
+
 export async function backendRequest<T>(
   path: string,
   opts: { userId: string; method?: "GET" | "POST"; body?: unknown; timeoutMs?: number },
@@ -107,7 +117,7 @@ export async function backendRequest<T>(
       method: opts.method ?? "GET",
       headers,
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 5_000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? quickTimeoutMs()),
     });
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -131,7 +141,7 @@ export async function backendRequest<T>(
 }
 
 export const backend = {
-  dashboard: (userId: string) => backendRequest<BackendDashboard>("/api/dashboard", { userId, timeoutMs: 4_000 }),
+  dashboard: (userId: string) => backendRequest<BackendDashboard>("/api/dashboard", { userId, timeoutMs: quickTimeoutMs() }),
   plan: (userId: string, body: { user_input: string; current_datetime: string; timezone: string }) =>
     backendRequest<BackendPlanResponse>("/api/plan", {
       userId,
