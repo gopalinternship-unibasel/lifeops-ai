@@ -69,12 +69,12 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 ## Prerequisites
 
 - Windows 11 with Windows PowerShell 5.1 (or PowerShell 7).
-- **Docker Desktop running.** On this PC start it only with
-  `powershell -ExecutionPolicy Bypass -File C:\Users\gopal\Downloads\start-docker-desktop.ps1`.
+- **Docker Desktop running.** (If it fails to start on Windows because of stale socket files, move
+  `%LOCALAPPDATA%\Docker\run` aside first.)
 - **Node.js 22 or newer** (tested with 24.22.1; npm prints an "EBADENGINE" warning because
   `package.json` asks for 22.x, which is harmless).
 - **Python 3.13** as `python` on PATH (for the FastAPI virtualenv).
-- **Supabase CLI v3.** The scripts use `C:\Users\gopal\tools\supabase\supabase.exe` if it exists,
+- **Supabase CLI v3.** The scripts use `%USERPROFILE%\tools\supabase\supabase.exe` if it exists,
   otherwise `supabase` from PATH, or whatever `$env:SUPABASE_CLI` points to.
 - **Ollama with the model in `.env.local`** (default `qwen2.5-7b-4threads`) on port 11434. Check with
   `docker exec cvfix-ollama ollama list`; the start script warns if the model is missing and prints the
@@ -103,7 +103,7 @@ All of these files are gitignored. To redo the env files later: `node scripts\wr
 From PowerShell:
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
+cd <the project folder>
 powershell -ExecutionPolicy Bypass -File scripts\start-lifeops.ps1
 ```
 
@@ -333,8 +333,8 @@ Web app extras: `LLM_STRUCTURED_OUTPUT=json_schema` (constrained JSON; keep it f
 `LLM_MODEL_CHAT`, `LLM_MODEL_PLAN`, `LLM_MODEL_DRAFT`; `LLM_FALLBACK_MODEL` (Hugging Face defaults to
 `meta-llama/Meta-Llama-3-8B-Instruct`); `LLM_TIMEOUT_MS`; `LLM_MAX_TOKENS` and `LLM_MAX_TOKENS_PLAN`
 (2400, a week plan is long). Leaving `LLM_BASE_URL` empty and setting only `HUGGINGFACE_API_KEY` gives the
-original Hugging Face setup. Note: Gopal's Hugging Face token is valid but the account has no inference
-credits; the router answers HTTP 402 and the app shows "Hugging Face credits exhausted for this token."
+original Hugging Face setup. Note: the Hugging Face router needs an account with inference
+credits; without them it answers HTTP 402 and the app shows "Hugging Face credits exhausted for this token."
 
 Planner extras (`fastapi-backend\.env`): `LLM_RESPONSE_FORMAT=json_schema` or `json_object`,
 `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `PLANNER_MODE=keyword` (always the keyword planner). Empty
@@ -344,7 +344,7 @@ always use the in-app assistant.
 ## Tests
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\lifeops
+cd <the project folder>
 npm test                 # 385 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
@@ -368,11 +368,11 @@ network: the OAuth token, userinfo, Calendar and Gmail endpoints are mocked, and
 signing and expiry, the redirect URI, token storage and refresh, calendar create/list, and draft-only Gmail.
 
 **Browser end-to-end checks** (headless Edge, Playwright 1.56.1) live outside the repo in
-`C:\Users\gopal\Downloads\cv-project-fixes\_e2e\lifeops-fix\` and run from `..\_e2e` with the stack up.
+`..\_e2e\lifeops-fix\` (a folder next to this repository, not part of it) and run from `..\_e2e` with the stack up.
 Results are appended to `lifeops-fix\results.jsonl`, screenshots go next to the scripts.
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 node lifeops-fix\auth.mjs         # sign-up, profile, connectors, Connect Google message, sign-in, anonymous demo
 node lifeops-fix\calendar.mjs     # demo calendar week view, profile, row-level security between two users
 node lifeops-fix\chat.mjs         # briefing + priorities, proposed block, conflict refusal, draft, move, cancel, history
@@ -398,7 +398,7 @@ unknown event id, a `send_email` action, a planner block over the lecture) so th
 the app drops or refuses them. To use it:
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 Start-Process node -ArgumentList "lifeops-fix2\scripted-llm.mjs" -WindowStyle Hidden
 cd ..\lifeops
 node scripts\write-local-env.mjs --set LLM_BASE_URL=http://127.0.0.1:55326/v1 --backend-set LLM_BASE_URL=http://127.0.0.1:55326/v1
@@ -415,7 +415,7 @@ separate planner SQLite file), so no env file changes. Each script takes the suf
 results go to `lifeops-fix3\results.jsonl`, screenshots to `lifeops-fix3\shots\`.
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 powershell -ExecutionPolicy Bypass -File lifeops-fix3\start-fake.ps1
 node lifeops-fix3\chat.mjs c     # handled cards after reload and in a stale tab, Today = today only, local times, length limit
 node lifeops-fix3\plan.mjs p     # no plan items in the past, approval skips past items
@@ -435,7 +435,7 @@ and answers "Slow" users (and planner inputs containing `SLOW`) only after 45 s 
 page can be reloaded while a request runs.
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 powershell -ExecutionPolicy Bypass -File lifeops-fix4\start-fake.ps1
 node lifeops-fix4\errors.mjs f k            # readable 503/500 errors, failed turn stored, team sync ranked once
 node lifeops-fix4\reload.mjs chat s         # reload during the briefing and during a message: answer and card arrive
@@ -459,7 +459,7 @@ answer, a cancel, and false "I've scheduled"/"I sent" claims. It also saves ever
 `captures\` for the model measurement.
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 powershell -ExecutionPolicy Bypass -File lifeops-fix5\start-fake.ps1
 node lifeops-fix5\move.mjs m          # QA's three wrong moves corrected, card and reply agree, saved move, ambiguous, unknown, cancel
 node lifeops-fix5\regress.mjs g       # conflict named and refused, saved cards stay handled after a reload
@@ -489,7 +489,7 @@ commitment today" for next Monday's interview) and week plans that take 45 s for
 contain "SLOW".
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 powershell -ExecutionPolicy Bypass -File lifeops-fix6\start-fake.ps1
 node lifeops-fix6\round4.mjs chat c      # reminder stays a reminder (saved, appointment unchanged), model move refused,
                                           # gym requests without "could not find", unknown ids, move example still a move
@@ -512,7 +512,7 @@ same name for "Put the team sync on Friday", a cancel for "Don't cancel the team
 Sam: cancel lunch on Saturday", and no calendar answer at all for a clear move.
 
 ```powershell
-cd C:\Users\gopal\Downloads\cv-project-fixes\_e2e
+cd ..\_e2e
 powershell -ExecutionPolicy Bypass -File lifeops-fix7\start-fake.ps1
 node lifeops-fix7\round7.mjs chat c      # 26 checks: reminder stays a reminder (saved, appointment unchanged), unasked
                                           # model moves left out and named, set/put only with the model's own move,
@@ -532,10 +532,10 @@ The scripts read `$env:E2E_PROJECT` (project folder) and `$env:E2E_DB` (database
 against a fresh clone with its own `project_id`, as done on 9-10 Nov 2026 (`lifeops-fix5\fresh`,
 project `lifeopsfix5`; its stopped Supabase volumes are kept, remove them with Docker if not needed).
 
-## What only Gopal can do: connect real Gmail and Google Calendar
+## What only the repository owner can do: connect real Gmail and Google Calendar
 
 The code path is in place and tested against mocked Google endpoints, but it needs an OAuth client in
-Gopal's Google Cloud account:
+the owner's Google Cloud account:
 
 1. Open https://console.cloud.google.com/ with the Google account that owns the project, create a project
    (for example "MONDAY local").
@@ -564,7 +564,7 @@ verification. Optional and separate: the Supabase "Continue with Google" login b
 (`VITE_ENABLE_GOOGLE_SIGNIN=true`) also needs `[auth.external.google]` set in `supabase/config.toml` with
 the same client and the redirect URI `http://127.0.0.1:55321/auth/v1/callback` added to the client.
 
-Other things only Gopal can do: add credits to the Hugging Face account (or another provider key) to use
+Other things only the owner can do: add credits to the Hugging Face account (or another provider key) to use
 a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
 
 ## Known limits

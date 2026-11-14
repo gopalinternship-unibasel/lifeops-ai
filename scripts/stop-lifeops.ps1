@@ -57,7 +57,7 @@ foreach ($port in 5190, 8010) {
 if (-not $KeepSupabase) {
   $supabase = $env:SUPABASE_CLI
   if (-not $supabase) {
-    $candidate = "C:\Users\gopal\tools\supabase\supabase.exe"
+    $candidate = Join-Path $env:USERPROFILE "tools\supabase\supabase.exe"
     if (Test-Path $candidate) { $supabase = $candidate } else { $supabase = "supabase" }
   }
   Push-Location $root

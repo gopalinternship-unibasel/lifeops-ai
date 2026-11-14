@@ -40,7 +40,7 @@ function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
 
 $supabase = $env:SUPABASE_CLI
 if (-not $supabase) {
-  $candidate = "C:\Users\gopal\tools\supabase\supabase.exe"
+  $candidate = Join-Path $env:USERPROFILE "tools\supabase\supabase.exe"
   if (Test-Path $candidate) { $supabase = $candidate } else { $supabase = "supabase" }
 }
 
@@ -53,7 +53,7 @@ foreach ($port in 5190, 8010) {
 Step "Checking Docker"
 docker info --format "{{.ServerVersion}}" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
-  $helper = "C:\Users\gopal\Downloads\start-docker-desktop.ps1"
+  $helper = Join-Path $env:USERPROFILE "Downloads\start-docker-desktop.ps1"
   if (Test-Path $helper) {
     Fail "Docker Desktop is not running. Start it with: powershell -ExecutionPolicy Bypass -File $helper  (then run this script again)"
   }

@@ -9,6 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv, readEnvText, upsertEnvFile } from "./env-file.mjs";
@@ -16,8 +17,8 @@ import { parseEnv, readEnvText, upsertEnvFile } from "./env-file.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const supabaseExe =
   process.env.SUPABASE_CLI ??
-  (existsSync("C:/Users/gopal/tools/supabase/supabase.exe")
-    ? "C:/Users/gopal/tools/supabase/supabase.exe"
+  (existsSync(join(homedir(), "tools", "supabase", "supabase.exe"))
+    ? join(homedir(), "tools", "supabase", "supabase.exe")
     : "supabase");
 
 // Optional changes on the command line (written without a BOM, unlike PowerShell 5.1):
