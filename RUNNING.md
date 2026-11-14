@@ -325,12 +325,15 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
 | Local Ollama (default) | `http://localhost:11434/v1` | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended) | any (`ollama`) |
 | Hugging Face router (original) | `https://router.huggingface.co/v1` | `meta-llama/Llama-3.1-8B-Instruct` | `hf_...` token with inference credits |
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `sk-...` |
-| Groq (hosted demo) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback) | Groq key. With Groq set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner); see `VERCEL_DEPLOYMENT.md` |
+| Cloudflare Workers AI (hosted demo; not yet run against the API) | `https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1` | `@cf/zai-org/glm-4.7-flash` (web app and planner), `@cf/google/gemma-4-26b-a4b-it` (web app fallback) | Workers AI API token (Workers AI Read and Edit). Set `LLM_STRUCTURED_OUTPUT=tools_required` (web app) and `LLM_RESPONSE_FORMAT=none` (planner); free allowance 10,000 neurons a day per Cloudflare account; see `VERCEL_DEPLOYMENT.md` |
+| Groq (alternative; free-plan terms not checked) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback) | Groq key. Set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner) |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | a Gemini model | Gemini API key. Not for a public demo: the free tier may not be used for apps offered in the EEA, Switzerland or the UK |
 | Lovable AI gateway (original Lovable build) | `https://ai.gateway.lovable.dev/v1` | `google/gemini-2.5-flash` | Lovable-issued key |
 
-Web app extras: `LLM_STRUCTURED_OUTPUT=json_schema` (constrained JSON; keep it for Ollama) or `tools`
-(OpenAI function calling, the original behaviour, works with OpenAI/Hugging Face); per-role models
+Web app extras: `LLM_STRUCTURED_OUTPUT=json_schema` (constrained JSON; keep it for Ollama), `tools`
+(OpenAI function calling, the original behaviour, works with OpenAI/Hugging Face) or `tools_required`
+(for providers that accept only `none`, `auto` or `required` in `tool_choice`, such as Cloudflare Workers
+AI: a call that needs one function sends only that function with `tool_choice: "required"`); per-role models
 `LLM_MODEL_CHAT`, `LLM_MODEL_PLAN`, `LLM_MODEL_DRAFT`; `LLM_FALLBACK_MODEL` (Hugging Face defaults to
 `meta-llama/Meta-Llama-3-8B-Instruct`; a rate-limit answer (HTTP 429) also switches to it, because hosted
 providers count the limit per model); `LLM_TIMEOUT_MS`; `LLM_MAX_TOKENS` and `LLM_MAX_TOKENS_PLAN`
@@ -338,7 +341,8 @@ providers count the limit per model); `LLM_TIMEOUT_MS`; `LLM_MAX_TOKENS` and `LL
 original Hugging Face setup. Note: the Hugging Face router needs an account with inference
 credits; without them it answers HTTP 402 and the app shows "Hugging Face credits exhausted for this token."
 
-Planner extras (`fastapi-backend\.env`): `LLM_RESPONSE_FORMAT=json_schema` or `json_object`,
+Planner extras (`fastapi-backend\.env`): `LLM_RESPONSE_FORMAT=json_schema`, `json_object` or `none` (no
+`response_format` sent; the plan is the first JSON object in the answer's text, code fences stripped),
 `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `PLANNER_MODE=keyword` (always the keyword planner). Empty
 `LLM_BASE_URL` = keyword planner only. `LIFEOPS_BACKEND_URL=off` in `.env.local` makes the dashboard
 always use the in-app assistant.
@@ -713,8 +717,15 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   the 13 migrations and runs here too, where it repeats grants that already exist.
   Limits of the hosted demo: the caps count stored requests, so a request that is cut off in the middle
   still counts, and the planner's `Plan it` that falls back to the in-app assistant counts as a planner
-  request and a chat message; the global allowance is counted per UTC day across all users with three
-  count queries; Google Gmail and Calendar stay off there (demo inbox and calendar).
+  request and a chat message; if the chat or daily cap refuses that fallback turn, the planner request
+  stays stored as failed with the limit sentence. The caps count first and insert afterwards without a
+  lock, so requests sent at the same moment can pass a cap by a few. The global allowance is counted per
+  UTC day across all users with three count queries. The caps are sized for Cloudflare Workers AI's free
+  10,000 neurons a day (shared with another demo on the same account) from estimated token counts, not
+  measured ones; they do not guarantee that the allowance lasts the day. The nightly clean-up deletes
+  old anonymous users and, through the foreign keys, their rows in the app's tables; the planner's rows
+  in its own `planner` schema are not linked to them and are not cleaned up. Google Gmail and Calendar
+  stay off there (demo inbox and calendar).
 - The planner's own Gmail/Calendar adapters are still mock (as in the hackathon). Real writes happen in the
   web app when you click **Run** on the dashboard.
 - `fastapi-backend/lifeos/` is an unrelated Next.js prototype from the hackathon; it is not used or built.

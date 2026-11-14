@@ -2,7 +2,8 @@
 
 This describes the hosted setup the code is prepared for. Nothing here has been deployed yet: the
 build, the tests and the migrations were checked on a PC, the live steps were not. Items that are
-not verified are marked "Not verified".
+not verified are marked "Not verified" or "not yet run". The AI provider (Cloudflare Workers AI) has not
+been called from this code yet.
 
 ## 1. What runs where
 
@@ -11,7 +12,7 @@ not verified are marked "Not verified".
 | Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root | One function for server rendering and server functions, static files from the CDN. Node 22.x. |
 | Planner (FastAPI) | Vercel project `lifeops-planner`, root directory = `fastapi-backend` | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it. |
 | Database and sign-in | A new Supabase project (free plan), region Frankfurt | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
-| AI model | Any OpenAI-compatible provider, set by `LLM_BASE_URL` | Not decided. Groq's free plan is the candidate. See section 2. |
+| AI model | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. Not yet run against the API. See section 2. |
 | Monitoring | GitHub Actions workflow `smoke.yml` | Once a day. |
 
 The web app is a full-stack app. It is not a static site: do not set an Output Directory and do not add
@@ -28,22 +29,40 @@ Vercel by itself. The `nitro` package does, and `vite.config.ts` turns it on onl
 ## 2. The AI provider
 
 The code is provider-neutral: three settings choose it (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`), in
-both Vercel projects.
+both Vercel projects. The hosted demo uses **Cloudflare Workers AI**. The facts below were read on
+Cloudflare's pages on 14 Nov 2026; none of them has been run against the API yet.
 
+- Address: `LLM_BASE_URL=https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` (OpenAI-compatible
+  `chat/completions`). `ACCOUNT_ID` is the Cloudflare Account ID (dashboard, Workers AI, "Use REST API").
+- Key: `LLM_API_KEY` is a Workers AI API token, created on the same page, with the permissions Workers AI
+  Read and Workers AI Edit.
+- Models: `@cf/zai-org/glm-4.7-flash` (main) and `@cf/google/gemma-4-26b-a4b-it` (fallback).
+- Free allowance: 10,000 neurons a day for the whole Cloudflare account, no card needed. Above it nothing
+  runs until the next day. The same account also serves a second demo (ai-scientist), so both share the
+  allowance; the caps in section 4 are sized for that. Cloudflare states that customer content is not used
+  for training. Not verified: which HTTP status Workers AI answers when the allowance is used up.
+- Price in neurons: glm-4.7-flash 5,500 per million input tokens and 36,400 per million output tokens;
+  gemma-4-26b-a4b-it 9,091 and 27,273.
+- Structured answers, web app: Workers AI accepts `tools` with `tool_choice` `none`, `auto` or `required`;
+  naming one function in `tool_choice` is not documented. `LLM_STRUCTURED_OUTPUT=tools_required` therefore
+  sends only the function a call needs, with `tool_choice: "required"`. Not verified: that both models
+  answer such a call with a function call; if the first live chat turn returns no card, look at the
+  runtime log.
+- Structured answers, planner: Cloudflare lists JSON mode (`response_format` `json_object` or `json_schema`)
+  only for older models, and not for streaming. The planner therefore uses `LLM_RESPONSE_FORMAT=none`: no
+  `response_format` is sent, the prompt asks for JSON, and the planner takes the first JSON object from the
+  answer's text (code fences are stripped). If it cannot read a plan it falls back to the keyword planner
+  and says so.
+- A rate-limit answer (HTTP 429) from the main model makes the app try `LLM_FALLBACK_MODEL`. With Workers AI
+  both models draw on the same daily allowance, so the fallback cannot help once the allowance is used up.
+- Messages name the provider from its host ("Cloudflare Workers AI", and also Groq, Cerebras, OpenRouter,
+  Together AI, Mistral, OpenAI, Hugging Face, Google Gemini) and say "the AI provider" for any other host.
+- Alternative: Groq (`LLM_BASE_URL=https://api.groq.com/openai/v1`, `LLM_STRUCTURED_OUTPUT=tools`, planner
+  `LLM_RESPONSE_FORMAT=json_object`). Its free-plan terms were not checked. Switching changes only
+  `LLM_BASE_URL`, the models, the key and the two structured-output settings.
 - Do not use a free Google Gemini key for a public demo. Google's terms allow only paid services for apps
   offered to users in the EEA, and the clause also names Switzerland and the UK; the free tier also lets
   reviewers read inputs.
-- Groq is the candidate: `LLM_BASE_URL=https://api.groq.com/openai/v1`. Its free-plan terms and exact
-  limits are shown only in the owner's console. Read them before going public (section 6, step 1).
-- If the provider is changed, only `LLM_BASE_URL`, `LLM_MODEL`, `LLM_FALLBACK_MODEL` and `LLM_API_KEY`
-  change. Messages name the provider from its host (Groq, Cerebras, OpenRouter, Together AI, Mistral,
-  OpenAI, Hugging Face, Google Gemini) and say "the AI provider" for any other host.
-- Structured answers: the web app uses `LLM_STRUCTURED_OUTPUT=tools` (a forced function call) and the
-  planner `LLM_RESPONSE_FORMAT=json_object`. Groq supports `json_schema` only on a few models, none of the
-  Llama ones. Not verified: that forced function calls work on the Groq Llama models. If the first live chat
-  turn returns no card, switch to a model with `json_schema` support and `LLM_STRUCTURED_OUTPUT=json_schema`.
-- A rate-limit answer (HTTP 429) from the main model makes the app try `LLM_FALLBACK_MODEL`, because hosted
-  providers count the limit per model.
 
 ## 3. Settings
 
@@ -62,11 +81,11 @@ is read by the server at run time. Change a setting, then redeploy.
 | `VITE_ENABLE_ANONYMOUS_DEMO` | `true` | no | Shows "Try the live demo" (anonymous sign-in). |
 | `VITE_ENABLE_GOOGLE_SIGNIN` | `false` | no | Hides "Continue with Google". |
 | `VITE_HOSTED_DEMO` | `true` | no | Shows the one-line demo notice on the sign-in page. Leave unset locally. |
-| `LLM_BASE_URL` | for example `https://api.groq.com/openai/v1` | no | The provider's OpenAI-compatible URL. |
-| `LLM_API_KEY` | the provider's key | yes | |
-| `LLM_MODEL` | for example `llama-3.3-70b-versatile` | no | Main model for chat and plans. |
-| `LLM_FALLBACK_MODEL` | for example `llama-3.1-8b-instant` | no | Tried after 401, 403, 404, 429 or 503 from the main model. |
-| `LLM_STRUCTURED_OUTPUT` | `tools` | no | `tools` or `json_schema` (see section 2). |
+| `LLM_BASE_URL` | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | no | Workers AI's OpenAI-compatible URL with the Cloudflare Account ID. |
+| `LLM_API_KEY` | the Workers AI API token | yes | |
+| `LLM_MODEL` | `@cf/zai-org/glm-4.7-flash` | no | Main model for chat and plans. |
+| `LLM_FALLBACK_MODEL` | `@cf/google/gemma-4-26b-a4b-it` | no | Tried after 401, 403, 404, 429 or 503 from the main model. |
+| `LLM_STRUCTURED_OUTPUT` | `tools_required` | no | `tools`, `tools_required` or `json_schema` (see section 2). Any other value means `tools`. |
 | `LLM_TIMEOUT_MS` | `60000` | no | Time allowed for one model call. A chat turn can take up to twice this plus 2 minutes (main model, then fallback). |
 | `LLM_MAX_TOKENS` | `1200` | no | Longest chat answer. |
 | `LLM_MAX_TOKENS_PLAN` | `2400` | no | Longest week plan. |
@@ -74,10 +93,10 @@ is read by the server at run time. Change a setting, then redeploy.
 | `LIFEOPS_BACKEND_TOKEN` | a random value | yes | Shared with the planner (same value in both projects). |
 | `LIFEOPS_BACKEND_TIMEOUT_MS` | `60000` | no | Time allowed for "Plan it". Default: `LLM_TIMEOUT_MS` plus 30 s. |
 | `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS` | `10000` | no | Time allowed for the planner's quick calls (dashboard read, approve, reject). Default 10000; a planner that was idle needs a cold start. |
-| `AI_CHAT_PER_HOUR` | `20` | no | See section 4. Unset = no limit. |
-| `AI_PLANS_PER_DAY` | `10` | no | See section 4. |
-| `AI_PLANNER_PER_HOUR` | `10` | no | See section 4. |
-| `AI_CALLS_PER_DAY` | `800` | no | See section 4. Keep it below the provider's requests-per-day limit. |
+| `AI_CHAT_PER_HOUR` | `20` | no | See section 4. Unset = no limit. Whole numbers only. |
+| `AI_PLANS_PER_DAY` | `5` | no | See section 4. |
+| `AI_PLANNER_PER_HOUR` | `6` | no | See section 4. |
+| `AI_CALLS_PER_DAY` | `150` | no | See section 4. Sized for the shared free allowance of 10,000 neurons a day. |
 | `NITRO_PRESET` | `vercel` | no | Build target. Optional on Vercel, which sets `VERCEL=1`. |
 
 Leave these unset: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_STATE_SECRET`,
@@ -95,8 +114,8 @@ Connectors page says Google is not configured), `HUGGINGFACE_API_KEY`, `SUPABASE
 | `FRONTEND_ORIGIN` | `https://lifeops-ai.vercel.app` | no | For CORS. Only the web app's server calls the planner, so CORS is not used in practice. |
 | `LLM_BASE_URL` | same as the web app | no | |
 | `LLM_API_KEY` | same key | yes | |
-| `LLM_MODEL` | for example `llama-3.1-8b-instant` | no | The planner's model. |
-| `LLM_RESPONSE_FORMAT` | `json_object` | no | Plain JSON mode, for providers without schema support. |
+| `LLM_MODEL` | `@cf/zai-org/glm-4.7-flash` | no | The planner's model. |
+| `LLM_RESPONSE_FORMAT` | `none` | no | No `response_format` is sent; the plan is read from the first JSON object in the answer (section 2). Other values: `json_schema` (default), `json_object`. |
 | `LLM_TIMEOUT_SECONDS` | `45` | no | |
 | `LLM_MAX_TOKENS` | `1200` | no | |
 | `PLANNER_MODE` | `auto` | no | `keyword` always uses the keyword planner. Without a working model the planner falls back to it and the answer says "planner: demo". |
@@ -136,8 +155,24 @@ The rule: a request is allowed while the number of requests already stored in th
 limit, so a limit of 20 allows 20 and refuses the 21st. When a limit is reached the visitor gets a plain
 sentence, for example "You have reached this demo's limit of 20 chat messages per hour. Please try again
 later." or "This demo's AI allowance for today is used up. It starts again at midnight UTC. Please try
-again tomorrow." Nothing is stored for a refused request and the model is not called. The automatic
-first-visit briefing is never refused: it gives its rule-based answer instead.
+again tomorrow." A refused request is not stored and the model is not called. One exception: "Plan it"
+checks only the planner limits before it stores its planner request; when the planner service cannot be
+reached, the request falls back to a chat turn, and if the chat or daily limit refuses that turn, the
+planner request stays stored as failed with the limit sentence (and counts towards the planner and daily
+limits). The automatic briefing of a first visit is never refused: it gives its rule-based answer
+instead. A later briefing over the limit is refused like any other message.
+
+The values for the hosted demo (`AI_CHAT_PER_HOUR=20`, `AI_PLANS_PER_DAY=5`, `AI_PLANNER_PER_HOUR=6`,
+`AI_CALLS_PER_DAY=150`) are sized for Cloudflare's free 10,000 neurons a day, which the ai-scientist demo
+shares: a chat call of about 2,500 input and 200 output tokens costs about 21 neurons on glm-4.7-flash
+(2,500 x 5,500 / 1,000,000 + 200 x 36,400 / 1,000,000), and a week plan of about 3,000 input and 2,400
+output tokens about 105, so 150 chat calls are about 3,150 neurons. The caps do not guarantee the
+allowance: 150 week plans would be about 15,750 neurons, a call to the fallback model counts too, and the
+token counts are estimates, not measured on Workers AI. Watch the usage in the Cloudflare dashboard during
+the first days.
+
+The caps count stored rows and then store the new one without a lock, so requests sent at the same moment
+can pass a cap by a few.
 
 Other protection that does not need code: the 4,000-character message cap, the 1,500-character cap for
 plan instructions, Supabase's limit of 30 anonymous sign-ins per hour per IP, no billing on any of the
@@ -218,9 +253,10 @@ In Dashboard, Authentication:
 Steps marked OWNER need an account, a secret or a sign-in that only the owner can provide. The others can be
 done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has signed them in.
 
-1. OWNER: create a Groq account (or choose another provider), create an API key, and read the plan's terms and
-   limits in the console (requests per minute and per day, tokens per minute, whether a card is needed and
-   whether a public app is allowed). If it does not suit, change only `LLM_BASE_URL`, the models and the key.
+1. OWNER: in the Cloudflare account that already serves the ai-scientist demo (or a new free one), open
+   Workers AI, "Use REST API", copy the **Account ID** (it goes into `LLM_BASE_URL`) and create a **Workers AI
+   API token** with the permissions Workers AI Read and Workers AI Edit (it is `LLM_API_KEY`). Keep the token
+   out of chat and files; it is shown once.
 2. OWNER: create the Vercel account (Hobby plan, "Continue with GitHub") and sign in the CLI with
    `npx vercel@latest login`. Allow the Vercel GitHub App on this repository when it asks.
 3. OWNER: create the new Supabase project in Frankfurt and choose its database password (dashboard, or
@@ -242,16 +278,27 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
 10. OWNER: the secrets, without putting them in chat or in a file:
     - `SUPABASE_SECRET_KEY`: copy it from the dashboard (API keys), then
       `npx vercel@latest env add SUPABASE_SECRET_KEY production --sensitive` in the repository root.
-    - `LLM_API_KEY`: the same command in the repository root and again in `fastapi-backend`.
+    - `LLM_API_KEY` (the Workers AI API token): the same command in the repository root and again in
+      `fastapi-backend`.
     - `DATABASE_URL`: `npx vercel@latest env add DATABASE_URL production --sensitive` in `fastapi-backend`.
-    - `LIFEOPS_BACKEND_TOKEN`: one random value in three places. In PowerShell:
+    - `LIFEOPS_BACKEND_TOKEN`: one random value in three places. Do not pipe it (`$t | ...`): Windows
+      PowerShell 5.1 adds a line ending to a string it pipes into a program, so the copies could differ.
+      Pass it as an argument instead. In PowerShell, in the repository root:
       ```powershell
       $t = node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))"
-      $t | npx vercel@latest env add LIFEOPS_BACKEND_TOKEN production --sensitive
-      $t | npx vercel@latest env add LIFEOPS_BACKEND_TOKEN production --sensitive --cwd fastapi-backend
-      $t | gh secret set LIFEOPS_BACKEND_TOKEN -R OWNER/REPOSITORY
+      npx vercel@latest env add LIFEOPS_BACKEND_TOKEN --environment production --sensitive --value $t --yes
+      npx vercel@latest env add LIFEOPS_BACKEND_TOKEN --environment production --sensitive --value $t --yes --cwd fastapi-backend
+      gh secret set LIFEOPS_BACKEND_TOKEN --body $t -R OWNER/REPOSITORY
       Remove-Variable t
       ```
+      The token is base64url (letters, digits, `-` and `_`), so PowerShell passes it unchanged. `--value`,
+      `--environment`, `--yes` and the global `--cwd` are listed by `npx vercel@latest env add --help` and
+      `npx vercel@latest --help` (Vercel CLI 65.16.0, 14 Nov 2026); `--body` by `gh secret set --help`. Not yet
+      run. The value is visible in the process list while each command runs, which is acceptable on the
+      owner's own PC. Check afterwards that the copies match: the planner's `/api/dashboard` answers 401
+      without the token, and the web app's dashboard loads its planner section (a wrong copy gives "The
+      planner service rejected MONDAY's token"); the smoke workflow's `/api/dashboard` step checks the GitHub
+      copy.
 11. Deploy the planner first: `npx vercel@latest deploy --prod --cwd fastapi-backend`. Open its address: `/` should
     answer `status: ok`, `planner: llm`, `auth_required: true`. Fix `LIFEOPS_BACKEND_URL` if the address differs.
     Then deploy the web app: `npx vercel@latest deploy --prod` in the repository root. If the web app's address
@@ -274,8 +321,8 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
   dashboard still loads its planner section.
 - The planner's data survives a redeploy of the planner (earlier actions are still listed).
 - A second private window with another demo user sees none of the first user's chats, plans or planner rows.
-- The Vercel runtime logs of the web project show lines like `[llm] Groq MODEL: N prompt + M completion tokens in
-  X s`, and no "permission denied for table" or "Missing Supabase environment variable".
+- The Vercel runtime logs of the web project show lines like `[llm] Cloudflare Workers AI @cf/zai-org/glm-4.7-flash: N
+  prompt + M completion tokens in X s`, and no "permission denied for table" or "Missing Supabase environment variable".
 - With `AI_CHAT_PER_HOUR=20`, the 21st quick message from one demo user gets the limit sentence and no model call.
 
 ## 8. The daily smoke check
@@ -301,7 +348,8 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
   running after the browser disconnects; a request cut off that way stays "running" until the stale window
   (`LLM_TIMEOUT_MS` plus 2 minutes) has passed and then shows "did not finish".
 - Supabase free: 500 MB database, pauses after 7 days without database activity.
-- The provider's own limits apply per organisation and per model; the daily cap above should stay below them.
+- Cloudflare Workers AI free: 10,000 neurons a day for the whole account (shared with the ai-scientist demo),
+  no card; above it nothing runs until the next day. The caps in section 4 are sized for it (not yet run).
 
 ## 10. Common errors
 
@@ -311,8 +359,11 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
 - **The dashboard says the planner is stopped**: check `LIFEOPS_BACKEND_URL` and that the token is the same in
   both projects. After an idle period the first call can be slow; raise `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS`.
 - **"The planner service rejected MONDAY's token"**: `LIFEOPS_BACKEND_TOKEN` differs between the projects.
-- **"... rate limit reached"**: the provider's limit. The fallback model is tried first; the caps in section 4
-  keep the demo below the limit.
+- **"... rate limit reached"** or other refusals from Cloudflare Workers AI: a rate limit, or the account's
+  10,000 daily neurons are used up (possibly by the ai-scientist demo, which shares them). The fallback model
+  is tried after a 429, but it draws on the same allowance. Look at the usage in the Cloudflare dashboard;
+  lower the caps in section 4 if the allowance runs out early. Which status Workers AI sends for a used-up
+  allowance is not verified.
 - **A planner action is "not found" at Approve**: the planner is still on SQLite (no `DATABASE_URL`), so its data
   disappeared with an instance.
 - **Local build writes `dist/`, not `.vercel/output`**: set `NITRO_PRESET=vercel`; Vercel does it by itself.

@@ -108,7 +108,7 @@ The planner calls any OpenAI-compatible chat-completions API (settings in `.env`
 | `LLM_BASE_URL` | e.g. `http://localhost:11434/v1` (local Ollama), `https://router.huggingface.co/v1`, `https://api.openai.com/v1` |
 | `LLM_API_KEY` | key for hosted providers (any value for Ollama) |
 | `LLM_MODEL` | e.g. `llama3.1:8b` |
-| `LLM_RESPONSE_FORMAT` | `json_schema` (constrained output) or `json_object` |
+| `LLM_RESPONSE_FORMAT` | `json_schema` (constrained output), `json_object`, or `none` (no `response_format` sent; the first JSON object in the answer's text is used, as for Cloudflare Workers AI in the hosted demo) |
 | `LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS` | limits per call |
 
 If no LLM is configured (`LLM_BASE_URL` and `OPENAI_API_KEY` unset), or the model call fails or returns
