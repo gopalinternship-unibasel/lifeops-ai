@@ -22,6 +22,13 @@ describe("readCaps", () => {
     ).toEqual({ chatPerHour: 20, plansPerDay: 10, plannerPerHour: null, callsPerDay: 800 });
     expect(readCaps({ AI_CHAT_PER_HOUR: "0", AI_PLANS_PER_DAY: "-3", AI_PLANNER_PER_HOUR: "many" })).toEqual(NONE);
   });
+
+  it("accepts whole numbers only: trailing text, exponents and decimals are no limit", () => {
+    expect(
+      readCaps({ AI_CHAT_PER_HOUR: "20abc", AI_PLANS_PER_DAY: "1e3", AI_PLANNER_PER_HOUR: "2.5", AI_CALLS_PER_DAY: "+5" }),
+    ).toEqual(NONE);
+    expect(readCaps({ AI_CHAT_PER_HOUR: "0x10", AI_CALLS_PER_DAY: "150" })).toEqual({ ...NONE, callsPerDay: 150 });
+  });
 });
 
 describe("decideCap", () => {

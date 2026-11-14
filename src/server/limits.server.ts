@@ -39,12 +39,18 @@ type Env = Record<string, string | undefined>;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
+/** A whole number of 1 or more; anything else ("20abc", "1e3", "2.5", "-3") is no limit. */
 function capFrom(value: string | undefined): number | null {
-  const parsed = Number.parseInt((value ?? "").trim(), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  const text = (value ?? "").trim();
+  if (!/^\d+$/.test(text)) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-/** The limits that are switched on. A missing, empty or non-positive setting means no limit. */
+/**
+ * The limits that are switched on. A missing, empty, non-positive or not whole-number setting
+ * means no limit.
+ */
 export function readCaps(env: Env = process.env): AiCaps {
   return {
     chatPerHour: capFrom(env.AI_CHAT_PER_HOUR),
