@@ -11,6 +11,7 @@ import {
   listEventsForRange,
 } from "@/server/connectors/calendar.mock";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { enforceAiAllowance } from "@/server/limits.server";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import type { Json } from "@/integrations/supabase/types";
 import { getErrorMessage, isRecord } from "@/lib/errors";
@@ -92,6 +93,8 @@ async function runWeekPlanRequest(
   if (running?.status === "running") {
     throw new Error("A plan for this week is still being drafted. It appears on this page when it is ready.");
   }
+  // Demo limits (off unless the AI_* settings are set): refuse before a request row is stored.
+  await enforceAiAllowance(supabaseAdmin, userId, "plan");
   const { data: created, error: createError } = await supabase
     .from("week_plan_requests")
     .insert({ user_id: userId, week_start: monday, kind, instructions: instructions?.slice(0, 1500) ?? null })

@@ -22,6 +22,8 @@ function LoginPage() {
   const demoEnabled = import.meta.env.VITE_ENABLE_ANONYMOUS_DEMO === "true";
   // Supabase "Sign in with Google" needs the Google provider enabled in Supabase Auth.
   const googleSignInEnabled = import.meta.env.VITE_ENABLE_GOOGLE_SIGNIN === "true";
+  // The public hosted demo: tell visitors where their messages go (VITE_HOSTED_DEMO=true).
+  const hostedDemo = import.meta.env.VITE_HOSTED_DEMO === "true";
   // While this page drives navigation itself (sign-up → onboarding), do not also redirect
   // to /app when the new session appears; that race used to skip profile onboarding.
   const navigatingRef = useRef(false);
@@ -137,6 +139,12 @@ function LoginPage() {
           <p className="mt-2 text-sm text-muted-foreground">
             {mode === "signin" ? "Welcome back. Pick up where you left off." : "Start running your day in under a minute."}
           </p>
+
+          {hostedDemo && (
+            <p className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+              Demo with demo data only. Your messages go to a hosted AI provider, so do not enter personal information.
+            </p>
+          )}
 
           {demoEnabled && (
             <button

@@ -9,6 +9,7 @@ export default tseslint.config(
     ignores: [
       "dist",
       ".output",
+      ".vercel",
       ".vinxi",
       "node_modules",
       "src/routeTree.gen.ts",

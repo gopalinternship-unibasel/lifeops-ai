@@ -15,6 +15,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, resolveLLMConfig, type AITool } from "@/server/ai/llm.server";
+import { checkAiAllowance } from "@/server/limits.server";
 import { briefingCoversInbox, buildRuleBasedBriefing, checkPriorityReasons } from "@/server/ai/briefing-fallback.server";
 import { listRecentMessages, listUnreadMessages, type GmailMsg } from "@/server/google/gmail.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
@@ -282,6 +283,12 @@ export async function runChatTurn(
   const { sessionId, message } = data;
   const timeZone = normalizeTimeZone(data.timeZone);
 
+  // Demo limits (off unless the AI_* settings are set). A refused message is not stored. The
+  // automatic first-visit briefing is never refused: it falls back to its rule-based answer.
+  const allowance = await checkAiAllowance(supabaseAdmin, userId, "chat");
+  const limitMessage = allowance.allowed ? undefined : allowance.message;
+  if (limitMessage && !data.briefing) throw new Error(limitMessage);
+
   // 1. Verify the session belongs to the authenticated user, then persist.
   const { data: ownedSession, error: sessionError } = await supabase
     .from("chat_sessions")
@@ -300,7 +307,7 @@ export async function runChatTurn(
   // From here on the turn always ends with a stored assistant message, so a page that was
   // reloaded meanwhile sees either the answer or the error, never a request that seems to run on.
   try {
-    return await answerChatTurn(context, data, timeZone);
+    return await answerChatTurn(context, data, timeZone, limitMessage);
   } catch (error: unknown) {
     await storeFailedTurn(userId, sessionId, error);
     throw error;
@@ -330,6 +337,7 @@ async function answerChatTurn(
   context: { supabase: UserClient; userId: string },
   data: ChatTurnInput,
   timeZone: string,
+  limitMessage?: string,
 ): Promise<{ reply: string; panel: PanelPayload }> {
   const { supabase, userId } = context;
   const { sessionId } = data;
@@ -544,6 +552,7 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
       reason,
     });
   try {
+    if (limitMessage) throw new Error(limitMessage);
     const aiResp = await callAI({
       role: "chat",
       messages: messagesPayload,

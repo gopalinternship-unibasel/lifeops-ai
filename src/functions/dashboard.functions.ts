@@ -10,6 +10,7 @@ import { withoutHandledCards } from "@/lib/panel-state";
 import { planRequestView, type PlanRequestResult, type PlanRequestView } from "@/lib/plan-request";
 import { cardIdsOfPanel, listCardStates } from "@/server/chat-cards.server";
 import { ensureChatSessionFor, maxChatTurnMs, runChatTurn } from "@/server/chat-turn.server";
+import { enforceAiAllowance } from "@/server/limits.server";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
@@ -164,6 +165,8 @@ export const runChaosPlan = createServerFn({ method: "POST" })
   .handler(async ({ context, data }): Promise<{ request: PlanRequestView }> => {
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
+    // Demo limits (off unless the AI_* settings are set): refuse before a request row is stored.
+    await enforceAiAllowance(supabaseAdmin, userId, "planner");
     const { data: row, error: insertError } = await supabase
       .from("planner_requests")
       .insert({ user_id: userId, input: data.input, status: "running" })
