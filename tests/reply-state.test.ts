@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { replyStateOf } from "@/lib/reply-state";
 import { planRequestView } from "@/lib/plan-request";
-import { isFailedTurn, maxChatTurnMs, upcomingDates } from "@/server/chat-turn.server";
+import {
+  isFailedTurn,
+  maxChatTurnMs,
+  refusesOverLimit,
+  upcomingDates,
+} from "@/server/chat-turn.server";
 
 const now = Date.parse("2026-11-09T18:00:00Z");
 const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
@@ -92,5 +97,29 @@ describe("calendar dates in the chat prompt", () => {
     expect(upcomingDates("Europe/Zurich", 3)).toBe("Tuesday 2026-11-10 (today), Wednesday 2026-11-11 (tomorrow), Thursday 2026-11-12");
     expect(upcomingDates("UTC", 1)).toBe("Monday 2026-11-09 (today)");
     vi.useRealTimers();
+  });
+});
+
+describe("a chat turn over the demo limit", () => {
+  const failed = { role: "assistant", panel_payload: { failed: true } };
+
+  it("is refused before its message is stored, unless it is the first visit's briefing", () => {
+    expect(refusesOverLimit({ briefing: false, earlierMessages: [] })).toBe(true);
+    expect(refusesOverLimit({ earlierMessages: [] })).toBe(true);
+    expect(refusesOverLimit({ briefing: true, earlierMessages: [] })).toBe(false);
+    // Failed turns do not count: the briefing is still the first visit's.
+    expect(refusesOverLimit({ briefing: true, earlierMessages: [failed] })).toBe(false);
+  });
+
+  it("refuses a briefing that is not the first visit's", () => {
+    expect(
+      refusesOverLimit({ briefing: true, earlierMessages: [{ role: "user", panel_payload: null }] }),
+    ).toBe(true);
+    expect(
+      refusesOverLimit({
+        briefing: true,
+        earlierMessages: [failed, { role: "assistant", panel_payload: {} }],
+      }),
+    ).toBe(true);
   });
 });

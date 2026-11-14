@@ -79,6 +79,19 @@ export function isFailedTurn(message: { role: string; panel_payload?: unknown })
   return message.role === "assistant" && isRecord(message.panel_payload) && message.panel_payload.failed === true;
 }
 
+/**
+ * Whether a chat turn over the demo limit is refused before its message is stored. Only the
+ * automatic briefing of a first visit (no earlier message in the session apart from failed
+ * turns, the same rule answerChatTurn uses for "first") goes ahead: it has a rule-based answer.
+ */
+export function refusesOverLimit(input: {
+  briefing?: boolean;
+  earlierMessages: Array<{ role: string; panel_payload?: unknown }>;
+}): boolean {
+  if (!input.briefing) return true;
+  return input.earlierMessages.some((message) => !isFailedTurn(message));
+}
+
 /* ============================================================
  * LLM tool schema
  * ============================================================ */
@@ -298,6 +311,21 @@ export async function runChatTurn(
     .maybeSingle();
   if (sessionError) throw sessionError;
   if (!ownedSession) throw new Response("Chat session not found", { status: 404 });
+
+  if (limitMessage) {
+    // A briefing over the limit: only the first visit's briefing has a fallback. Any other one
+    // is refused here, before its message is stored (it would only fail after that).
+    const { data: earlier, error: earlierError } = await supabase
+      .from("chat_messages")
+      .select("role, panel_payload")
+      .eq("session_id", sessionId)
+      .order("created_at", { ascending: false })
+      .limit(40);
+    if (earlierError) throw earlierError;
+    if (refusesOverLimit({ briefing: data.briefing, earlierMessages: earlier ?? [] })) {
+      throw new Error(limitMessage);
+    }
+  }
 
   const { error: insertMessageError } = await supabase.from("chat_messages").insert({
     session_id: sessionId, user_id: userId, role: "user", content: message,
