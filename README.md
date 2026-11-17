@@ -1,5 +1,9 @@
 # MONDAY — LifeOps AI
 
+**Live demo:** <https://lifeops-ai-sigma.vercel.app> ("Try the live demo" signs you in without an
+account; demo inbox and calendar, Cloudflare Workers AI on its free daily allowance). How it is
+hosted: [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md).
+
 MONDAY is a TanStack Start full-stack application (the July 2026 rework of the Bobathon LifeOps AI
 project) combining:
 

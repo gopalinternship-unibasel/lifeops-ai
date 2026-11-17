@@ -1,9 +1,44 @@
 # Deploying MONDAY (LifeOps AI) to Vercel
 
-This describes the hosted setup the code is prepared for. Nothing here has been deployed yet: the
-build, the tests and the migrations were checked on a PC, the live steps were not. Items that are
-not verified are marked "Not verified" or "not yet run". The AI provider (Cloudflare Workers AI) has not
-been called from this code yet.
+This describes the hosted setup. It was deployed on 17 Nov 2026; section 0 says what is live and
+what differed from the plan in the sections after it. Items in the later sections that are still
+marked "Not verified" or "not yet run" were written before the deployment; section 0 is the newer
+statement where the two differ.
+
+## 0. What is live (17 Nov 2026)
+
+| Part                 | Address                               | State                                                                                                                                                                                                                                                                            |
+| -------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Web app              | <https://lifeops-ai-sigma.vercel.app> | Vercel project `lifeops-ai`, region fra1 (from the root `vercel.json`). The plain name `lifeops-ai.vercel.app` belongs to someone else's project.                                                                                                                                |
+| Planner              | <https://lifeops-planner.vercel.app>  | Vercel project `lifeops-planner`, framework preset FastAPI, region fra1. `/api/*` answers 401 without the token.                                                                                                                                                                 |
+| Database and sign-in | Supabase project in Frankfurt         | 13 migrations, the clean-up job, the planner role and schema. Site URL and redirect URLs point at the web address above.                                                                                                                                                         |
+| AI                   | Cloudflare Workers AI                 | Web app: `@cf/zai-org/glm-4.7-flash`, fallback `@cf/google/gemma-4-26b-a4b-it`, `LLM_STRUCTURED_OUTPUT=tools_required`. Planner: `@cf/google/gemma-4-26b-a4b-it` with `LLM_RESPONSE_FORMAT=none`. Both send `LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thinking":false}}`. |
+
+Checked on the live site that day, as an anonymous demo visitor in a browser: the first-visit
+briefing (it fell back to the list built from the data, with its notice), a chat request that
+produced a calendar card and saved it, a week plan in under 30 seconds, and "Plan it" on the
+dashboard through the planner service (planned by the AI model, approve and run wrote the block to
+the calendar). The smoke workflow passes, including its real planner call.
+
+What the deployment taught, beyond the plan below:
+
+- **Thinking must be off.** Both Cloudflare models think before they answer. A short structured
+  answer took 3 to 6 seconds with thinking and about 1.2 seconds without. `reasoning_effort` did not
+  shorten it; the request field `chat_template_kwargs: {"enable_thinking": false}` did, hence
+  `LLM_EXTRA_BODY`.
+- **Plain JSON needs the right model.** Without tools, glm-4.7-flash spent its whole token budget
+  thinking and returned no text, so the planner (which asks for plain JSON) uses gemma-4.
+- **Tool calls:** both models returned a correct call with `tool_choice: "required"`. With a named
+  function glm-4.7-flash answered in its own text format, so `tools_required` is the mode to use.
+- **The Vercel CLI does not read `.gitignore`.** The root `.vercelignore` names what stays out of
+  the upload, with a leading slash on every folder: without it `supabase/` also excluded
+  `src/integrations/supabase/` and the build failed.
+- **TanStack Start had to be upgraded** to 1.168.61: Vercel refuses to deploy the earlier version
+  because of a cross-site scripting advisory.
+- **Linking:** `vercel link` adds `.env*` to `.gitignore` and writes `.env.local`; the first was
+  undone, the planner folder got its own small `.gitignore`.
+- The planner's startup hook does create its tables on Vercel, and the planner role does connect
+  through the Supabase session pooler with its own schema.
 
 ## 1. What runs where
 
@@ -12,7 +47,7 @@ been called from this code yet.
 | Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root             | One function for server rendering and server functions, static files from the CDN. Node 22.x.                                                                                                                     |
 | Planner (FastAPI)               | Vercel project `lifeops-planner`, root directory = `fastapi-backend`      | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it.                                                                                                                      |
 | Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
-| AI model                        | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. Not yet run against the API. See section 2.                                                                                                                                   |
+| AI model                        | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. In use since 17 Nov 2026; see section 0 and section 2.                                                                                                                        |
 | Monitoring                      | GitHub Actions workflow `smoke.yml`                                       | Once a day.                                                                                                                                                                                                       |
 
 The web app is a full-stack app. It is not a static site: do not set an Output Directory and do not add
@@ -111,10 +146,10 @@ Connectors page says Google is not configured), `HUGGINGFACE_API_KEY`, `SUPABASE
 | `ENV`                     | `production`                                                                                          | no     | Turns off SQL logging.                                                                                                                                               |
 | `DATABASE_URL`            | `postgresql+psycopg://lifeops_planner.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require` | yes    | Supabase session pooler, planner role. `postgres://` and `postgresql://` are also accepted.                                                                          |
 | `DATABASE_SCHEMA`         | `planner`                                                                                             | no     | Optional. Every connection puts this schema first on its `search_path`. The role already has the same default, so this is a second safeguard. The schema must exist. |
-| `FRONTEND_ORIGIN`         | `https://lifeops-ai.vercel.app`                                                                       | no     | For CORS. Only the web app's server calls the planner, so CORS is not used in practice.                                                                              |
+| `FRONTEND_ORIGIN`         | `https://lifeops-ai-sigma.vercel.app`                                                                 | no     | For CORS. Only the web app's server calls the planner, so CORS is not used in practice.                                                                              |
 | `LLM_BASE_URL`            | same as the web app                                                                                   | no     |                                                                                                                                                                      |
 | `LLM_API_KEY`             | same key                                                                                              | yes    |                                                                                                                                                                      |
-| `LLM_MODEL`               | `@cf/zai-org/glm-4.7-flash`                                                                           | no     | The planner's model.                                                                                                                                                 |
+| `LLM_MODEL`               | `@cf/google/gemma-4-26b-a4b-it`                                                                       | no     | The planner's model.                                                                                                                                                 |
 | `LLM_RESPONSE_FORMAT`     | `none`                                                                                                | no     | No `response_format` is sent; the plan is read from the first JSON object in the answer (section 2). Other values: `json_schema` (default), `json_object`.           |
 | `LLM_TIMEOUT_SECONDS`     | `45`                                                                                                  | no     |                                                                                                                                                                      |
 | `LLM_MAX_TOKENS`          | `1200`                                                                                                | no     |                                                                                                                                                                      |
@@ -131,7 +166,7 @@ so it can sit behind Supabase's pooler. On a cold start it creates its four tabl
 
 | Name                       | Kind     | Value                                                       |
 | -------------------------- | -------- | ----------------------------------------------------------- |
-| `WEB_URL`                  | variable | `https://lifeops-ai.vercel.app`                             |
+| `WEB_URL`                  | variable | `https://lifeops-ai-sigma.vercel.app`                       |
 | `PLANNER_URL`              | variable | `https://lifeops-planner.vercel.app`                        |
 | `SUPABASE_URL`             | variable | `https://PROJECT_REF.supabase.co`                           |
 | `SUPABASE_PUBLISHABLE_KEY` | variable | the publishable key (not secret; every browser receives it) |
@@ -240,8 +275,8 @@ does not, set `DATABASE_SCHEMA=planner` (already in the table above), or use the
 
 In Dashboard, Authentication:
 
-- Site URL: `https://lifeops-ai.vercel.app`
-- Redirect URLs: `https://lifeops-ai.vercel.app/**` and `http://localhost:5190/**`
+- Site URL: `https://lifeops-ai-sigma.vercel.app`
+- Redirect URLs: `https://lifeops-ai-sigma.vercel.app/**` and `http://localhost:5190/**`
 - Anonymous sign-ins: on (rate limit 30 per hour per IP)
 - Email sign-up: on, with "Confirm email" off. Supabase's built-in email sender delivers only to team
   members, 2 messages per hour, so confirmation cannot work for the public. The consequence is that anyone
@@ -302,14 +337,14 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
 11. Deploy the planner first: `npx vercel@latest deploy --prod --cwd fastapi-backend`. Open its address: `/` should
     answer `status: ok`, `planner: llm`, `auth_required: true`. Fix `LIFEOPS_BACKEND_URL` if the address differs.
     Then deploy the web app: `npx vercel@latest deploy --prod` in the repository root. If the web app's address
-    differs from `lifeops-ai.vercel.app`, repeat step 6 with the real one and update `FRONTEND_ORIGIN`.
+    differs from `lifeops-ai-sigma.vercel.app`, repeat step 6 with the real one and update `FRONTEND_ORIGIN`.
 12. Set the four repository variables of section 3.3 and run the smoke workflow once:
     `gh workflow run smoke.yml`, then `gh run watch`.
 13. Check the live app (section 7).
 
 ## 7. Checks after the first deploy
 
-- `curl -sI https://lifeops-ai.vercel.app/login` answers 200. The planner's `/` answers `status ok`,
+- `curl -sI https://lifeops-ai-sigma.vercel.app/login` answers 200. The planner's `/` answers `status ok`,
   `planner llm`. `/api/dashboard` on the planner without the token answers 401.
 - In a private window, "Try the live demo" signs in, `/app` loads, and the first-visit briefing arrives within
   seconds and does not say "Ranked by simple rules".
