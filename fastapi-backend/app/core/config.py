@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # models): the prompt asks for JSON and the planner takes the first JSON object from the text.
     # Any other value is treated as "json_schema".
     llm_response_format: str = "json_schema"
+    # Optional JSON object added to every model request, for switches only one provider knows.
+    # On Cloudflare Workers AI {"chat_template_kwargs":{"enable_thinking":false}} turns the
+    # model's thinking off, which makes answers several times faster.
+    llm_extra_body: str | None = None
     # "auto" = use the LLM when one is configured; "keyword" = always the keyword demo planner.
     planner_mode: str = "auto"
 

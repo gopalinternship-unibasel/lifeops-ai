@@ -222,6 +222,18 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
     return PlannerOutput(summary=summary, tasks=tasks, actions=actions, execution_order=order), notes
 
 
+def _extra_body() -> dict[str, Any] | None:
+    """LLM_EXTRA_BODY as a dict, or None when it is unset or not a JSON object."""
+    text = (settings.llm_extra_body or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _response_format() -> dict[str, Any] | None:
     """The response_format of the request, or None to send none (LLM_RESPONSE_FORMAT=none)."""
     mode = (settings.llm_response_format or "").strip().lower()
@@ -290,6 +302,9 @@ def create_plan(
         # With LLM_RESPONSE_FORMAT=none the key is left out; the prompt asks for JSON and
         # _extract_json reads it from the text.
         extra: dict[str, Any] = {"response_format": response_format} if response_format else {}
+        extra_body = _extra_body()
+        if extra_body:
+            extra["extra_body"] = extra_body
         response = client.chat.completions.create(
             model=model,
             messages=[

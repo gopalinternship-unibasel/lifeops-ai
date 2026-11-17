@@ -28,6 +28,11 @@ import { isRecord } from "@/lib/errors";
  *   LLM_STRUCTURED_OUTPUT=json_schema  → `response_format: json_schema` (constrained decoding);
  *                                        the JSON answer is returned in the same tool-call shape.
  * Callers always read `choices[0].message.tool_calls[0].function.arguments`.
+ *
+ * LLM_EXTRA_BODY: optional JSON object whose fields are added to every request, for switches only
+ * one provider knows. On Cloudflare Workers AI `{"chat_template_kwargs":{"enable_thinking":false}}`
+ * turns the model's thinking off (measured 17 Nov 2026: about 1.2 s instead of 3 to 6 s for a short
+ * answer). The app's own fields (model, messages, tools, ...) are never overwritten by it.
  */
 
 export const HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1";
@@ -50,6 +55,20 @@ export interface LLMConfig {
   maxTokens: number;
   temperature: number;
   structuredOutput: StructuredOutputMode;
+  /** Extra request-body fields for every call (LLM_EXTRA_BODY). */
+  extraBody?: Record<string, unknown> | null;
+}
+
+/** LLM_EXTRA_BODY: a JSON object, or null when unset or not an object. */
+export function parseExtraBody(value: string | undefined): Record<string, unknown> | null {
+  const text = value?.trim();
+  if (!text) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 class HttpStatusError extends Error {
@@ -211,6 +230,7 @@ export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env)
     temperature: Number.isFinite(temperature) ? temperature : 0.4,
     structuredOutput:
       structured === "json_schema" || structured === "tools_required" ? structured : "tools",
+    extraBody: parseExtraBody(envValue(env, "LLM_EXTRA_BODY")),
   };
 }
 
@@ -312,6 +332,8 @@ export function buildRequestBody(opts: {
   toolChoice?: ToolChoice;
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
+    // Provider-specific extras come first, so the app's own fields below always win.
+    ...(opts.config.extraBody ?? {}),
     model: opts.model,
     messages: opts.messages,
     temperature: opts.config.temperature,

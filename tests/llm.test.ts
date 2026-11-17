@@ -420,3 +420,52 @@ describe("providerName", () => {
     expect(providerName("https://api.groq.com.example.org/v1")).toBe("the AI provider");
   });
 });
+
+describe("LLM_EXTRA_BODY", () => {
+  const messages = [{ role: "user" as const, content: "hi" }];
+
+  it("adds its fields to the request and never overwrites the app's own", () => {
+    const config = resolveLLMConfig("chat", {
+      LLM_EXTRA_BODY:
+        '{"chat_template_kwargs":{"enable_thinking":false},"model":"other","max_tokens":1}',
+    });
+    expect(config.extraBody).toEqual({
+      chat_template_kwargs: { enable_thinking: false },
+      model: "other",
+      max_tokens: 1,
+    });
+    const body = buildRequestBody({ config, model: "m", messages });
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(body.model).toBe("m");
+    expect(body.max_tokens).toBe(config.maxTokens);
+  });
+
+  it("is ignored when unset or not a JSON object", () => {
+    for (const value of [undefined, "", "  ", "not json", "[1,2]", '"text"']) {
+      const config = resolveLLMConfig("chat", { LLM_EXTRA_BODY: value });
+      expect(config.extraBody).toBeNull();
+      const body = buildRequestBody({ config, model: "m", messages });
+      expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "temperature"]);
+    }
+  });
+
+  it("reaches a forced tool call in tools_required mode too", () => {
+    const config = resolveLLMConfig("chat", {
+      LLM_STRUCTURED_OUTPUT: "tools_required",
+      LLM_EXTRA_BODY: '{"chat_template_kwargs":{"enable_thinking":false}}',
+    });
+    const tool: AITool = {
+      type: "function",
+      function: { name: "respond", description: "Answer", parameters: { type: "object" } },
+    };
+    const body = buildRequestBody({
+      config,
+      model: "m",
+      messages,
+      tools: [tool],
+      toolChoice: { type: "function", function: { name: "respond" } },
+    });
+    expect(body.tool_choice).toBe("required");
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+  });
+});

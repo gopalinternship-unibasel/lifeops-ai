@@ -409,3 +409,19 @@ def test_recipient_is_kept_only_if_the_user_wrote_it():
     assert recipient_from_user("Samantha", text) is None
     assert recipient_from_user("a", text) is None
     assert recipient_from_user("  ", text) is None
+
+
+def test_extra_body_setting_is_passed_to_the_model_request(client, fake_llm, use_settings):
+    fake_llm.answer = json.dumps({"summary": "ok", "tasks": [{"title": "One thing"}], "actions": []})
+    use_settings(llm_extra_body='{"chat_template_kwargs": {"enable_thinking": false}}')
+    plan = make_plan(client, text="one thing")
+    assert plan["planner"] == "llm"
+    assert fake_llm.calls[-1]["request"]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_extra_body_is_left_out_when_unset_or_not_a_json_object(client, fake_llm, use_settings):
+    fake_llm.answer = json.dumps({"summary": "ok", "tasks": [{"title": "One thing"}], "actions": []})
+    for value in (None, "", "   ", "not json", "[1, 2]", '"text"'):
+        use_settings(llm_extra_body=value)
+        make_plan(client, text="one thing")
+        assert "extra_body" not in fake_llm.calls[-1]["request"], value
