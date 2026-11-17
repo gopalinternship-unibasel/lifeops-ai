@@ -1,0 +1,19 @@
+# What is left out of the upload when the web app is deployed with the Vercel CLI.
+# The CLI does not read .gitignore, and its own list does not skip .env, so everything that is
+# not needed to build the web app is named here. The planner in fastapi-backend/ is its own
+# Vercel project with its own .vercelignore.
+fastapi-backend/
+ollama/
+tests/
+scripts/
+supabase/
+dist/
+.run/
+.tanstack/
+.local-test-user.json
+.local-test-user*.json
+*.db
+.env
+.env.*
+!.env.example
+AUDIT_*.md
