@@ -273,6 +273,22 @@ export function resolveRefs(text: string, refs: ReplyRefs): { text: string; remo
   return { text: result.text.replace(idPattern, (id) => known(id) ?? id), removed: result.removed };
 }
 
+/**
+ * The server's own card lines (cardConfirmations). The model copies them from its earlier replies
+ * in the chat history (live, 19 Nov 2026: an empty "Proposed for your calendar:" block before the
+ * real one). Only the server writes them, from the validated cards, so the model's copies go.
+ */
+const SERVER_CARD_BLOCK = /^[ \t]*Proposed for your calendar:.*(?:\n[ \t]*(?:[-*•]|\d+[.)])\s.*)*/gim;
+const SERVER_CARD_SENTENCES: RegExp[] = [
+  /\bNothing (?:is saved|changes|is cancell?ed) until you click\b/i,
+  /^[^\p{L}\d]*Ready to (?:move|rename|cancel) \*\*/iu,
+];
+export function removeServerLines(text: string): { text: string; removed: number } {
+  const withoutBlocks = (text ?? "").replace(SERVER_CARD_BLOCK, "");
+  const result = removeSentences(withoutBlocks, (sentence) => SERVER_CARD_SENTENCES.some((re) => re.test(sentence)));
+  return { text: result.text, removed: result.removed + (withoutBlocks === (text ?? "") ? 0 : 1) };
+}
+
 /** The whole reply when the model's text said only that something was done, and nothing was. */
 export const NOTHING_PREPARED =
   "The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.";
@@ -320,9 +336,10 @@ export function composeReply(opts: {
   const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
   // A weekday that is not its date's ("Thursday 2026-11-14") is wrong either way: drop it.
   const year = opts.year ?? new Date().getUTCFullYear();
-  const weekdays = removeSentences(resolved.text, (sentence) => hasWrongWeekday(sentence, year));
+  const serverLines = removeServerLines(resolved.text);
+  const weekdays = removeSentences(serverLines.text, (sentence) => hasWrongWeekday(sentence, year));
   const claims = removeActionClaims(weekdays.text, opts.actionRequest ?? false);
-  claims.removed += weekdays.removed;
+  claims.removed += weekdays.removed + serverLines.removed;
   const calendarTurn = opts.pendingEvents.length > 0 || opts.pendingEventChanges.length > 0 || Boolean(opts.changeNote);
 
   let modelText = claims.text;
