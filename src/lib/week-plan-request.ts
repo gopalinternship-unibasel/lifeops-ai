@@ -46,6 +46,37 @@ export function weekPlanRequestView(row: WeekPlanRequestRow, nowMs: number, maxR
   };
 }
 
+/** The banner the plan page shows for the newest request of the week, if any. */
+export type PlanRequestBanner = "running" | "interrupted" | "failed" | null;
+
+/**
+ * Which banner to show. A failed or cut-off request shows until the visitor closes it (`hidden`)
+ * or a later request replaces it as the newest one (a later success shows no banner). While the
+ * page waits for its own draft, the older outcome is not shown, so it does not read as this
+ * attempt's.
+ */
+export function planRequestBanner(
+  request: WeekPlanRequestView | null,
+  opts: { loading: boolean; waitingHere: boolean; hidden: ReadonlySet<string> },
+): PlanRequestBanner {
+  if (opts.loading || !request) return null;
+  if (request.status === "running") return "running";
+  if (opts.waitingHere || opts.hidden.has(request.id)) return null;
+  return request.status === "failed" || request.status === "interrupted" ? request.status : null;
+}
+
+/**
+ * After a draft call failed: true when the server stored no request for it (a refusal such as a
+ * limit, a draft already running or the AI not being set up). The newest request is then still
+ * the one from before, so its old failure is hidden and the reason is told in the chat instead.
+ */
+export function refusalStoredNoRequest(
+  previousRequestId: string | null,
+  latest: WeekPlanRequestView | null,
+): boolean {
+  return !latest || latest.id === previousRequestId;
+}
+
 /**
  * When a request started, for the banners: "3:14 PM" today, otherwise with the date
  * ("Mon, Nov 23, 3:14 PM"), so an old failure does not read as if it had just happened.

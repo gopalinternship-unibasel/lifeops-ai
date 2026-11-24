@@ -15,6 +15,8 @@ const h = vi.hoisted(() => {
   // "<table>:<op>" -> the error object PostgREST would return.
   const failures = new Map<string, unknown>();
   const upserts: { table: string; payload: Row }[] = [];
+  // Per table, delays (ms) for its next updates, one per update, so that two calls can overlap.
+  const updateDelays = new Map<string, number[]>();
   let seq = 0;
   const nextId = (prefix: string) => `${prefix}-${String(++seq).padStart(4, "0")}`;
 
@@ -38,8 +40,32 @@ const h = vi.hoisted(() => {
             : {}),
           ...payload,
         };
+        // The database package's partial unique index: one running request per user and week.
+        if (
+          table === "week_plan_requests" &&
+          row.status === "running" &&
+          rows().some(
+            (other) =>
+              other.status === "running" &&
+              other.user_id === row.user_id &&
+              other.week_start === row.week_start,
+          )
+        ) {
+          return {
+            data: null,
+            error: {
+              code: "23505",
+              message:
+                'duplicate key value violates unique constraint "week_plan_requests_one_running"',
+            },
+          };
+        }
         tables.set(table, [...rows(), row]);
         return { data: [{ ...row }], error: null };
+      }
+      if (op === "update") {
+        const delay = updateDelays.get(table)?.shift();
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
       }
       let matched = rows().filter((row) => filters.every((test) => test(row)));
       if (op === "update") {
@@ -131,6 +157,10 @@ const h = vi.hoisted(() => {
       source: string;
     }[],
     writeDelayMs: 0,
+    // Per write, in order: the delay and the id of the next events (else writeDelayMs and the
+    // next sequential id). Real event ids are random, so a later write can get a smaller id.
+    writeDelays: [] as number[],
+    ids: [] as string[],
     failReads: false,
   };
 
@@ -138,6 +168,7 @@ const h = vi.hoisted(() => {
     tables,
     failures,
     upserts,
+    updateDelays,
     calendar,
     nextId,
     client: { from },
@@ -145,8 +176,11 @@ const h = vi.hoisted(() => {
       tables.clear();
       failures.clear();
       upserts.length = 0;
+      updateDelays.clear();
       calendar.events.length = 0;
       calendar.writeDelayMs = 0;
+      calendar.writeDelays.length = 0;
+      calendar.ids.length = 0;
       calendar.failReads = false;
       seq = 0;
     },
@@ -215,10 +249,11 @@ vi.mock("@/server/connectors/calendar.mock", () => ({
         source?: string;
       },
     ) => {
-      if (h.calendar.writeDelayMs > 0)
-        await new Promise((resolve) => setTimeout(resolve, h.calendar.writeDelayMs));
+      const delay = h.calendar.writeDelays.shift() ?? h.calendar.writeDelayMs;
+      const id = h.calendar.ids.shift() ?? h.nextId("ev");
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       const event = {
-        id: h.nextId("ev"),
+        id,
         title: input.title,
         starts_at: input.starts_at,
         ends_at: input.ends_at,
@@ -484,6 +519,48 @@ describe("a refinement keeps the saved plan when the model's answer is not usabl
     await expect(generate({ weekStart: MONDAY })).rejects.toThrow(/had no plan items/);
     expect(h.upserts).toHaveLength(0);
   });
+
+  it("seven empty days for a refinement that did not ask to clear anything are refused", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({}), "Updated your plan."));
+
+    await expect(refine("Make the week a bit lighter")).rejects.toThrow(
+      /would have removed every remaining item from your plan without adding any, so your plan was not changed/,
+    );
+
+    expect(storedPlan()).toEqual(savedPlan());
+    expect(h.upserts).toHaveLength(0);
+    expect(requests()[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("a refinement that asks to clear the week may remove every remaining item", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({}), "Cleared the rest of your week."));
+
+    const result = await refine("Clear the rest of the week, I'm travelling");
+
+    const plan = storedPlan();
+    // Monday is over and stays; Tuesday to Sunday had only items still ahead.
+    expect(plan.days[0]).toEqual(savedPlan().days[0]);
+    expect(plan.days.slice(1).every((day) => day.items.length === 0)).toBe(true);
+    expect(result.reply).toBe("Cleared the rest of your week.");
+  });
+
+  it("a refinement that empties some days but keeps others is accepted", async () => {
+    storePlan(savedPlan());
+    // Only Saturday and Sunday come back, empty: the weekdays stay as they were.
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: SAT, items: [] },
+        { date: SUN, items: [] },
+      ]),
+    );
+    await refine("Keep the weekend open");
+    const plan = storedPlan();
+    expect(plan.days[5].items).toEqual([]);
+    expect(plan.days[6].items).toEqual([]);
+    expect(plan.days[4]).toEqual(savedPlan().days[4]);
+  });
 });
 
 describe("a regeneration keeps the saved plan where its answer is partial (finding 8)", () => {
@@ -661,6 +738,139 @@ describe("plan quality checks (finding 90)", () => {
     expect(storedPlan().days[5].items.map((item) => item.title)).toEqual(["Cook a new recipe"]);
   });
 
+  it("a second deep-work block next to an approved one is not a repeat (the plan's own events do not count)", async () => {
+    const plan = savedPlan();
+    plan.days[2].items = [
+      { emoji: "🎯", title: "Deep work", starts_at: at(WED, 9), ends_at: at(WED, 11), notes: null },
+    ];
+    storePlan(plan);
+    // Wednesday's item was approved: it is a calendar event titled "🎯 Deep work".
+    h.calendar.events.push({
+      id: "ev-wed",
+      title: "🎯 Deep work",
+      starts_at: at(WED, 9),
+      ends_at: at(WED, 11),
+      notes: null,
+      source: "plan",
+    });
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        {
+          date: WED,
+          items: [
+            { emoji: "🎯", title: "Deep work", start: "09:00", end: "11:00" },
+            { emoji: "🎯", title: "Deep work", start: "14:00", end: "16:00" },
+          ],
+        },
+      ]),
+    );
+
+    const result = await refine("Add a second deep work block on Wednesday afternoon");
+
+    const wednesday = storedPlan().days[2].items;
+    expect(wednesday.map((item) => [item.title, item.starts_at])).toEqual([
+      ["Deep work", at(WED, 9)],
+      ["Deep work", at(WED, 14)],
+    ]);
+    expect(result.reply).toBe("Here you go.");
+  });
+
+  it("an item that names an activity of its own stays next to a one-word or seeded event", async () => {
+    h.calendar.events.push(
+      {
+        id: "ev-meeting",
+        title: "Meeting",
+        starts_at: at(WED, 10),
+        ends_at: at(WED, 11),
+        notes: null,
+        source: "calendar",
+      },
+      {
+        id: "ev-lecture",
+        title: "Lecture — Distributed Systems",
+        starts_at: at(WED, 13),
+        ends_at: at(WED, 15),
+        notes: null,
+        source: "seed",
+      },
+      {
+        id: "ev-work",
+        title: "Work",
+        starts_at: at(THU, 9),
+        ends_at: at(THU, 12),
+        notes: null,
+        source: "calendar",
+      },
+    );
+    mockedCallAI.mockResolvedValue(
+      answerDays(
+        week({
+          [WED]: [
+            { emoji: "🎯", title: "Prep for meeting", start: "09:00", end: "09:45" },
+            { emoji: "📚", title: "Review distributed systems lecture", start: "16:00", end: "17:00" },
+          ],
+          [THU]: [{ emoji: "🎯", title: "Deep work", start: "14:00", end: "16:00" }],
+        }),
+      ),
+    );
+
+    const result = await generate({ weekStart: MONDAY });
+
+    expect(storedPlan().days[2].items.map((item) => item.title)).toEqual([
+      "Prep for meeting",
+      "Review distributed systems lecture",
+    ]);
+    expect(storedPlan().days[3].items.map((item) => item.title)).toEqual(["Deep work"]);
+    expect(result.reply).toBe("Here you go.");
+  });
+
+  it("when every suggestion repeats a busy event, the refusal says so instead of 'free time'", async () => {
+    h.calendar.events.push({
+      id: "ev-run",
+      title: "Run",
+      starts_at: at(WED, 7),
+      ends_at: at(WED, 8),
+      notes: null,
+      source: "calendar",
+    });
+    mockedCallAI.mockResolvedValue(
+      answerDays(week({ [WED]: [{ emoji: "🏃", title: "Evening run", start: "18:00", end: "19:00" }] })),
+    );
+
+    const error = await generate({ weekStart: MONDAY }).catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe(
+      "The AI's only suggestion could not be used (it repeated an event already in your calendar), so your plan was not changed. Please try again.",
+    );
+    expect(h.upserts).toHaveLength(0);
+  });
+
+  it("the left-out note names the reasons that applied", async () => {
+    h.calendar.events.push({
+      id: "ev-run",
+      title: "Run",
+      starts_at: at(WED, 7),
+      ends_at: at(WED, 8),
+      notes: null,
+      source: "calendar",
+    });
+    mockedCallAI.mockResolvedValue(
+      answerDays(
+        week({
+          [WED]: [
+            { emoji: "🏃", title: "Evening run", start: "18:00", end: "19:00" },
+            { emoji: "🏃", title: "Short run", start: "19:30", end: "20:00" },
+            { emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" },
+          ],
+        }),
+      ),
+    );
+    const result = await generate({ weekStart: MONDAY });
+    expect(result.reply).toBe(
+      "Here you go. 2 suggested items were left out because they repeated events already in your calendar.",
+    );
+  });
+
   it("the prompt asks for meal windows, no repeats of busy events and true headlines", async () => {
     mockedCallAI.mockResolvedValue(
       answerDays(week({ [WED]: [{ emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" }] })),
@@ -806,6 +1016,50 @@ describe("one running request per week (finding 11)", () => {
     await generate({ weekStart: MONDAY });
     expect(requests().find((row) => row.id === "r-old")).toMatchObject({ status: "failed" });
     expect(requests().filter((row) => row.status === "done")).toHaveLength(1);
+  });
+
+  // Older code never closed cut-off rows: a server restart followed by a retry that worked left
+  // a "running" row under a newer finished one. The fake insert refuses a second running row of
+  // the week (23505), as the database package's partial unique index does.
+  function requestRow(id: string, status: string, ageMs: number): Row {
+    return {
+      id,
+      user_id: USER,
+      week_start: MONDAY,
+      kind: "create",
+      status,
+      reply: status === "done" ? "Here you go." : null,
+      error: null,
+      created_at: new Date(NOW.getTime() - ageMs).toISOString(),
+      finished_at: status === "running" ? null : new Date(NOW.getTime() - ageMs + 30_000).toISOString(),
+    };
+  }
+
+  it("a cut-off request under a newer finished one is closed too, so the week is not blocked", async () => {
+    h.tables.set("week_plan_requests", [
+      requestRow("r-cut-off", "running", 3 * 3_600_000),
+      requestRow("r-retry", "done", 2 * 3_600_000),
+    ]);
+    mockedCallAI.mockResolvedValue(
+      answerDays(week({ [WED]: [{ emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" }] })),
+    );
+
+    const result = await generate({ weekStart: MONDAY });
+
+    expect(result.request).toMatchObject({ status: "done" });
+    expect(requests().find((row) => row.id === "r-cut-off")).toMatchObject({ status: "failed" });
+    expect(requests().filter((row) => row.status === "running")).toHaveLength(0);
+    expect(mockedCallAI).toHaveBeenCalledTimes(1);
+  });
+
+  it("a request that may still be running under a newer finished one is left alone and answered as running", async () => {
+    h.tables.set("week_plan_requests", [
+      requestRow("r-recent", "running", 60_000),
+      requestRow("r-done", "done", 30_000),
+    ]);
+    await expect(generate({ weekStart: MONDAY })).rejects.toThrow(/still being drafted/);
+    expect(requests().find((row) => row.id === "r-recent")).toMatchObject({ status: "running" });
+    expect(mockedCallAI).not.toHaveBeenCalled();
   });
 });
 
@@ -1017,6 +1271,28 @@ describe("two approvals at the same time (findings 58, 39)", () => {
     expect(planEvents).toHaveLength(6);
     const ids = h.tables.get("weekly_plans")?.[0]?.approved_event_ids as string[];
     expect([...ids].sort()).toEqual(planEvents.map((event) => event.id).sort());
+  });
+
+  it("the recorded ids never name the copy that the other approval removed", async () => {
+    storePlan(savedPlan());
+    // Approval A writes its copy first (id "ev-z"), reads the calendar before B's copy exists
+    // and saves its ids late. Approval B writes "ev-a" later, sees both copies, keeps the
+    // smaller id and removes A's copy, then saves its ids first.
+    h.calendar.ids.push("ev-z", "ev-a");
+    h.calendar.writeDelays.push(5, 30);
+    h.updateDelays.set("weekly_plans", [80]);
+
+    const [first, second] = await Promise.all([
+      approve({ dayDate: WED }),
+      approve({ dayDate: WED }),
+    ]);
+
+    expect(h.calendar.events.map((event) => event.id)).toEqual(["ev-a"]);
+    expect(h.tables.get("weekly_plans")?.[0]?.approved_event_ids).toEqual(["ev-a"]);
+    // Together they report the one event once.
+    expect(Number(first.created) + Number(second.created)).toBe(1);
+    expect(first).toMatchObject({ created: 0, skipped: 1, eventIds: [] });
+    expect(second).toMatchObject({ created: 1, eventIds: ["ev-a"] });
   });
 
   it("a later approval of the same day adds nothing and keeps the recorded ids", async () => {

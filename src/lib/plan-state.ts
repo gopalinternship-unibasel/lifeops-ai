@@ -6,6 +6,7 @@
  * the calendar itself, so it is right after a reload, in another tab and after a restart.
  */
 import type { BusyEvent, WeekPlan } from "@/types/plan";
+import type { WeekPlanRequestView } from "@/lib/week-plan-request";
 
 export interface PlanCalendarState {
   /** Per date: indexes of the items that are in the calendar. */
@@ -235,6 +236,135 @@ export function editedItemTimes(
     return d.toISOString();
   };
   return { starts_at: merge(item.starts_at, start), ends_at: merge(item.ends_at, end) };
+}
+
+/**
+ * What the plan page waits for while a draft runs. The hosted sites use a hosted AI service that
+ * answers in about half a minute; only a local run may use a model on the same computer.
+ */
+export function draftingWaitText(hosted: boolean): string {
+  return hosted ? "This usually takes under a minute." : "A local AI model can take several minutes.";
+}
+
+/* ------------------------------------------------------------------------------------------ *
+ * The plan page's view of the week on screen, as a reducer, so that switching weeks, late
+ * answers and reloads can be tested without a browser.
+ * ------------------------------------------------------------------------------------------ */
+
+/** The server's view of a week, as fetchWeekPlan, a draft or a refinement returns it. */
+export interface PlanServerState {
+  plan: WeekPlan | null;
+  busyEvents?: BusyEvent[];
+  addedItems?: Record<string, number[]>;
+  approvedDates?: string[];
+  calendarError?: string | null;
+  /** Left out (undefined) when the answer does not say; null when the week has no request. */
+  request?: WeekPlanRequestView | null;
+}
+
+export interface PlanWeekView {
+  /** The week (its Monday) this view belongs to. */
+  week: string;
+  /** The newest load of the week; answers of older loads are ignored. */
+  loadSeq: number;
+  loading: boolean;
+  /** Loading the week failed: the plan is unknown, so the page shows this with Retry. */
+  loadError: string | null;
+  plan: WeekPlan | null;
+  busyEvents: BusyEvent[];
+  addedItems: Record<string, number[]>;
+  approvedDates: Set<string>;
+  /** The plan loaded but the calendar did not: approving waits until it loads. */
+  calendarError: string | null;
+  request: WeekPlanRequestView | null;
+  /**
+   * Bumped whenever a plan comes from the server. The page keys the week grid with it, so a time
+   * editor left open when a refinement lands starts again from the new plan (finding 7).
+   */
+  version: number;
+}
+
+export type PlanWeekAction =
+  | { type: "load-started"; week: string; seq: number }
+  | { type: "loaded"; seq: number; state: PlanServerState }
+  | { type: "load-failed"; seq: number; message: string }
+  /** A plan for `week` from a draft, a refinement, a poll or an approval. */
+  | { type: "server-state"; week: string; state: PlanServerState }
+  /** A draft starts: shown as running until the server answers. */
+  | { type: "request-started"; week: string; request: WeekPlanRequestView }
+  /** A time edit, shown before the server confirms it. */
+  | { type: "item-times"; week: string; date: string; index: number; starts_at: string; ends_at: string }
+  /** The server refused a time edit: back to the plan from before, unless a newer one came since. */
+  | { type: "plan-restored"; week: string; version: number; plan: WeekPlan | null };
+
+export function initialPlanWeekView(week: string): PlanWeekView {
+  return {
+    week,
+    loadSeq: 0,
+    loading: true,
+    loadError: null,
+    plan: null,
+    busyEvents: [],
+    addedItems: {},
+    approvedDates: new Set(),
+    calendarError: null,
+    request: null,
+    version: 0,
+  };
+}
+
+function withServerState(view: PlanWeekView, state: PlanServerState): PlanWeekView {
+  return {
+    ...view,
+    plan: state.plan ?? null,
+    busyEvents: state.busyEvents ?? [],
+    addedItems: state.addedItems ?? {},
+    approvedDates: new Set(state.approvedDates ?? []),
+    calendarError: state.calendarError ?? null,
+    loadError: null,
+    request: state.request !== undefined ? state.request : view.request,
+    version: view.version + 1,
+  };
+}
+
+export function planWeekReducer(view: PlanWeekView, action: PlanWeekAction): PlanWeekView {
+  switch (action.type) {
+    case "load-started":
+      // Nothing of the week shown before stays: when a load failed, the previous week's plan
+      // stayed on screen under the new week's heading, and its buttons acted on the new week.
+      return { ...initialPlanWeekView(action.week), loadSeq: action.seq, version: view.version };
+    case "loaded":
+      // An answer for a week the page has left (or an older load of this one) is dropped.
+      if (action.seq !== view.loadSeq) return view;
+      return { ...withServerState(view, action.state), loading: false };
+    case "load-failed":
+      if (action.seq !== view.loadSeq) return view;
+      return { ...view, loading: false, loadError: action.message };
+    case "server-state":
+      // A draft can take minutes: when it returns, the page may show another week.
+      if (action.week !== view.week) return view;
+      return withServerState(view, action.state);
+    case "request-started":
+      if (action.week !== view.week) return view;
+      return { ...view, request: action.request };
+    case "item-times": {
+      if (action.week !== view.week || !view.plan) return view;
+      const days = view.plan.days.map((day) =>
+        day.date !== action.date
+          ? day
+          : {
+              ...day,
+              items: day.items.map((item, index) =>
+                index === action.index ? { ...item, starts_at: action.starts_at, ends_at: action.ends_at } : item,
+              ),
+            },
+      );
+      return { ...view, plan: { ...view.plan, days } };
+    }
+    case "plan-restored":
+      if (action.week !== view.week || action.version !== view.version) return view;
+      return { ...view, plan: action.plan };
+  }
 }
 
 /** YYYY-MM-DD plus `days` (calendar arithmetic, independent of time zones). */

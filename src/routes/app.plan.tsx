@@ -1,22 +1,25 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Sparkles, Loader2, X as XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatComposer } from "@/components/workspace/ChatComposer";
 import { PlanWeekGrid } from "@/components/plan/PlanWeekGrid";
 import { fetchWeekPlan, generateWeekPlan, refineWeekPlan, approveWeekPlan, updatePlanItem } from "@/functions/plan.functions";
-import type { WeekPlan, BusyEvent } from "@/types/plan";
 import { toast } from "sonner";
 import { formatLocalDate, getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
-import { formatRequestTime, type WeekPlanRequestView } from "@/lib/week-plan-request";
+import { formatRequestTime, planRequestBanner, refusalStoredNoRequest } from "@/lib/week-plan-request";
 import {
   NO_PLAN_YET_REPLY,
   WEEK_OVER_REPLY,
+  draftingWaitText,
+  initialPlanWeekView,
   parseApproveCommand,
   planCreateInstructions,
   planDayStatus,
+  planWeekReducer,
   weekIsOver,
+  type PlanServerState,
 } from "@/lib/plan-state";
 
 /** How often the page checks a plan that is still being drafted on the server. */
@@ -66,11 +69,13 @@ function saveDismissedRequest(id: string) {
 function PlanPage() {
   const [monday, setMonday] = useState<string>(() => startOfWeekMondayISO(new Date()));
   const timeZone = useMemo(() => getBrowserTimeZone(), []);
-  const [plan, setPlan] = useState<WeekPlan | null>(null);
-  const [busyEvents, setBusyEvents] = useState<BusyEvent[]>([]);
-  // Both come from the server (which plan items are in the calendar), so they survive a reload.
-  const [approvedDates, setApprovedDates] = useState<Set<string>>(new Set());
-  const [addedItems, setAddedItems] = useState<Record<string, number[]>>({});
+  // The shown week as the server last described it: the plan, its calendar events, which items
+  // are in the calendar (from the server, so it survives a reload), the newest plan request (a
+  // draft still running, started before a reload or in another tab, shows as "Drafting…"), and
+  // whether loading it or its calendar failed. Week switches, late answers and reloads go
+  // through planWeekReducer (src/lib/plan-state.ts), which the tests cover.
+  const [view, dispatch] = useReducer(planWeekReducer, monday, initialPlanWeekView);
+  const { plan, busyEvents, approvedDates, addedItems, loading, loadError, calendarError, request } = view;
   const [messages, setMessages] = useState<ChatTurn[]>([]);
   // The week this page is waiting for a draft of (the call that started it has not returned).
   const [busyWeek, setBusyWeek] = useState<string | null>(null);
@@ -78,24 +83,14 @@ function PlanPage() {
   const [approving, setApproving] = useState<string | null>(null);
   // Set at once, unlike state: a second click in the same moment must not start a second approval.
   const approvingNow = useRef(false);
-  const [loading, setLoading] = useState(true);
-  // Loading the week failed: shown instead of the plan (which is unknown), with Retry.
-  const [loadError, setLoadError] = useState<string | null>(null);
-  // The plan loaded but the calendar did not: approving waits until it loads.
-  const [calendarError, setCalendarError] = useState<string | null>(null);
   // Bumped to load the shown week again ("This week" while on this week, Retry).
   const [reloadTick, setReloadTick] = useState(0);
-  // Bumped whenever a plan comes from the server, so open time editors start again from it.
-  const [planVersion, setPlanVersion] = useState(0);
   const lastWeekFetched = useRef<string | null>(null);
   const loadSeq = useRef(0);
   // The week on screen now. A draft can take minutes; when it returns, the user may be looking
-  // at another week, and that week must not be overwritten with this one's plan.
+  // at another week (the reducer also ignores a plan for another week).
   const shownWeek = useRef(monday);
   shownWeek.current = monday;
-  // The newest plan request of the shown week, as stored on the server: a draft that is still
-  // running (started before a reload, or in another tab) shows as "Drafting…" until it is done.
-  const [request, setRequest] = useState<WeekPlanRequestView | null>(null);
   // Requests whose reply or error this page has already shown.
   const announced = useRef<Set<string>>(new Set());
   // Requests whose failure banner is not shown: closed by the visitor, or an older failure that a
@@ -121,47 +116,22 @@ function PlanPage() {
     if (lastWeekFetched.current === loadKey) return;
     lastWeekFetched.current = loadKey;
     const seq = ++loadSeq.current;
-    setLoading(true);
-    // Nothing of the week shown before stays: when this load failed, the previous week's plan
-    // stayed on screen under the new week's heading, and its buttons acted on the new week.
-    setPlan(null);
-    setBusyEvents([]);
-    setApprovedDates(new Set());
-    setAddedItems({});
-    setRequest(null);
-    setLoadError(null);
-    setCalendarError(null);
+    // Clears everything of the week shown before (see planWeekReducer).
+    dispatch({ type: "load-started", week: monday, seq });
     fetchWeekPlan({ data: { weekStart: monday, timeZone } } as Parameters<typeof fetchWeekPlan>[0])
       .then((r: Awaited<ReturnType<typeof fetchWeekPlan>>) => {
-        if (loadSeq.current === seq) applyPlanState(r);
+        dispatch({ type: "loaded", seq, state: r });
       })
       .catch((error: unknown) => {
         if (loadSeq.current !== seq) return;
         lastWeekFetched.current = null;
-        setLoadError(getErrorMessage(error, "Please try again in a moment."));
-      })
-      .finally(() => {
-        if (loadSeq.current === seq) setLoading(false);
+        dispatch({ type: "load-failed", seq, message: getErrorMessage(error, "Please try again in a moment.") });
       });
   }, [monday, timeZone, reloadTick]);
 
   /** Plan, calendar events and which items are already in the calendar, as the server sees them. */
-  function applyPlanState(r: {
-    plan: WeekPlan | null;
-    busyEvents?: BusyEvent[];
-    addedItems?: Record<string, number[]>;
-    approvedDates?: string[];
-    calendarError?: string | null;
-    request?: WeekPlanRequestView | null;
-  }) {
-    setPlan(r.plan ?? null);
-    setPlanVersion((version) => version + 1);
-    setBusyEvents(r.busyEvents ?? []);
-    setAddedItems(r.addedItems ?? {});
-    setApprovedDates(new Set(r.approvedDates ?? []));
-    setCalendarError(r.calendarError ?? null);
-    setLoadError(null);
-    if (r.request !== undefined) setRequest(r.request);
+  function applyPlanState(week: string, r: PlanServerState) {
+    dispatch({ type: "server-state", week, state: r });
   }
 
   // A draft that runs on the server without this page waiting for it (the page was reloaded or
@@ -179,7 +149,7 @@ function PlanPage() {
           draftPoll.current = setTimeout(check, DRAFT_POLL_MS);
           return;
         }
-        applyPlanState(r);
+        applyPlanState(monday, r);
         const outcome = r.request;
         if (outcome && outcome.id === waitingFor && !announced.current.has(outcome.id)) {
           announced.current.add(outcome.id);
@@ -230,8 +200,8 @@ function PlanPage() {
     try {
       const r = await fetchWeekPlan({ data: { weekStart: week, timeZone } } as Parameters<typeof fetchWeekPlan>[0]);
       if (shownWeek.current !== week) return;
-      applyPlanState(r);
-      if (!r.request || r.request.id === previousRequestId) {
+      applyPlanState(week, r);
+      if (refusalStoredNoRequest(previousRequestId, r.request)) {
         if (previousRequestId) setHiddenRequests((current) => new Set([...current, previousRequestId]));
         say(message);
       }
@@ -241,13 +211,13 @@ function PlanPage() {
   };
 
   /** The plan that came back belongs to `week`; show it only if that week is still on screen. */
-  const showDraft = (week: string, r: Parameters<typeof applyPlanState>[0] & { reply: string }) => {
+  const showDraft = (week: string, r: PlanServerState & { reply: string }) => {
     if (r.request) announced.current.add(r.request.id);
     if (shownWeek.current !== week) {
       toast.success(`The plan for the week of ${fmtWeek(week)} is ready.`);
       return;
     }
-    applyPlanState(r);
+    applyPlanState(week, r);
     setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: r.reply }]);
   };
 
@@ -261,7 +231,11 @@ function PlanPage() {
     const week = monday;
     const previousRequestId = request?.id ?? null;
     setBusyWeek(week);
-    setRequest({ id: "pending", kind: "create", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
+    dispatch({
+      type: "request-started",
+      week,
+      request: { id: "pending", kind: "create", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null },
+    });
     try {
       const r = await generateWeekPlan(
         { data: { weekStart: week, instructions, timeZone } } as Parameters<
@@ -315,7 +289,11 @@ function PlanPage() {
     const week = monday;
     const previousRequestId = request?.id ?? null;
     setBusyWeek(week);
-    setRequest({ id: "pending", kind: "refine", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null });
+    dispatch({
+      type: "request-started",
+      week,
+      request: { id: "pending", kind: "refine", status: "running", startedAt: new Date().toISOString(), finishedAt: null, reply: null, error: null },
+    });
     try {
       const r = await refineWeekPlan(
         { data: { weekStart: week, message: text, timeZone } } as Parameters<
@@ -343,7 +321,7 @@ function PlanPage() {
     const refresh = async () => {
       try {
         const r = await fetchWeekPlan({ data: { weekStart: week, timeZone } } as Parameters<typeof fetchWeekPlan>[0]);
-        if (shownWeek.current === week) applyPlanState(r);
+        applyPlanState(week, r);
       } catch {
         /* the toast still reports the approval */
       }
@@ -389,8 +367,9 @@ function PlanPage() {
     ? ["I have a meeting from 5 to 6 so plan the hike till 4", "Make weekday mornings deep work", "Approve all", "Approve Saturday"]
     : ["Please create this week's plan for me"];
 
-  const failedShown = request?.status === "failed" && !hiddenRequests.has(request.id);
-  const interruptedShown = request?.status === "interrupted" && !hiddenRequests.has(request.id);
+  const banner = planRequestBanner(request, { loading, waitingHere: busyWeek === monday, hidden: hiddenRequests });
+  // The newest reply of MONDAY, for screen readers (see the live region below).
+  const latestReply = [...messages].reverse().find((m) => m.role === "assistant");
 
   return (
     <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
@@ -457,7 +436,7 @@ function PlanPage() {
       </div>
 
       {/* A draft still running on the server, or the last one that did not finish */}
-      {!loading && request?.status === "running" && (
+      {banner === "running" && request && (
         <div className="rounded-xl border border-border bg-card/60 px-4 py-3 text-sm flex items-center gap-2" data-testid="plan-drafting">
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />
           <span>
@@ -466,7 +445,7 @@ function PlanPage() {
           </span>
         </div>
       )}
-      {!loading && busyWeek !== monday && interruptedShown && request && (
+      {banner === "interrupted" && request && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm flex items-start justify-between gap-3" data-testid="plan-interrupted">
           <span>
             The plan request started {formatRequestTime(request.startedAt)} did not finish: it was cut off, for example by a server restart.
@@ -475,7 +454,7 @@ function PlanPage() {
           <DismissButton onClick={() => dismissRequest(request.id)} />
         </div>
       )}
-      {!loading && busyWeek !== monday && failedShown && request && (
+      {banner === "failed" && request && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm flex items-start justify-between gap-3" data-testid="plan-failed">
           <span>
             The plan request from {formatRequestTime(request.startedAt)} failed: {request.error}
@@ -511,7 +490,7 @@ function PlanPage() {
           <Loader2 className="h-6 w-6 mx-auto mb-3 animate-spin text-muted-foreground" />
           <h2 className="text-lg font-serif">MONDAY is drafting this week's plan…</h2>
           <p className="text-sm text-muted-foreground mt-1.5 max-w-md mx-auto">
-            {HOSTED_DEMO ? "This usually takes under a minute." : "A local AI model can take several minutes."} Nothing is
+            {draftingWaitText(HOSTED_DEMO)} Nothing is
             added to your calendar until you approve it.
           </p>
         </div>
@@ -533,7 +512,7 @@ function PlanPage() {
       ) : (
         <PlanWeekGrid
           // A plan from the server (a refinement, a reload) starts any open time editor afresh.
-          key={planVersion}
+          key={view.version}
           plan={plan}
           busyEvents={busyEvents}
           approvedDates={approvedDates}
@@ -542,20 +521,19 @@ function PlanPage() {
           approving={approving}
           approveDisabled={drafting || !!calendarError}
           onItemTimeChange={async (date, idx, starts_at, ends_at) => {
+            const week = monday;
             const previousPlan = plan;
-            setPlan((prev) => {
-              if (!prev) return prev;
-              return { ...prev, days: prev.days.map(d => d.date === date ? { ...d, items: d.items.map((it, i) => i === idx ? { ...it, starts_at, ends_at } : it) } : d) };
-            });
+            const version = view.version;
+            dispatch({ type: "item-times", week, date, index: idx, starts_at, ends_at });
             try {
               await updatePlanItem(
                 {
-                  data: { weekStart: monday, dayDate: date, itemIndex: idx, starts_at, ends_at, timeZone },
+                  data: { weekStart: week, dayDate: date, itemIndex: idx, starts_at, ends_at, timeZone },
                 } as Parameters<typeof updatePlanItem>[0],
               );
               toast.success("Time updated");
             } catch (e: unknown) {
-              setPlan(previousPlan);
+              dispatch({ type: "plan-restored", week, version, plan: previousPlan });
               toast.error(getErrorMessage(e, "Could not update time"));
               throw e;
             }
@@ -563,10 +541,17 @@ function PlanPage() {
         />
       )}
 
+      {/* MONDAY's newest reply for screen readers. The region is always there, so the first reply
+          is announced too (a region that appears together with its text often is not), and the
+          visitor's own messages are not read back to them. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {/* Keyed by message, so two replies with the same text are both announced. */}
+        {latestReply && <p key={latestReply.id}>{latestReply.content}</p>}
+      </div>
+
       {/* Recent messages */}
       {messages.length > 0 && (
-        // Screen readers announce MONDAY's replies (a new plan, an approval summary) as they arrive.
-        <div className="rounded-xl border border-border bg-card/60 p-4 max-w-3xl mx-auto w-full space-y-3" aria-live="polite">
+        <div className="rounded-xl border border-border bg-card/60 p-4 max-w-3xl mx-auto w-full space-y-3">
           {messages.slice(-6).map((m) => (
             <div key={m.id} className={`text-sm ${m.role === "user" ? "text-foreground" : "text-foreground/80"}`}>
               <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mr-2">

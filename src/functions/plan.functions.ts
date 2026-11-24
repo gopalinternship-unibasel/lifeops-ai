@@ -75,6 +75,8 @@ const CUT_OFF_ANSWER =
 const NO_ITEMS_ANSWER = "The AI's answer had no plan items, so your plan was not changed. Please try again.";
 const NO_FITTING_ITEMS =
   "None of the AI's suggestions fit your free time, so your plan was not changed. Please try again.";
+const EMPTIED_PLAN_ANSWER =
+  "The AI's answer would have removed every remaining item from your plan without adding any, so your plan was not changed. If you meant to clear it, say so, for example “remove everything” or “clear the rest of the week”.";
 const DEFAULT_REPLY = "Here's your week plan — review it and type 'approve' to add it to your calendar.";
 
 // Developer wording in a failure: addresses, commands and setting names, for example "Could not
@@ -154,7 +156,8 @@ async function latestWeekPlanRequest(supabase: UserSupabaseClient, userId: strin
 /**
  * A request still marked running after the longest time one can take was cut off (the server
  * stopped). Only one request per week may be running (a unique index on running rows), so such a
- * row would block every new request of that week: mark it failed first.
+ * row would block every new request of that week: mark it failed first. A single filtered update
+ * that changes nothing when no row is cut off.
  */
 async function closeInterruptedRequests(userId: string, monday: string): Promise<void> {
   const nowMs = Date.now();
@@ -225,11 +228,15 @@ async function runWeekPlanRequest(
   }
   const latest = await latestWeekPlanRequest(supabase, userId, monday);
   if (latest?.status === "running") throw publicError(STILL_DRAFTING);
-  if (latest?.status === "interrupted") await closeInterruptedRequests(userId, monday);
   // Demo limits (off unless the AI_* settings are set): a request over the limit is refused
   // before a request row is stored. One use is recorded right before the model call (draft).
   const allowance = await checkAiAllowance(supabaseAdmin, userId, "plan");
   if (!allowance.allowed) throw publicError(allowance.message);
+  // Cut-off rows are closed before every new request, not only when the newest row is one. Older
+  // code never closed them, so a week can hold a cut-off "running" row under a newer finished
+  // one (a retry that worked after a server restart); the unique index on running rows would
+  // then refuse every new request of that week while the page shows nothing running.
+  await closeInterruptedRequests(userId, monday);
   const { data: created, error: createError } = await supabase
     .from("week_plan_requests")
     .insert({ user_id: userId, week_start: monday, kind, instructions: instructions?.slice(0, 1500) ?? null })
@@ -573,20 +580,64 @@ function activityWords(title: string): Set<string> {
 }
 
 /**
- * True when an item repeats a busy event of its day: all activity words of one title are in
- * the other ("Morning run" next to "Run", "Team demo walkthrough" next to "Team sync — demo
- * walkthrough"). Busy events are already in the calendar; the plan must not add them again.
+ * True when an item repeats a busy event of its day: every activity word of the item's title is
+ * in the event's title ("Morning run" next to "Run", "Team demo walkthrough" next to "Team sync —
+ * demo walkthrough"). Busy events are already in the calendar; the plan must not add them again.
+ * An item that names an activity of its own is new, so the check goes one way only: "Prep for
+ * meeting" next to "Meeting", "Review distributed systems lecture" next to "Lecture — Distributed
+ * Systems" and "Deep work" next to "Work" all stay. `busy` holds no items of this plan (see
+ * callPlanAI), so a second deep-work block next to an approved one is not a repeat either.
  */
 function repeatsBusyEvent(title: string, busy: PlanCalendarEvent[]): boolean {
   const words = activityWords(title);
   if (words.size === 0) return false;
   return busy.some((event) => {
     const other = activityWords(event.title);
-    if (other.size === 0) return false;
-    const [smaller, larger] = words.size <= other.size ? [words, other] : [other, words];
-    return [...smaller].every((word) => larger.has(word));
+    return [...words].every((word) => other.has(word));
   });
 }
+
+/** Why suggested items were left out, counted per reason. */
+interface Rejections {
+  /** No usable times, under 20 minutes, outside the free time or over another item. */
+  fit: number;
+  /** The same activity as a busy event of the day. */
+  repeat: number;
+  /** A meal outside its window. */
+  meal: number;
+}
+
+const REJECTION_PHRASES: Record<keyof Rejections, [singular: string, plural: string]> = {
+  fit: ["did not fit your free time", "did not fit your free time"],
+  repeat: ["repeated an event already in your calendar", "repeated events already in your calendar"],
+  meal: ["put a meal outside its usual time", "put meals outside their usual times"],
+};
+
+/** "did not fit your free time or repeated events already in your calendar". */
+function rejectionText(rejected: Rejections, plural: boolean): string {
+  const parts = (Object.keys(REJECTION_PHRASES) as (keyof Rejections)[])
+    .filter((reason) => rejected[reason] > 0)
+    .map((reason) => REJECTION_PHRASES[reason][plural ? 1 : 0]);
+  if (parts.length <= 1) return parts[0] ?? REJECTION_PHRASES.fit[0];
+  return `${parts.slice(0, -1).join(", ")} or ${parts[parts.length - 1]}`;
+}
+
+/**
+ * The refusal when no suggestion passed the checks. It names the real reason: "did not fit your
+ * free time" was also said when every suggestion repeated a busy event.
+ */
+function noUsableSuggestionsMessage(rejected: Rejections, suggested: number): string {
+  if (rejected.repeat === 0 && rejected.meal === 0) return NO_FITTING_ITEMS;
+  return suggested === 1
+    ? `The AI's only suggestion could not be used (it ${rejectionText(rejected, false)}), so your plan was not changed. Please try again.`
+    : `None of the AI's suggestions could be used (they ${rejectionText(rejected, true)}), so your plan was not changed. Please try again.`;
+}
+
+// A refinement that asks to clear or remove items: an answer that removes every remaining item
+// is then what was asked for. Words such as "free" or "off" are left out on purpose ("add a run
+// in my free time" does not ask to empty the plan).
+const CLEAR_REQUEST_RE =
+  /\b(clear|remove|delete|drop|cancel|empty|erase|wipe|scrap|skip|nothing|get rid|take out|no (plans?|items?|activities))\b/i;
 
 /** Local times (minutes after midnight) in which a meal may start. */
 const MEAL_WINDOWS: { pattern: RegExp; from: number; to: number; label: string }[] = [
@@ -641,6 +692,16 @@ async function callPlanAI(opts: {
   const addedItems = currentPlan ? planCalendarState(currentPlan, opts.events, opts.nowMs).addedItems : {};
   const isKept = (date: string, item: WeekPlanItem, index: number) =>
     (addedItems[date] ?? []).includes(index) || toMs(item.starts_at) < opts.nowMs;
+  // Calendar events that are items of this plan (approved before) are left out of the repeat
+  // check: the user may ask for a second deep-work block next to an approved one, and that
+  // suggestion was dropped as a "repeat" of the plan's own event.
+  const planItemKeys = new Set(
+    (currentPlan?.days ?? []).flatMap((day) =>
+      day.items.map((item) => eventFingerprint(planItemEventTitle(item), item.starts_at, item.ends_at)),
+    ),
+  );
+  const isPlanItemEvent = (event: PlanCalendarEvent) =>
+    planItemKeys.has(eventFingerprint(event.title, event.starts_at, event.ends_at));
 
   const ctx = opts.days
     .map(d => {
@@ -756,6 +817,7 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
 
   let suggested = 0;
   let accepted = 0;
+  const rejected: Rejections = { fit: 0, repeat: 0, meal: 0 };
   const days: WeekPlanDay[] = opts.days.map((slot) => {
     const current = currentPlan?.days.find((day) => day.date === slot.date) ?? null;
     const raw = byDate.get(slot.date);
@@ -766,10 +828,12 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
 
     const kept = current ? current.items.filter((item, index) => isKept(slot.date, item, index)) : [];
     const items: WeekPlanItem[] = [...kept];
+    const otherBusy = slot.busy.filter((event) => !isPlanItemEvent(event));
     const rawItems = !slot.past && raw && Array.isArray(raw.items) ? raw.items : [];
     for (const candidateItem of rawItems) {
       if (!isRecord(candidateItem)) {
         suggested++;
+        rejected.fit++;
         continue;
       }
       const title = candidateItem.title;
@@ -779,14 +843,26 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
       // The model repeating an item that is kept anyway is neither new nor a rejected suggestion.
       if (times && typeof title === "string" && kept.some((item) => sameItem(item, title, times.startsAt, times.endsAt))) continue;
       suggested++;
-      if (!times || typeof title !== "string") continue;
       // At least 20 minutes, entirely inside one free slot, and no overlap with other items.
-      if (toMs(times.endsAt) - toMs(times.startsAt) < 20 * 60 * 1000) continue;
-      if (!fitsInFreeSlot(times.startsAt, times.endsAt, slot.free)) continue;
-      if (findConflicts({ starts_at: times.startsAt, ends_at: times.endsAt }, items).length > 0) continue;
+      if (
+        !times ||
+        typeof title !== "string" ||
+        toMs(times.endsAt) - toMs(times.startsAt) < 20 * 60 * 1000 ||
+        !fitsInFreeSlot(times.startsAt, times.endsAt, slot.free) ||
+        findConflicts({ starts_at: times.startsAt, ends_at: times.endsAt }, items).length > 0
+      ) {
+        rejected.fit++;
+        continue;
+      }
       // Not a second copy of something already in the calendar, and meals at meal times.
-      if (repeatsBusyEvent(title, slot.busy)) continue;
-      if (mealOutsideWindow(title, times.startsAt, opts.timeZone)) continue;
+      if (repeatsBusyEvent(title, otherBusy)) {
+        rejected.repeat++;
+        continue;
+      }
+      if (mealOutsideWindow(title, times.startsAt, opts.timeZone)) {
+        rejected.meal++;
+        continue;
+      }
 
       items.push({
         emoji: planItemEmoji(candidateItem.emoji),
@@ -818,20 +894,44 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
   });
 
   if (suggested > 0 && accepted === 0) {
-    throw publicError(NO_FITTING_ITEMS, { suggested }, "plan: no suggested item passed the checks");
+    throw publicError(noUsableSuggestionsMessage(rejected, suggested), { suggested, ...rejected }, "plan: no suggested item passed the checks");
   }
-  // A fresh draft must suggest something (a refinement may remove items on purpose).
+  // A fresh draft must suggest something, and so must a "refinement" of a week with no saved plan.
   const hasFreeTime = opts.days.some((slot) => !slot.past && slot.free.length > 0);
-  if (opts.mode === "create" && suggested === 0 && hasFreeTime) {
+  if ((opts.mode === "create" || !currentPlan) && suggested === 0 && hasFreeTime) {
     throw publicError(NO_ITEMS_ANSWER, { days: byDate.size }, "plan: the model's answer has no items");
+  }
+  // A refinement may remove items on purpose, but one that would remove every remaining item and
+  // add none is refused unless the request asks for that: a small model can answer with seven
+  // empty days, and that emptied the saved plan and still read as a success.
+  if (
+    opts.mode === "refine" &&
+    currentPlan &&
+    accepted === 0 &&
+    !CLEAR_REQUEST_RE.test(opts.instructions ?? "") &&
+    openItemCount(currentPlan, opts.events, opts.nowMs) > 0 &&
+    openItemCount({ week_start: opts.monday, days }, opts.events, opts.nowMs) === 0
+  ) {
+    throw publicError(EMPTIED_PLAN_ANSWER, { days: byDate.size }, "plan: the refinement would empty the plan");
   }
 
   let reply = typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim().slice(0, 400) : DEFAULT_REPLY;
   const dropped = suggested - accepted;
   if (dropped > 0) {
-    reply += ` ${dropped === 1 ? "One suggested item was" : `${dropped} suggested items were`} left out because ${dropped === 1 ? "it" : "they"} did not fit your free time or repeated something already planned.`;
+    reply += ` ${dropped === 1 ? "One suggested item was" : `${dropped} suggested items were`} left out because ${dropped === 1 ? "it" : "they"} ${rejectionText(rejected, dropped > 1)}.`;
   }
   return { reply, days };
+}
+
+/** Items of a plan that are still ahead and not in the calendar yet (what a refinement can remove). */
+function openItemCount(plan: WeekPlan, events: PlanCalendarEvent[], nowMs: number): number {
+  const { addedItems } = planCalendarState(plan, events, nowMs);
+  return plan.days.reduce(
+    (count, day) =>
+      count +
+      day.items.filter((item, index) => toMs(item.starts_at) >= nowMs && !(addedItems[day.date] ?? []).includes(index)).length,
+    0,
+  );
 }
 
 /** The user's goals and the saved plan of this week (checked; null when there is none). */
@@ -1245,6 +1345,32 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
       approved_event_ids: approvedIds,
     }).eq("user_id", userId).eq("week_start", monday);
     if (approvalSaveError) throw dbError("save which plan items were added", approvalSaveError);
+
+    // A parallel approval can remove this call's copy of an item (in favour of its own copy)
+    // after this call read the calendar. If that approval saved its list first, the list saved
+    // above names an event that is gone. Each approval removes copies before it saves, so one
+    // more read after this save sees every removal that the other approval's (earlier) save
+    // reflected: when a saved id is gone, the list is computed again and saved once more.
+    if (created > 0 && !googleConnected && calendarAfter) {
+      try {
+        const latest = await readCalendar();
+        const present = new Set(latest.map((event) => event.id));
+        if (approvedIds.some((id) => !present.has(id))) {
+          for (const id of newIds) {
+            if (present.has(id)) continue;
+            created--;
+            skipped++;
+          }
+          newIds = newIds.filter((id) => present.has(id));
+          const { error: resaveError } = await supabase.from("weekly_plans").update({
+            approved_event_ids: planCalendarState(plan, latest, nowMs).addedEventIds,
+          }).eq("user_id", userId).eq("week_start", monday);
+          if (resaveError) console.error("[plan] approveWeekPlan: could not save the corrected event ids", resaveError);
+        }
+      } catch (e) {
+        console.error("[plan] approveWeekPlan: could not check the saved event ids", e);
+      }
+    }
 
     return { created, skipped, past, conflicts, conflictTitles, failed, eventIds: newIds };
   });

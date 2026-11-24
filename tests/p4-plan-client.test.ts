@@ -11,14 +11,24 @@ import {
   APPROVE_CLARIFY_REPLY,
   NO_PLAN_YET_REPLY,
   canEditPlanItem,
+  draftingWaitText,
   editedItemTimes,
+  initialPlanWeekView,
   localHM,
   parseApproveCommand,
   planCalendarState,
   planCreateInstructions,
+  planWeekReducer,
   weekIsOver,
+  type PlanWeekAction,
+  type PlanWeekView,
 } from "@/lib/plan-state";
-import { formatRequestTime } from "@/lib/week-plan-request";
+import {
+  formatRequestTime,
+  planRequestBanner,
+  refusalStoredNoRequest,
+  type WeekPlanRequestView,
+} from "@/lib/week-plan-request";
 import { ItemTimeEditor, PlanWeekGrid } from "@/components/plan/PlanWeekGrid";
 import type { WeekPlan, BusyEvent } from "@/types/plan";
 
@@ -145,6 +155,232 @@ describe("plan page texts (findings 107, 61)", () => {
     expect(older).toMatch(/Nov 23/);
     expect(older).toMatch(/1:53/);
     expect(formatRequestTime(new Date(2025, 10, 23, 13, 53).toISOString(), now)).toMatch(/2025/);
+  });
+});
+
+describe("the request banners of the plan page (findings 61, 52)", () => {
+  const request = (id: string, status: WeekPlanRequestView["status"]): WeekPlanRequestView => ({
+    id,
+    kind: "create",
+    status,
+    startedAt: new Date(2026, 10, 23, 13, 53).toISOString(),
+    finishedAt: null,
+    reply: null,
+    error: status === "failed" ? "Drafting the plan failed. Please try again." : null,
+  });
+  const shown = { loading: false, waitingHere: false, hidden: new Set<string>() };
+
+  it("a failed or cut-off request shows until it is dismissed", () => {
+    expect(planRequestBanner(request("r1", "failed"), shown)).toBe("failed");
+    expect(planRequestBanner(request("r1", "interrupted"), shown)).toBe("interrupted");
+    const dismissed = { ...shown, hidden: new Set(["r1"]) };
+    expect(planRequestBanner(request("r1", "failed"), dismissed)).toBeNull();
+    expect(planRequestBanner(request("r1", "interrupted"), dismissed)).toBeNull();
+    // A dismissal is per request: a later failure shows again.
+    expect(planRequestBanner(request("r2", "failed"), dismissed)).toBe("failed");
+  });
+
+  it("a later success replaces the failure, and nothing shows while loading or waiting here", () => {
+    expect(planRequestBanner(request("r2", "done"), shown)).toBeNull();
+    expect(planRequestBanner(request("r1", "failed"), { ...shown, loading: true })).toBeNull();
+    // While this page waits for its own draft, the older failure is not shown as its outcome.
+    expect(planRequestBanner(request("r1", "failed"), { ...shown, waitingHere: true })).toBeNull();
+    // A draft running on the server always shows, also when it was dismissed earlier.
+    expect(
+      planRequestBanner(request("r3", "running"), { ...shown, hidden: new Set(["r3"]) }),
+    ).toBe("running");
+  });
+
+  it("a refusal that stored no request is told apart from a failure of a new request", () => {
+    expect(refusalStoredNoRequest("r1", request("r1", "failed"))).toBe(true);
+    expect(refusalStoredNoRequest(null, null)).toBe(true);
+    expect(refusalStoredNoRequest("r1", request("r2", "failed"))).toBe(false);
+  });
+
+  it("the waiting text names a local model only on a local run", () => {
+    expect(draftingWaitText(true)).toBe("This usually takes under a minute.");
+    expect(draftingWaitText(true)).not.toMatch(/local/i);
+    expect(draftingWaitText(false)).toMatch(/local AI model/);
+  });
+});
+
+describe("the plan page's view of the week (findings 64, 108, 7)", () => {
+  const NEXT_MONDAY = "2026-11-30";
+  const planFor = (week: string, title: string): WeekPlan => ({
+    week_start: week,
+    days: [
+      {
+        date: week,
+        headline: "",
+        items: [{ emoji: "🎯", title, starts_at: local(23, 10), ends_at: local(23, 11) }],
+      },
+    ],
+  });
+  const loadedView = (): PlanWeekView =>
+    [
+      { type: "load-started", week: MONDAY, seq: 1 },
+      {
+        type: "loaded",
+        seq: 1,
+        state: {
+          plan: planFor(MONDAY, "This week's focus"),
+          busyEvents: [{ title: "Dentist", starts_at: local(24, 14), ends_at: local(24, 15) }],
+          addedItems: { [MONDAY]: [0] },
+          approvedDates: [MONDAY],
+          calendarError: null,
+          request: null,
+        },
+      },
+    ].reduce<PlanWeekView>(
+      (view, action) => planWeekReducer(view, action as PlanWeekAction),
+      initialPlanWeekView(MONDAY),
+    );
+
+  it("switching weeks clears everything of the week shown before", () => {
+    const switched = planWeekReducer(loadedView(), {
+      type: "load-started",
+      week: NEXT_MONDAY,
+      seq: 2,
+    });
+    expect(switched).toMatchObject({
+      week: NEXT_MONDAY,
+      loading: true,
+      plan: null,
+      busyEvents: [],
+      addedItems: {},
+      request: null,
+      loadError: null,
+      calendarError: null,
+    });
+    expect(switched.approvedDates.size).toBe(0);
+  });
+
+  it("a late answer for the week left behind is ignored", () => {
+    const switched = planWeekReducer(loadedView(), {
+      type: "load-started",
+      week: NEXT_MONDAY,
+      seq: 2,
+    });
+    // The first load of the old week answers late, and a draft of the old week returns.
+    const late = planWeekReducer(switched, {
+      type: "loaded",
+      seq: 1,
+      state: { plan: planFor(MONDAY, "Old") },
+    });
+    expect(late).toBe(switched);
+    const draft = planWeekReducer(switched, {
+      type: "server-state",
+      week: MONDAY,
+      state: { plan: planFor(MONDAY, "Old draft") },
+    });
+    expect(draft.plan).toBeNull();
+    // The answer of the new week's load counts.
+    const loaded = planWeekReducer(switched, {
+      type: "loaded",
+      seq: 2,
+      state: { plan: planFor(NEXT_MONDAY, "Next week") },
+    });
+    expect(loaded.plan?.days[0].items[0].title).toBe("Next week");
+    expect(loaded.loading).toBe(false);
+  });
+
+  it("a failed load shows an error instead of the previous week's plan; a retry clears it", () => {
+    const switched = planWeekReducer(loadedView(), {
+      type: "load-started",
+      week: NEXT_MONDAY,
+      seq: 2,
+    });
+    const failed = planWeekReducer(switched, {
+      type: "load-failed",
+      seq: 2,
+      message: "Could not load this week's plan. Please try again in a moment.",
+    });
+    expect(failed).toMatchObject({ loading: false, plan: null, loadError: expect.any(String) });
+    // An older load failing late does not replace the newer state.
+    expect(planWeekReducer(switched, { type: "load-failed", seq: 1, message: "x" })).toBe(switched);
+    // Retry ("This week" on this week works the same way): a new load of the same week.
+    const retry = planWeekReducer(failed, { type: "load-started", week: NEXT_MONDAY, seq: 3 });
+    expect(retry).toMatchObject({ loading: true, loadError: null });
+  });
+
+  it("every plan from the server gets a new version; a local time edit does not (open editors restart only on the former)", () => {
+    const view = loadedView();
+    const edited = planWeekReducer(view, {
+      type: "item-times",
+      week: MONDAY,
+      date: MONDAY,
+      index: 0,
+      starts_at: local(23, 12),
+      ends_at: local(23, 13),
+    });
+    expect(edited.version).toBe(view.version);
+    expect(edited.plan?.days[0].items[0].starts_at).toBe(local(23, 12));
+    const refined = planWeekReducer(edited, {
+      type: "server-state",
+      week: MONDAY,
+      state: { plan: planFor(MONDAY, "Refined") },
+    });
+    expect(refined.version).toBe(view.version + 1);
+  });
+
+  it("a refused time edit goes back to the plan from before, unless a newer plan came meanwhile", () => {
+    const view = loadedView();
+    const before = view.plan;
+    const edited = planWeekReducer(view, {
+      type: "item-times",
+      week: MONDAY,
+      date: MONDAY,
+      index: 0,
+      starts_at: local(23, 12),
+      ends_at: local(23, 13),
+    });
+    const restored = planWeekReducer(edited, {
+      type: "plan-restored",
+      week: MONDAY,
+      version: view.version,
+      plan: before,
+    });
+    expect(restored.plan).toBe(before);
+    const refined = planWeekReducer(edited, {
+      type: "server-state",
+      week: MONDAY,
+      state: { plan: planFor(MONDAY, "Refined") },
+    });
+    const late = planWeekReducer(refined, {
+      type: "plan-restored",
+      week: MONDAY,
+      version: view.version,
+      plan: before,
+    });
+    expect(late.plan?.days[0].items[0].title).toBe("Refined");
+  });
+
+  it("a server answer that does not mention the request keeps the one shown", () => {
+    const pending: WeekPlanRequestView = {
+      id: "pending",
+      kind: "refine",
+      status: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      reply: null,
+      error: null,
+    };
+    const started = planWeekReducer(loadedView(), {
+      type: "request-started",
+      week: MONDAY,
+      request: pending,
+    });
+    expect(started.request).toBe(pending);
+    const after = planWeekReducer(started, {
+      type: "server-state",
+      week: MONDAY,
+      state: { plan: planFor(MONDAY, "x") },
+    });
+    expect(after.request).toBe(pending);
+    expect(
+      planWeekReducer(started, { type: "server-state", week: MONDAY, state: { plan: null, request: null } })
+        .request,
+    ).toBeNull();
   });
 });
 
