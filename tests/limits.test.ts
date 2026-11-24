@@ -120,28 +120,29 @@ describe("utcDayStart", () => {
   });
 });
 
-/** A stand-in for the Supabase client: records each count query and answers from `counts`. */
-function fakeClient(counts: Record<string, number>) {
-  const calls: Array<{ table: string; filters: Record<string, unknown>; since: string | null }> =
-    [];
+/**
+ * A stand-in for the service-role client: records each call of the ledger function
+ * (public.ai_allowance) and answers with the given usage. Reading an app table fails the test:
+ * the limits must not count rows a user can write.
+ */
+function fakeClient(usage: { user?: number; global?: number; recorded?: boolean } = {}) {
+  const calls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const client = {
+    rpc(fn: string, args: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve({
+        data: {
+          allowed: usage.recorded ?? true,
+          scope: null,
+          user_count: usage.user ?? 0,
+          global_count: usage.global ?? 0,
+          recorded: args.p_consume === true && (usage.recorded ?? true),
+        },
+        error: null,
+      });
+    },
     from(table: string) {
-      const call = { table, filters: {} as Record<string, unknown>, since: null as string | null };
-      calls.push(call);
-      const query = {
-        select: () => query,
-        eq: (column: string, value: unknown) => {
-          call.filters[column] = value;
-          return query;
-        },
-        gte: (_column: string, value: string) => {
-          call.since = value;
-          return query;
-        },
-        then: (resolve: (value: unknown) => void) =>
-          resolve({ count: counts[table] ?? 0, error: null }),
-      };
-      return query;
+      throw new Error(`the limits read the app table ${table}`);
     },
   };
   return { client: client as never, calls };
@@ -151,63 +152,67 @@ describe("checkAiAllowance", () => {
   const now = new Date("2026-11-14T15:30:00Z");
 
   it("asks the database nothing when no limit is set", async () => {
-    const { client, calls } = fakeClient({});
+    const { client, calls } = fakeClient();
     expect(await checkAiAllowance(client, "u1", "chat", { now, env: {} })).toEqual({
       allowed: true,
     });
     expect(calls).toHaveLength(0);
   });
 
-  it("counts the user's chat messages of the last hour", async () => {
-    const { client, calls } = fakeClient({ chat_messages: 20 });
+  it("asks the ledger for the user's chat and reply-draft uses of the last hour, without recording", async () => {
+    const { client, calls } = fakeClient({ user: 20 });
     const decision = await checkAiAllowance(client, "u1", "chat", {
       now,
       env: { AI_CHAT_PER_HOUR: "20" },
     });
     expect(decision).toMatchObject({ allowed: false, scope: "user" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual({
-      table: "chat_messages",
-      filters: { role: "user", user_id: "u1" },
-      since: "2026-11-14T14:30:00.000Z",
-    });
+    expect(calls).toEqual([
+      {
+        fn: "ai_allowance",
+        args: {
+          p_user: "u1",
+          p_kind: "chat",
+          p_user_kinds: ["chat", "draft"],
+          p_user_limit: 20,
+          p_user_window_seconds: 3600,
+          p_global_limit: null,
+          p_consume: false,
+        },
+      },
+    ]);
   });
 
-  it("counts week plans over 24 hours and planner requests over one hour", async () => {
-    const plan = fakeClient({ week_plan_requests: 3 });
+  it("uses a 24-hour window for week plans and one hour for planner requests", async () => {
+    const plan = fakeClient({ user: 3 });
     await checkAiAllowance(plan.client, "u1", "plan", { now, env: { AI_PLANS_PER_DAY: "10" } });
-    expect(plan.calls[0]).toMatchObject({
-      table: "week_plan_requests",
-      since: "2026-11-13T15:30:00.000Z",
+    expect(plan.calls[0].args).toMatchObject({
+      p_kind: "plan",
+      p_user_kinds: ["plan"],
+      p_user_limit: 10,
+      p_user_window_seconds: 86_400,
     });
-    const planner = fakeClient({ planner_requests: 3 });
+    const planner = fakeClient({ user: 3 });
     await checkAiAllowance(planner.client, "u1", "planner", {
       now,
       env: { AI_PLANNER_PER_HOUR: "10" },
     });
-    expect(planner.calls[0]).toMatchObject({
-      table: "planner_requests",
-      since: "2026-11-14T14:30:00.000Z",
+    expect(planner.calls[0].args).toMatchObject({
+      p_kind: "planner",
+      p_user_kinds: ["planner"],
+      p_user_limit: 10,
+      p_user_window_seconds: 3600,
     });
   });
 
-  it("adds up all kinds of requests of all users for the global allowance, from UTC midnight", async () => {
-    const { client, calls } = fakeClient({
-      chat_messages: 500,
-      week_plan_requests: 200,
-      planner_requests: 100,
-    });
+  it("refuses everybody when the uses of all users today reach the global allowance", async () => {
+    const { client, calls } = fakeClient({ global: 800 });
     const decision = await checkAiAllowance(client, "u1", "chat", {
       now,
       env: { AI_CALLS_PER_DAY: "800" },
     });
     expect(decision).toMatchObject({ allowed: false, scope: "global" });
-    expect(calls).toHaveLength(3);
-    for (const call of calls) {
-      expect(call.since).toBe("2026-11-14T00:00:00.000Z");
-      expect(call.filters).not.toHaveProperty("user_id");
-    }
-    const under = fakeClient({ chat_messages: 500, week_plan_requests: 200, planner_requests: 99 });
+    expect(calls[0].args).toMatchObject({ p_user_limit: null, p_global_limit: 800 });
+    const under = fakeClient({ global: 799 });
     expect(
       await checkAiAllowance(under.client, "u1", "chat", { now, env: { AI_CALLS_PER_DAY: "800" } }),
     ).toEqual({
@@ -215,8 +220,8 @@ describe("checkAiAllowance", () => {
     });
   });
 
-  it("skips the global count when the user is over their own limit", async () => {
-    const { client, calls } = fakeClient({ chat_messages: 5 });
+  it("gives the user's own limit priority over the global one", async () => {
+    const { client, calls } = fakeClient({ user: 5, global: 0 });
     const decision = await checkAiAllowance(client, "u1", "chat", {
       now,
       env: { AI_CHAT_PER_HOUR: "5", AI_CALLS_PER_DAY: "800" },
@@ -226,7 +231,7 @@ describe("checkAiAllowance", () => {
   });
 
   it("enforceAiAllowance throws the visitor's sentence", async () => {
-    const { client } = fakeClient({ week_plan_requests: 10 });
+    const { client } = fakeClient({ user: 10, recorded: false });
     const run = enforceAiAllowance(client, "u1", "plan", { now, env: { AI_PLANS_PER_DAY: "10" } });
     await expect(run).rejects.toBeInstanceOf(CapReachedError);
     await expect(run).rejects.toThrow(

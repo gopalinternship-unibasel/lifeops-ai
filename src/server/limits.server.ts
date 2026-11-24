@@ -4,17 +4,24 @@
  * Every limit comes from a setting and is active only when that setting is present, so a local
  * install (no settings) stays unlimited and makes no extra database queries:
  *
- *   AI_CHAT_PER_HOUR      chat messages one user may send per hour
+ *   AI_CHAT_PER_HOUR      chat messages (and reply drafts) one user may send per hour
  *   AI_PLANS_PER_DAY      week plans (drafts and refinements) one user may ask for per 24 hours
  *   AI_PLANNER_PER_HOUR   dashboard "Plan it" requests one user may make per hour
- *   AI_CALLS_PER_DAY      requests of all users together per UTC day (chat, week plan, planner)
+ *   AI_CALLS_PER_DAY      AI requests of all users together per UTC day (all kinds)
  *
- * The count is the number of rows the request kind already stored in the window (chat messages
- * the user wrote, week_plan_requests, planner_requests). A request is allowed while that count is
- * below the limit, so a limit of 20 allows 20 requests and refuses the 21st.
+ * Every AI request that is allowed records one use in public.ai_usage, a ledger only the server
+ * can write (migration 20261124110000_ai_usage_ledger.sql). The limits count those uses; rows a
+ * user can write or delete (chat messages, request rows) no longer count. A request is allowed
+ * while the count is below the limit, so a limit of 20 allows 20 requests and refuses the 21st.
+ *
+ * enforceAiAllowance checks AND records one use in one database transaction, under a lock, so
+ * parallel requests are counted one at a time. Call it exactly once per request that will call
+ * the AI, right before the AI work, and not for work that makes no AI call (a rule-based answer).
+ * checkAiAllowance only reads, for a refusal before anything is stored.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { publicError } from "@/server/public-error.server";
 
 /** "draft" is an email reply draft (draftReplySuggestion); it shares the chat limit. */
 export type AiRequestKind = "chat" | "plan" | "planner" | "draft";
@@ -27,7 +34,7 @@ export interface AiCaps {
 }
 
 export interface CapUsage {
-  /** Requests of this kind the user already made in the user window. */
+  /** Requests of this kind (and the kinds sharing its limit) the user made in the user window. */
   user: number;
   /** Requests of all kinds, all users, since the start of the UTC day. */
   global: number;
@@ -69,6 +76,11 @@ export function userLimit(kind: AiRequestKind, caps: AiCaps): number | null {
   return caps.plannerPerHour;
 }
 
+/** The kinds whose uses count toward this kind's per-user limit: chat and reply drafts share one. */
+export function userLimitKinds(kind: AiRequestKind): AiRequestKind[] {
+  return kind === "chat" || kind === "draft" ? ["chat", "draft"] : [kind];
+}
+
 function userWindowMs(kind: AiRequestKind): number {
   return kind === "plan" ? DAY_MS : HOUR_MS;
 }
@@ -95,9 +107,14 @@ function userMessage(kind: AiRequestKind, limit: number): string {
 const GLOBAL_MESSAGE =
   "This demo's AI allowance for today is used up. It starts again at midnight UTC. Please try again tomorrow.";
 
+/** Shown when the usage could not be read or recorded (the database did not answer). */
+export const ALLOWANCE_UNAVAILABLE =
+  "The demo's usage limits could not be checked right now. Please try again in a moment.";
+
 /**
  * The counting rule. The user's own limit is checked first, then the global one. A limit that is
- * not set never refuses. Pure: the counts come from the caller.
+ * not set never refuses. Pure: the counts come from the caller. public.ai_allowance applies the
+ * same rule in the database when it decides whether to record a use.
  */
 export function decideCap(kind: AiRequestKind, usage: CapUsage, caps: AiCaps): CapDecision {
   const limit = userLimit(kind, caps);
@@ -122,50 +139,56 @@ export class CapReachedError extends Error {
 
 type Client = SupabaseClient<Database>;
 
-async function countRows(
-  client: Client,
-  table: "chat_messages" | "week_plan_requests" | "planner_requests",
-  since: Date,
-  userId?: string,
-): Promise<number> {
-  const sinceIso = since.toISOString();
-  let result;
-  if (table === "chat_messages") {
-    // Only the messages the user wrote, not the assistant's answers.
-    const query = client
-      .from("chat_messages")
-      .select("id", { count: "exact", head: true })
-      .eq("role", "user")
-      .gte("created_at", sinceIso);
-    result = await (userId ? query.eq("user_id", userId) : query);
-  } else {
-    const query = client
-      .from(table)
-      .select("id", { count: "exact", head: true })
-      .gte("created_at", sinceIso);
-    result = await (userId ? query.eq("user_id", userId) : query);
-  }
-  if (result.error) throw result.error;
-  return result.count ?? 0;
+interface LedgerAnswer {
+  usage: CapUsage;
+  recorded: boolean;
+  /** The limit the database found reached, if any. */
+  scope: "user" | "global" | null;
 }
 
-async function countUserRequests(
-  client: Client,
-  kind: AiRequestKind,
-  userId: string,
-  since: Date,
-): Promise<number> {
-  if (kind === "chat" || kind === "draft") {
-    return countRows(client, "chat_messages", since, userId);
-  }
-  if (kind === "plan") return countRows(client, "week_plan_requests", since, userId);
-  return countRows(client, "planner_requests", since, userId);
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 /**
- * Whether this user may start another request of this kind now. Use the service-role client:
- * the global count spans all users. With no limit set for the kind and no global limit, nothing
- * is queried.
+ * Ask public.ai_allowance for the user's and the demo's usage, and with `consume` record one use
+ * when the request is allowed. Needs the service-role client: only the service role may execute
+ * the function, and the global count spans all users.
+ */
+async function askLedger(
+  client: Client,
+  userId: string,
+  kind: AiRequestKind,
+  caps: AiCaps,
+  consume: boolean,
+): Promise<LedgerAnswer> {
+  const { data, error } = await client.rpc("ai_allowance", {
+    p_user: userId,
+    p_kind: kind,
+    p_user_kinds: userLimitKinds(kind),
+    p_user_limit: userLimit(kind, caps),
+    p_user_window_seconds: userWindowMs(kind) / 1000,
+    p_global_limit: caps.callsPerDay,
+    p_consume: consume,
+  });
+  if (error) throw publicError(ALLOWANCE_UNAVAILABLE, error, `AI allowance (${kind})`);
+  const answer: Record<string, unknown> =
+    data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const { user_count: user, global_count: global, recorded, scope } = answer;
+  if (!isCount(user) || !isCount(global) || typeof recorded !== "boolean") {
+    throw publicError(ALLOWANCE_UNAVAILABLE, data, `AI allowance (${kind}): unexpected answer`);
+  }
+  return {
+    usage: { user, global },
+    recorded,
+    scope: scope === "user" || scope === "global" ? scope : null,
+  };
+}
+
+/**
+ * Whether this user may start another request of this kind now. Only reads: nothing is recorded.
+ * Use the service-role client. With no limit set for the kind and no global limit, nothing is
+ * queried. The windows are measured with the database clock; `options.now` is not used for them.
  */
 export async function checkAiAllowance(
   client: Client,
@@ -174,41 +197,34 @@ export async function checkAiAllowance(
   options: { now?: Date; env?: Env } = {},
 ): Promise<CapDecision> {
   const caps = readCaps(options.env);
-  const now = options.now ?? new Date();
-  const limit = userLimit(kind, caps);
-  if (limit === null && caps.callsPerDay === null) return { allowed: true };
-
-  const usage: CapUsage = { user: 0, global: 0 };
-  if (limit !== null) {
-    usage.user = await countUserRequests(
-      client,
-      kind,
-      userId,
-      new Date(now.getTime() - userWindowMs(kind)),
-    );
-    // Do not count the whole demo when the user is over their own limit already.
-    const early = decideCap(kind, usage, { ...caps, callsPerDay: null });
-    if (!early.allowed) return early;
-  }
-  if (caps.callsPerDay !== null) {
-    const since = utcDayStart(now);
-    const [chat, plans, planner] = await Promise.all([
-      countRows(client, "chat_messages", since),
-      countRows(client, "week_plan_requests", since),
-      countRows(client, "planner_requests", since),
-    ]);
-    usage.global = chat + plans + planner;
-  }
+  if (userLimit(kind, caps) === null && caps.callsPerDay === null) return { allowed: true };
+  const { usage } = await askLedger(client, userId, kind, caps, false);
   return decideCap(kind, usage, caps);
 }
 
-/** Like checkAiAllowance, but throws a CapReachedError with the sentence for the visitor. */
+/**
+ * Check the limits and record one use of the AI allowance, in one step: call it once per request
+ * that will call the AI, right before the AI work. Throws a CapReachedError with the sentence for
+ * the visitor when a limit is reached (nothing is recorded then). With no limit set for the kind
+ * and no global limit, nothing is queried or recorded.
+ */
 export async function enforceAiAllowance(
   client: Client,
   userId: string,
   kind: AiRequestKind,
   options: { now?: Date; env?: Env } = {},
 ): Promise<void> {
-  const decision = await checkAiAllowance(client, userId, kind, options);
+  const caps = readCaps(options.env);
+  if (userLimit(kind, caps) === null && caps.callsPerDay === null) return;
+  const { usage, recorded, scope } = await askLedger(client, userId, kind, caps, true);
+  if (recorded) return;
+  // The database refused. It applies decideCap's rule to the same counts, so decideCap names the
+  // limit that was reached; the database's own answer is the fallback.
+  const decision = decideCap(kind, usage, caps);
   if (!decision.allowed) throw new CapReachedError(decision.message, decision.scope);
+  const limit = userLimit(kind, caps);
+  if (scope === "user" && limit !== null) {
+    throw new CapReachedError(userMessage(kind, limit), "user");
+  }
+  throw new CapReachedError(GLOBAL_MESSAGE, "global");
 }
