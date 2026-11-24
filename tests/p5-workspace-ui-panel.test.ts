@@ -95,6 +95,66 @@ describe("the model's optional cards are kept only where the request calls for t
     );
   });
 
+  it("drops alternatives for an ordinary 'no' or a move 'instead' (review of the gate)", () => {
+    for (const message of [
+      "No, make it 4 pm",
+      "no rush on that one",
+      "Move the sync to Friday instead",
+      "Replace the 3 pm meeting with a call",
+      "Swap the gym for a run on Friday",
+      "I'm out of office on Friday, move my 1:1",
+    ]) {
+      expect(gateModelCards(message, { alternatives }).alternatives, message).toBeUndefined();
+    }
+  });
+
+  it("keeps alternatives for other ways of saying something is missing", () => {
+    const eggs = { title: "Egg substitutes", bullets: ["Mashed banana"] };
+    for (const message of [
+      "I have no eggs",
+      "There's no milk left",
+      "No eggs at home, what now?",
+      "What can I use instead of butter?",
+      "Any substitute for cream?",
+      "I'm out of flour",
+      "No eggs, what can I make?",
+    ]) {
+      expect(gateModelCards(message, { alternatives: eggs }).alternatives, message).toEqual(eggs);
+    }
+  });
+
+  it("keeps a generic card the user asked for: ideas, a list, a post, tips (review of the gate)", () => {
+    const card: InsightCard = { kind: "summary", title: "Ideas", bullets: ["Hike", "Cooking class"] };
+    for (const message of [
+      "Give me ideas for a team offsite",
+      "Make a packing list for Zurich",
+      "Write a LinkedIn post about my new role",
+      "Create a post for LinkedIn about the launch",
+      "Suggest some study tips for my exam",
+      "What are the steps to renew my permit?",
+      "How should I study for the statistics exam?",
+      "List restaurants in Basel for a team lunch",
+      "Give me a checklist for moving flats",
+    ]) {
+      expect(gateModelCards(message, { insight: card }).insight, message).toEqual(card);
+    }
+  });
+
+  it("still drops the summary placeholder next to a reply draft, an event or a plain list request", () => {
+    for (const message of [
+      "Draft a reply to Sam",
+      "Write a response to the recruiter's email",
+      "Create a post office trip on Thursday at 3pm",
+      "List my events on Friday",
+      "List all meetings on Friday",
+      "Can you list today's meetings?",
+      "Move the sync to Friday instead",
+      "Please check all my emails and messages.",
+    ]) {
+      expect(gateModelCards(message, { insight: summary }).insight, message).toBeUndefined();
+    }
+  });
+
   it("never keeps a card without bullets", () => {
     expect(
       gateModelCards("summarize my day", { insight: { ...summary, bullets: [] } }).insight,
@@ -207,5 +267,20 @@ describe("the context panel's calendar badge", () => {
       label: "Calendar unavailable",
       tone: "red",
     });
+  });
+
+  it("says 'Not loaded' when the workspace stopped before the calendar was asked for", () => {
+    expect(calendarStatus({ loaded: false, stopped: true })).toEqual({
+      label: "Not loaded",
+      tone: "neutral",
+    });
+    // A calendar that did load keeps its own status after a later step failed.
+    expect(calendarStatus({ loaded: true, source: "mock", stopped: true })).toEqual({
+      label: "Demo data",
+      tone: "amber",
+    });
+    expect(calendarStatus({ loaded: true, error: "Could not load", stopped: true }).label).toBe(
+      "Calendar unavailable",
+    );
   });
 });

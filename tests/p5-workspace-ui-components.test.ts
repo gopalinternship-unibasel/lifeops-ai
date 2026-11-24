@@ -207,6 +207,10 @@ describe("workspace page", () => {
       ]),
     );
     expect(markup).toMatch(/<section class="[^"]*\bh-\[calc\(100dvh-3\.5rem\)\] lg:h-auto/);
+    // The column divider only from lg: on a phone the chat is the only column, at the screen edge.
+    const section = markup.match(/<section class="([^"]+)"/)?.[1].split(" ") ?? [];
+    expect(section).toContain("lg:border-r");
+    expect(section).not.toContain("border-r");
     expect(markup).toMatch(/<aside class="flex flex-col[^"]*lg:h-full lg:min-h-0/);
     expect(markup).not.toMatch(/<aside class="h-full/);
   });

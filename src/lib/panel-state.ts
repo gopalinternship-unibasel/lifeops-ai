@@ -104,32 +104,56 @@ export function normalizeAlternatives(value: unknown): Alternatives | undefined 
   return bullets.length > 0 ? { title: record.title.trim(), bullets } : undefined;
 }
 
-/** The user says something is missing or asks for a substitute: the case alternatives are for. */
+/**
+ * The user says something is missing or asks for a substitute: the case alternatives are for.
+ * A bare "no" does not count ("No, make it 4 pm", "no rush"), and neither do "instead",
+ * "replace" and "swap" on their own: they also move or change events ("Move the sync to Friday
+ * instead"). "Out of office" is about the user's time, not about something missing. "No eggs,
+ * what can I make?" counts through its question.
+ */
 const ASKS_FOR_ALTERNATIVES =
-  /\b(?:no|don't have|do not have|doesn't have|didn't have|haven't got|out of|ran out|run out|running out|without|missing|lack|lacks|lacking|instead|substitut\w*|replace|replacement|swap|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find)\b/i;
+  /\b(?:(?:have|has|had|got|there's|there is|there are)\s+no|no\s+[\w-]+(?:\s+[\w-]+)?\s+(?:left|at home|in the (?:fridge|house|kitchen|pantry|cupboard))|don't have|do not have|doesn't have|does not have|didn't have|did not have|haven't got|out of(?!\s+(?:the\s+)?office)|ran out|run out|running out|without|missing|lack|lacks|lacking|instead of|substitut\w*|replacement|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find|what (?:else )?(?:can|could|should) I (?:use|make|cook|bake))\b/i;
 
-/** The user asks for a summary, an overview, preparation or a plan: the case summary cards are for. */
+/** The user asks for a summary, an overview, preparation or a plan. */
 const ASKS_FOR_SUMMARY =
   /\b(?:summar\w*|overview|recap|brief|briefing|prep|prepare|preparing|preparation|plan|plans|planning|agenda|outline|review)\b/i;
+
+/**
+ * The user asks for something to read or use other than a calendar entry: ideas, a list, steps,
+ * tips, suggestions, a post or other text ("Make a packing list for Zurich", "List restaurants
+ * in Basel", "Write a LinkedIn post"). "List my events" and "list the meetings" ask about the
+ * calendar, and "a post office trip" is an event, not a post.
+ */
+const ASKS_FOR_CONTENT =
+  /\b(?:ideas?|brainstorm\w*|suggest\w*|recommend\w*|tips?|advice|steps|checklist|list of|(?:a|an|my)\s+(?:[\w-]+\s+){0,2}list|list(?!\s+(?:all\s+)?(?:my|the|today's|tomorrow's|this|next|events?|meetings?|appointments?|tasks?|emails?|messages?)\b)|template|examples?|pack(?:ing)?|how (?:do|can|could|should) I|write|draft|compose)\b|\b(?:a|the|my)\s+(?:[\w-]+\s+)?post(?![\w-])(?!\s+office)/i;
+
+/** A reply to an email: the reply draft card is the content then, not a summary card. */
+const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ying)|respond|response)\b/i;
 
 /**
  * Keep the model's optional cards only where the request calls for them. A small model fills
  * these optional fields on ordinary turns ("Friday Alternatives: No other events" for "What's on
  * Friday?"), which cluttered the panel and pulled it to the Insights tab.
  * - alternatives only when the user says something is missing or asks for a substitute;
- * - a "summary" insight only when the user asks for a summary, an overview, prep or a plan
- *   (workout, meal and meeting-prep cards are kept);
+ * - a "summary" insight only when the user asks for a summary, an overview, prep or a plan, or
+ *   for other content such as ideas, a list or a post (not when it is about an email reply).
+ *   "summary" is also the kind any unknown kind becomes (see normalizeInsightCard), so this
+ *   covers every generic card. Workout, meal and meeting-prep cards are always kept;
  * - no card without bullets.
+ * This is a word check: a content request in other words loses its summary card (the reply
+ * text still has the answer), and a placeholder card next to such words stays.
  */
 export function gateModelCards(
   userMessage: string,
   cards: { insight?: InsightCard; alternatives?: Alternatives },
 ): { insight?: InsightCard; alternatives?: Alternatives } {
   const text = userMessage.replace(/[‘’]/g, "'");
+  const asksForCard =
+    ASKS_FOR_SUMMARY.test(text) || (ASKS_FOR_CONTENT.test(text) && !ABOUT_A_REPLY.test(text));
   const insight =
     cards.insight &&
     cards.insight.bullets.length > 0 &&
-    (cards.insight.kind !== "summary" || ASKS_FOR_SUMMARY.test(text))
+    (cards.insight.kind !== "summary" || asksForCard)
       ? cards.insight
       : undefined;
   const alternatives =
@@ -205,15 +229,18 @@ export type CalendarStatus = { label: string; tone: "neutral" | "amber" | "green
 
 /**
  * The context panel's calendar badge, from what the workspace actually loaded (it used to say
- * "Synced" in green at all times, also in demo mode and after a failure).
+ * "Synced" in green at all times, also in demo mode and after a failure). `stopped` means the
+ * workspace stopped loading (an earlier step failed): a calendar that was not asked for yet is
+ * "Not loaded", not "unavailable".
  */
 export function calendarStatus(state: {
   loaded: boolean;
   source?: "google" | "mock";
   error?: string | null;
+  stopped?: boolean;
 }): CalendarStatus {
   if (state.error) return { label: "Calendar unavailable", tone: "red" };
-  if (!state.loaded) return { label: "Loading…", tone: "neutral" };
+  if (!state.loaded) return state.stopped ? { label: "Not loaded", tone: "neutral" } : { label: "Loading…", tone: "neutral" };
   if (state.source === "google") return { label: "Synced with Google", tone: "green" };
   return { label: "Demo data", tone: "amber" };
 }

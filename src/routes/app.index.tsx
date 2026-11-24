@@ -21,7 +21,16 @@ import {
   type Alternatives,
   type PanelTab,
 } from "@/lib/panel-state";
-import { INTERRUPTED_NOTE, pollForStoredReply, storedMessageText, type ReplyPoll, type ReplyState } from "@/lib/reply-state";
+import {
+  CHAT_ERROR_MESSAGE,
+  INTERRUPTED_NOTE,
+  SIGNED_OUT_NOTE,
+  chatErrorText,
+  pollForStoredReply,
+  storedMessageText,
+  type ReplyPoll,
+  type ReplyState,
+} from "@/lib/reply-state";
 import type { CardState } from "@/types/panel";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -135,9 +144,14 @@ function Workspace() {
         showHistory(hist, cardStates, replyState);
         done();
       },
-      // ...except when the user is signed out: that will not go away by asking again.
+      // ...also a refused sign-in once (a token refreshed after sleep); a second one in a row
+      // ends the wait, with a note in place of the "Still answering" line.
       isFatal: isAuthFailure,
-      onFatal: done,
+      onFatal: () => {
+        done();
+        setMessages((m) => [...m, { id: `signed-out-${Date.now()}`, role: "assistant", content: SIGNED_OUT_NOTE }]);
+        toast.error("Your sign-in has expired. Reload the page to try again.");
+      },
     });
   }
 
@@ -272,10 +286,12 @@ function Workspace() {
       const { reply, panel } = await processChat({
         data: { sessionId: targetSid, message: text, timeZone: getBrowserTimeZone(), briefing: opts.briefing },
       });
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: reply }]);
+      // Shown the same way as after a reload (a rule-based briefing without developer details).
+      const content = storedMessageText({ role: "assistant", content: reply }, HOSTED_DEMO);
+      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content }]);
       applyPanel(panel, text);
     } catch (err: unknown) {
-      const message = getErrorMessage(err, "MONDAY could not answer this message. Please try again.");
+      const message = chatErrorText(getErrorMessage(err, CHAT_ERROR_MESSAGE), HOSTED_DEMO);
       toast.error(message);
       setMessages((m) => [
         ...m,
@@ -290,7 +306,8 @@ function Workspace() {
     // with two auto rows let the panel squeeze the thread to nothing and cover the composer.
     // From lg: two columns in one row exactly one screen high; each side scrolls inside.
     <div className="grid grid-cols-1 lg:h-[calc(100dvh-3.5rem)] lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
-      <section className="flex flex-col min-h-0 h-[calc(100dvh-3.5rem)] lg:h-auto border-r border-border">
+      {/* The divider between the columns only from lg: below it the chat is the only column. */}
+      <section className="flex flex-col min-h-0 h-[calc(100dvh-3.5rem)] lg:h-auto border-border lg:border-r">
         <ChatThread
           messages={messages}
           pending={pending}
@@ -325,7 +342,9 @@ function Workspace() {
         calendarStatus={calendarStatus({
           loaded: calendarLoaded,
           source: calendarSource,
-          error: scheduleError ?? (bootError && !calendarLoaded ? bootError : null),
+          error: scheduleError,
+          // A load that failed before the calendar was asked for: "Not loaded", not "unavailable".
+          stopped: Boolean(bootError),
         })}
         scheduleError={scheduleError}
         activeTab={activeTab}
