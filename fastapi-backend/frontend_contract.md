@@ -3,17 +3,33 @@
 > In this repository the MONDAY web app implements this contract from its server side
 > (`src/server/lifeops-backend.server.ts`, page `/app/dashboard`). The service runs on
 > http://127.0.0.1:8010; calls carry `X-LifeOps-User` and, when `LIFEOPS_BACKEND_TOKEN` is set,
-> `Authorization: Bearer <token>`. The examples below are the original hackathon contract.
+> `Authorization: Bearer <token>`. The examples below follow the original hackathon contract.
+> Later additions (all optional, so the examples still work) are described in `README.md`:
+> `POST /api/plan` takes `current_datetime`, `timezone`, `busy`, `deadline` and `idempotency_key`
+> (and `autonomous_mode: false` now overrides a stored `true`), `GET /api/dashboard` takes `?limit=`,
+> and approve, reject and execute answer 409 when another request changed the action at the same time.
 
 ## 1. Create plan
 
+Every call carries the user and, when the planner has `LIFEOPS_BACKEND_TOKEN` set, the token
+(without it the planner answers 401):
+
 ```ts
-await fetch("http://localhost:8000/api/plan", {
+const base = "http://127.0.0.1:8010";
+const headers = {
+  "Content-Type": "application/json",
+  "X-LifeOps-User": userId,
+  Authorization: `Bearer ${token}`
+};
+
+await fetch(`${base}/api/plan`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers,
   body: JSON.stringify({
     user_input: input,
-    autonomous_mode: false
+    autonomous_mode: false,
+    current_datetime: "2026-11-24T14:00:00", // the user's local wall-clock time
+    timezone: "Europe/Zurich"
   })
 });
 ```
@@ -21,7 +37,7 @@ await fetch("http://localhost:8000/api/plan", {
 ## 2. Dashboard
 
 ```ts
-const res = await fetch("http://localhost:8000/api/dashboard");
+const res = await fetch(`${base}/api/dashboard?limit=50`, { headers });
 const data = await res.json();
 ```
 
@@ -40,34 +56,36 @@ type Dashboard = {
     approved_actions: number;
     executed_actions: number;
   };
+  last_plan: PlanRun | null;
   next_best_actions: Task[];
-  tasks: Task[];
-  actions: ActionProposal[];
+  tasks: Task[]; // at most `limit`, open ones first
+  actions: ActionProposal[]; // at most `limit`, open ones first
 };
 ```
 
 ## 3. Action approval
 
 ```ts
-await fetch(`http://localhost:8000/api/actions/${id}/approve`, {
-  method: "POST"
-});
+await fetch(`${base}/api/actions/${id}/approve`, { method: "POST", headers });
 ```
 
 ## 4. Action execution
 
+Without a body the planner's own (mock) adapters run. The MONDAY app carries the action out itself
+and sends the outcome to record:
+
 ```ts
-await fetch(`http://localhost:8000/api/actions/${id}/execute`, {
-  method: "POST"
+await fetch(`${base}/api/actions/${id}/execute`, {
+  method: "POST",
+  headers,
+  body: JSON.stringify({ provider: "demo_calendar", external_id: eventId, result: { starts_at, ends_at } })
 });
 ```
 
 ## 5. Execute safe actions
 
 ```ts
-await fetch("http://localhost:8000/api/actions/execute-safe", {
-  method: "POST"
-});
+await fetch(`${base}/api/actions/execute-safe`, { method: "POST", headers });
 ```
 
 ## Suggested UI

@@ -9,7 +9,8 @@ Authorization: Bearer {{token}}
 
 {
   "user_input": "I have exams next week, 2 assignments, and a meeting tomorrow",
-  "autonomous_mode": false
+  "autonomous_mode": false,
+  "timezone": "Europe/Zurich"
 }
 
 ### Dashboard

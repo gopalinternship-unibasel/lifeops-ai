@@ -8,13 +8,30 @@ ActionTypeLiteral = Literal["task", "calendar_block", "email_draft", "reminder"]
 RiskLevelLiteral = Literal["low", "medium", "high"]
 
 
+class BusyInterval(BaseModel):
+    """A time the caller's calendar is already taken (naive local wall-clock times)."""
+
+    title: str = Field(default="", max_length=200)
+    start: datetime
+    end: datetime
+
+
 class PlanRequest(BaseModel):
     user_input: str = Field(..., min_length=3, max_length=4000)
-    autonomous_mode: bool = False
+    # None (left out) uses the owner's stored setting; an explicit false switches it off for this
+    # request even when the stored setting is on.
+    autonomous_mode: bool | None = None
+    # Optional key the caller chooses for this request (for example its own request id). A repeat
+    # with the same key returns the stored answer instead of planning and storing a second time.
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=100)
     # Optional context from the caller: the user's local wall-clock time and IANA zone.
     # Planned times are naive local times in that zone.
     current_datetime: datetime | None = None
     timezone: str | None = Field(default=None, max_length=100)
+    # The caller's busy calendar times for the coming days; proposed blocks are kept clear of them.
+    busy: list[BusyInterval] = Field(default_factory=list, max_length=200)
+    # When the caller stops waiting (UTC). A plan that is ready only after that is not stored.
+    deadline: datetime | None = None
 
 
 class PlannerTask(BaseModel):
@@ -56,6 +73,7 @@ class PlanResponse(BaseModel):
     executed_safe_actions: int
     plan: PlannerOutput
     # "llm" when the configured model planned, "demo" when the keyword planner did.
+    # planner_note is shown to the user: plain sentences, no setting names or parser output.
     planner: str = "demo"
     planner_note: str | None = None
 

@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -94,3 +95,23 @@ class PlanRun(SQLModel, table=True):
     # "llm" when the configured model produced the plan, "demo" for the keyword planner.
     planner: str = "demo"
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PlanIdempotencyKey(SQLModel, table=True):
+    """The stored answer of a plan request the caller sent with an idempotency key, so a repeat
+    (a retry after a lost answer) gets the same plan back instead of a second one.
+
+    A table of its own, because start-up (create_all) adds missing tables but never adds columns
+    to the existing ones. The planner deletes rows older than two days itself.
+    """
+
+    __table_args__ = (UniqueConstraint("owner", "idempotency_key"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    owner: str = Field(index=True)
+    idempotency_key: str = Field(max_length=100)
+    # SHA-256 of the request's user_input: the same key with another text is refused.
+    input_sha256: str = Field(max_length=64)
+    plan_run_id: int
+    response_json: str
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)

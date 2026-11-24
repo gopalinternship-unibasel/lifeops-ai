@@ -27,6 +27,12 @@ def execute_with_zapier_mcp(action: ActionProposal) -> dict:
     if not settings.zapier_mcp_url:
         raise RuntimeError("ZAPIER_MCP_URL is missing.")
 
+    # The tool call runs without a second approval, so the model may only reach the tools named
+    # here (the draft and calendar tools), never for example a Gmail "send" tool on the same server.
+    allowed_tools = settings.zapier_tools()
+    if not allowed_tools:
+        raise RuntimeError("ZAPIER_MCP_ALLOWED_TOOLS is missing.")
+
     client = OpenAI(api_key=settings.openai_api_key)
 
     if action.action_type == ActionType.calendar_block:
@@ -101,6 +107,7 @@ Rules:
         "server_description": "Zapier MCP server with Gmail and Google Calendar tools.",
         "server_url": settings.zapier_mcp_url,
         "require_approval": "never",
+        "allowed_tools": allowed_tools,
     }
 
     headers = _build_headers()

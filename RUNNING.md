@@ -326,7 +326,7 @@ Both parts read OpenAI-compatible settings: the web app from **`.env.local`**, t
 | Local Ollama (default)                                           | `http://localhost:11434/v1`                                        | `qwen2.5-7b-4threads` (default), `qwen2.5-3b-4threads` (faster, weaker), `llama3.1:8b` (intended)     | any (`ollama`)                                                                                                                                                                                                                         |
 | Hugging Face router (original)                                   | `https://router.huggingface.co/v1`                                 | `meta-llama/Llama-3.1-8B-Instruct`                                                                    | `hf_...` token with inference credits                                                                                                                                                                                                  |
 | OpenAI                                                           | `https://api.openai.com/v1`                                        | `gpt-4o-mini`                                                                                         | `sk-...`                                                                                                                                                                                                                               |
-| Cloudflare Workers AI (hosted demo; not yet run against the API) | `https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1` | `@cf/zai-org/glm-4.7-flash` (web app and planner), `@cf/google/gemma-4-26b-a4b-it` (web app fallback) | Workers AI API token (Workers AI Read and Edit). Set `LLM_STRUCTURED_OUTPUT=tools_required` (web app) and `LLM_RESPONSE_FORMAT=none` (planner); free allowance 10,000 neurons a day per Cloudflare account; see `VERCEL_DEPLOYMENT.md` |
+| Cloudflare Workers AI (hosted demo; live since 17 November 2026) | `https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1` | `@cf/zai-org/glm-4.7-flash` (web app), `@cf/google/gemma-4-26b-a4b-it` (planner and web app fallback) | Workers AI API token (Workers AI Read and Edit). Set `LLM_STRUCTURED_OUTPUT=tools_required` (web app) and `LLM_RESPONSE_FORMAT=none` (planner); free allowance 10,000 neurons a day per Cloudflare account; see `VERCEL_DEPLOYMENT.md` |
 | Groq (alternative; free-plan terms not checked)                  | `https://api.groq.com/openai/v1`                                   | `llama-3.3-70b-versatile` (web app), `llama-3.1-8b-instant` (planner, fallback)                       | Groq key. Set `LLM_STRUCTURED_OUTPUT=tools` (web app) and `LLM_RESPONSE_FORMAT=json_object` (planner)                                                                                                                                  |
 | Google Gemini                                                    | `https://generativelanguage.googleapis.com/v1beta/openai`          | a Gemini model                                                                                        | Gemini API key. Not for a public demo: the free tier may not be used for apps offered in the EEA, Switzerland or the UK                                                                                                                |
 | Lovable AI gateway (original Lovable build)                      | `https://ai.gateway.lovable.dev/v1`                                | `google/gemini-2.5-flash`                                                                             | Lovable-issued key                                                                                                                                                                                                                     |
@@ -344,9 +344,10 @@ credits; without them it answers HTTP 402 and the app shows "Hugging Face credit
 
 Planner extras (`fastapi-backend\.env`): `LLM_RESPONSE_FORMAT=json_schema`, `json_object` or `none` (no
 `response_format` sent; the plan is the first JSON object in the answer's text, code fences stripped),
-`LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `PLANNER_MODE=keyword` (always the keyword planner). Empty
-`LLM_BASE_URL` = keyword planner only. `LIFEOPS_BACKEND_URL=off` in `.env.local` makes the dashboard
-always use the in-app assistant.
+`LLM_TIMEOUT_SECONDS`, `LLM_MAX_TOKENS`, `LLM_EXTRA_BODY`, `PLANNER_MODE=keyword` (always the keyword
+planner). Empty `LLM_BASE_URL` = keyword planner only. `ENV=local` (written by the start script) serves
+the planner's `/docs`; unset `ENV` means production (no `/docs`, no SQL logging).
+`LIFEOPS_BACKEND_URL=off` in `.env.local` makes the dashboard always use the in-app assistant.
 
 ## Tests
 
@@ -367,7 +368,7 @@ npm run typecheck
 npm run lint             # 0 errors (8 old fast-refresh warnings)
 npm run build
 cd fastapi-backend
-.venv\Scripts\python.exe -m pytest     # 20 API tests with a temporary SQLite file and a fake LLM
+.venv\Scripts\python.exe -m pytest     # planner tests with a temporary SQLite file and a fake LLM
 ```
 
 `npm run check` runs lint, typecheck, unit tests and build in one go. The Google tests never touch the
@@ -729,4 +730,3 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   stay off there (demo inbox and calendar).
 - The planner's own Gmail/Calendar adapters are still mock (as in the hackathon). Real writes happen in the
   web app when you click **Run** on the dashboard.
-- `fastapi-backend/lifeos/` is an unrelated Next.js prototype from the hackathon; it is not used or built.
