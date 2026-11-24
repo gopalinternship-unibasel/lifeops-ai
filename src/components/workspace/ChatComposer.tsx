@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowUp } from "lucide-react";
 
 const DEFAULT_SUGGESTIONS = [
@@ -12,9 +12,11 @@ const DEFAULT_SUGGESTIONS = [
 export const CHAT_MESSAGE_MAX = 4000;
 
 export function ChatComposer({
-  onSend, busy, showSuggestions, suggestions, placeholder, hint, maxLength = CHAT_MESSAGE_MAX,
+  onSend, busy, showSuggestions, suggestions, placeholder, hint, maxLength = CHAT_MESSAGE_MAX, label = "Message MONDAY",
 }: {
-  onSend: (text: string) => void;
+  /** Return false when the message was not taken (for example no chat session yet): the text stays in the box. */
+  onSend: (text: string) => boolean | void | Promise<unknown>;
+  /** While true the box keeps its focus but cannot be edited or sent. */
   busy: boolean;
   showSuggestions: boolean;
   suggestions?: string[];
@@ -22,9 +24,12 @@ export function ChatComposer({
   hint?: string;
   /** Longest message the server accepts; the box stops there and shows a counter near it. */
   maxLength?: number;
+  /** The text box's accessible name (the placeholder disappears once the user types). */
+  label?: string;
 }) {
   const [value, setValue] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const limitId = useId();
 
   const tooLong = value.length > maxLength;
   const nearLimit = value.length >= maxLength * 0.9;
@@ -32,7 +37,7 @@ export function ChatComposer({
   const submit = (text?: string) => {
     const t = (text ?? value).trim();
     if (!t || busy || t.length > maxLength) return;
-    onSend(t);
+    if (onSend(t) === false) return;
     setValue("");
   };
 
@@ -50,6 +55,9 @@ export function ChatComposer({
 
   const handleSubmit = (e: FormEvent) => { e.preventDefault(); submit(); };
   const handleKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter that confirms an IME candidate (Japanese, Chinese, Korean input) must not send the
+    // half-written message. Safari reports that Enter as keyCode 229 with isComposing false.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
   };
 
@@ -77,9 +85,12 @@ export function ChatComposer({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKey}
-            disabled={busy}
+            // readOnly, not disabled: a disabled box loses focus on every send and the user had
+            // to click it again before typing the next message.
+            readOnly={busy}
             maxLength={maxLength}
-            aria-describedby="composer-limit"
+            aria-label={label}
+            aria-describedby={nearLimit ? limitId : undefined}
             rows={1}
             className="w-full resize-none bg-transparent px-4 py-3 pr-14 text-sm focus:outline-none max-h-40"
             placeholder={placeholder ?? "Ask MONDAY anything — schedule a block, reorder priorities, plan a meal…"}
@@ -97,7 +108,7 @@ export function ChatComposer({
         <p className="mt-2 text-[11px] text-muted-foreground text-center">
           {hint ?? "MONDAY uses simulated Gmail and Calendar data in demo mode."}
           {nearLimit && (
-            <span id="composer-limit" data-testid="composer-limit" className={`ml-2 font-mono ${tooLong ? "text-red-600" : "text-amber-700"}`}>
+            <span id={limitId} data-testid="composer-limit" className={`ml-2 font-mono ${tooLong ? "text-red-600" : "text-amber-700"}`}>
               {value.length.toLocaleString("en-US")}/{maxLength.toLocaleString("en-US")} characters
             </span>
           )}

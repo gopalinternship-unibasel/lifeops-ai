@@ -1,13 +1,16 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, ChefHat, Dumbbell, Inbox, ListChecks, Mail, Mic, Sparkles, Save, Loader2, Check, Pencil, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Calendar, ChefHat, Dumbbell, Inbox, Lightbulb, ListChecks, Mail, Mic, Sparkles, Save, Loader2, Check, Pencil, Trash2 } from "lucide-react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import type { PanelPayload, PriorityRow, ScheduleBlock, PendingEvent, PendingEventChange, InsightCard, InboxSummary, EmailDraftSuggestion } from "@/types/panel";
 import { saveCalendarEvent, saveGmailDraft, updateCalendarEvent, removeCalendarEvent } from "@/functions/google.functions";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/lib/errors";
 import { getBrowserTimeZone } from "@/lib/date";
+import { uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
 
-type Tab = "priorities" | "schedule" | "insights";
+type Tab = PanelTab;
+
+const TABS: Tab[] = ["priorities", "schedule", "insights"];
 
 interface Props {
   inbox?: InboxSummary;
@@ -18,6 +21,10 @@ interface Props {
   insights: InsightCard[];
   alternatives?: { title: string; bullets: string[] };
   emailDraft?: EmailDraftSuggestion;
+  /** What the calendar badge says (loading, demo data, synced with Google, unavailable). */
+  calendarStatus: CalendarStatus;
+  /** Why today's events could not be loaded; shown in place of "No events today.". */
+  scheduleError?: string | null;
   activeTab: Tab;
   onTabChange: (t: Tab) => void;
   onPendingSaved: (id: string, ev: ScheduleBlock) => void;
@@ -35,32 +42,65 @@ export type DismissHandler = (id: string, opts?: { remember?: boolean }) => void
 
 export function ContextPanel({
   inbox, priorities, schedule, pendingEvents, pendingEventChanges, insights, alternatives, emailDraft,
+  calendarStatus, scheduleError,
   activeTab, onTabChange, onPendingSaved, onPendingDismiss, onPendingChangeApplied, onPendingChangeDismiss, onDraftSaved,
 }: Props) {
   const insightsCount = insights.length + (alternatives ? 1 : 0) + (emailDraft ? 1 : 0);
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+
+  // Arrow keys, Home and End move between the tabs (the keyboard pattern of a tab list).
+  function onTabKey(e: KeyboardEvent<HTMLDivElement>) {
+    const index = TABS.indexOf(activeTab);
+    const next =
+      e.key === "ArrowRight" ? TABS[(index + 1) % TABS.length]
+      : e.key === "ArrowLeft" ? TABS[(index + TABS.length - 1) % TABS.length]
+      : e.key === "Home" ? TABS[0]
+      : e.key === "End" ? TABS[TABS.length - 1]
+      : undefined;
+    if (!next) return;
+    e.preventDefault();
+    onTabChange(next);
+    tabRefs.current[next]?.focus();
+  }
+  const tabProps = (tab: Tab) => ({
+    tab,
+    active: activeTab === tab,
+    onClick: () => onTabChange(tab),
+    buttonRef: (el: HTMLButtonElement | null) => { tabRefs.current[tab] = el; },
+  });
+
   return (
-    <aside className="h-full flex flex-col border-l border-border bg-card/40">
+    // Below lg the panel sits under the chat at its natural height (the page scrolls to it);
+    // from lg it fills the grid row beside the chat and scrolls inside.
+    <aside className="flex flex-col border-t border-border lg:border-t-0 lg:border-l lg:h-full lg:min-h-0 bg-card/40">
       <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
         <div>
           <div className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Context</div>
           <h2 className="text-sm font-semibold mt-0.5">Live workspace</h2>
         </div>
-        <span className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" /> Synced
+        <span className="inline-flex items-center gap-1.5 text-[10px] text-muted-foreground" data-testid="calendar-status">
+          <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[calendarStatus.tone]}`} /> {calendarStatus.label}
         </span>
       </div>
 
-      <div className="px-2 pt-2 border-b border-border flex gap-1">
-        <TabBtn icon={<ListChecks className="h-3.5 w-3.5" />} active={activeTab === "priorities"} onClick={() => onTabChange("priorities")} count={priorities.length}>Priorities</TabBtn>
-        <TabBtn icon={<Calendar className="h-3.5 w-3.5" />} active={activeTab === "schedule"} onClick={() => onTabChange("schedule")} count={schedule.length + pendingEvents.length + pendingEventChanges.length}>Today</TabBtn>
-        <TabBtn icon={<Sparkles className="h-3.5 w-3.5" />} active={activeTab === "insights"} onClick={() => onTabChange("insights")} count={insightsCount}>Insights</TabBtn>
+      <div role="tablist" aria-label="Context panel" onKeyDown={onTabKey} className="px-2 pt-2 border-b border-border flex gap-1">
+        <TabBtn {...tabProps("priorities")} icon={<ListChecks className="h-3.5 w-3.5" aria-hidden="true" />} count={priorities.length}>Priorities</TabBtn>
+        <TabBtn {...tabProps("schedule")} icon={<Calendar className="h-3.5 w-3.5" aria-hidden="true" />} count={schedule.length + pendingEvents.length + pendingEventChanges.length}>Today</TabBtn>
+        <TabBtn {...tabProps("insights")} icon={<Sparkles className="h-3.5 w-3.5" aria-hidden="true" />} count={insightsCount}>Insights</TabBtn>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 space-y-5">
+      <div
+        role="tabpanel"
+        id="ctx-panel"
+        aria-labelledby={`ctx-tab-${activeTab}`}
+        tabIndex={0}
+        className="flex-1 overflow-y-auto p-5 space-y-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
         {activeTab === "priorities" && <PrioritiesView priorities={priorities} inbox={inbox} />}
         {activeTab === "schedule" && (
           <ScheduleView
             schedule={schedule}
+            scheduleError={scheduleError}
             pendingEvents={pendingEvents}
             pendingEventChanges={pendingEventChanges}
             onPendingSaved={onPendingSaved}
@@ -77,20 +117,29 @@ export function ContextPanel({
   );
 }
 
-function TabBtn({ children, icon, active, onClick, count }: { children: React.ReactNode; icon: React.ReactNode; active: boolean; onClick: () => void; count: number }) {
+const STATUS_DOT: Record<CalendarStatus["tone"], string> = {
+  neutral: "bg-muted-foreground/50",
+  amber: "bg-amber-500",
+  green: "bg-emerald-500",
+  red: "bg-red-500",
+};
+
+function TabBtn({ children, icon, tab, active, onClick, count, buttonRef }: { children: React.ReactNode; icon: React.ReactNode; tab: Tab; active: boolean; onClick: () => void; count: number; buttonRef: (el: HTMLButtonElement | null) => void }) {
   return (
-    <button onClick={onClick}
+    <button type="button" role="tab" id={`ctx-tab-${tab}`} aria-selected={active} aria-controls="ctx-panel"
+      tabIndex={active ? 0 : -1} ref={buttonRef} onClick={onClick}
       className={`relative flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-md transition ${active ? "text-foreground bg-card" : "text-muted-foreground hover:text-foreground"}`}>
       {icon} {children}
       {count > 0 && (
         <span className={`ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-medium ${active ? "bg-gradient-brand text-primary-foreground" : "bg-muted text-muted-foreground"}`}>{count}</span>
       )}
-      {active && <span className="absolute -bottom-px left-2 right-2 h-[2px] bg-gradient-brand rounded-full" />}
+      {active && <span aria-hidden="true" className="absolute -bottom-px left-2 right-2 h-[2px] bg-gradient-brand rounded-full" />}
     </button>
   );
 }
 
 function PrioritiesView({ priorities, inbox }: { priorities: PriorityRow[]; inbox?: InboxSummary }) {
+  const keys = uniqueKeys(priorities.map((p) => p.title));
   if (priorities.length === 0) {
     return (
       <div className="text-center py-12">
@@ -121,8 +170,9 @@ function PrioritiesView({ priorities, inbox }: { priorities: PriorityRow[]; inbo
       </div>
       <ol className="space-y-2">
         <AnimatePresence initial={false}>
-          {priorities.map((p) => (
-            <motion.li key={p.title} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+          {/* Keyed by title (so a reorder animates), made unique when two priorities share a title. */}
+          {priorities.map((p, i) => (
+            <motion.li key={keys[i]} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               transition={{ type: "spring", stiffness: 380, damping: 30 }}
               className="rounded-md border border-border bg-card p-3 flex gap-3">
               <span className="shrink-0 h-7 w-7 rounded-md grid place-items-center text-xs font-mono font-semibold text-primary-foreground" style={{ background: "var(--gradient-brand)" }}>#{p.rank}</span>
@@ -139,10 +189,11 @@ function PrioritiesView({ priorities, inbox }: { priorities: PriorityRow[]; inbo
 }
 
 function ScheduleView({
-  schedule, pendingEvents, pendingEventChanges,
+  schedule, scheduleError, pendingEvents, pendingEventChanges,
   onPendingSaved, onPendingDismiss, onPendingChangeApplied, onPendingChangeDismiss,
 }: {
   schedule: ScheduleBlock[];
+  scheduleError?: string | null;
   pendingEvents: PendingEvent[];
   pendingEventChanges: PendingEventChange[];
   onPendingSaved: (id: string, ev: ScheduleBlock) => void;
@@ -167,7 +218,12 @@ function ScheduleView({
         </div>
       )}
 
-      {sorted.length === 0 && pendingEvents.length === 0 && pendingEventChanges.length === 0 ? (
+      {scheduleError && (
+        // A failed load is not an empty day: say so instead of "No events today.".
+        <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">{scheduleError}</div>
+      )}
+
+      {scheduleError && sorted.length === 0 ? null : sorted.length === 0 && pendingEvents.length === 0 && pendingEventChanges.length === 0 ? (
         <div className="text-center py-12">
           <Calendar className="h-8 w-8 mx-auto text-muted-foreground/60" />
           <p className="mt-3 text-sm text-muted-foreground">No events today.</p>
@@ -250,7 +306,8 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
           className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60 ${isDelete ? "bg-red-600" : "bg-gradient-brand"}`}>
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} {isDelete ? "Cancel event" : "Save changes"}
         </button>
-        <button onClick={() => onDismiss(change.id)} className="text-xs px-2.5 py-1.5 rounded-md text-foreground/80 hover:bg-muted">Dismiss</button>
+        {/* Not while the change is being saved: a dismissal then could neither stop the save nor be stored. */}
+        <button type="button" onClick={() => onDismiss(change.id)} disabled={busy} className="text-xs px-2.5 py-1.5 rounded-md text-foreground/80 hover:bg-muted disabled:opacity-60 disabled:pointer-events-none">Dismiss</button>
       </div>
     </div>
   );
@@ -284,7 +341,8 @@ export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent;
           className="inline-flex items-center gap-1.5 rounded-md bg-gradient-brand px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60">
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save to Calendar
         </button>
-        <button onClick={() => onDismiss(ev.id)} className="text-xs px-2.5 py-1.5 rounded-md text-amber-900 hover:bg-amber-100">Dismiss</button>
+        {/* Not while the event is being saved: a dismissal then could neither stop the save nor be stored. */}
+        <button type="button" onClick={() => onDismiss(ev.id)} disabled={busy} className="text-xs px-2.5 py-1.5 rounded-md text-amber-900 hover:bg-amber-100 disabled:opacity-60 disabled:pointer-events-none">Dismiss</button>
       </div>
     </div>
   );
@@ -321,7 +379,8 @@ function InsightsView({ insights, alternatives, emailDraft, onDraftSaved }: { in
       {alternatives && (
         <div className="rounded-lg border border-amber-200 bg-amber-50/60">
           <div className="px-4 py-2.5 border-b border-amber-200 flex items-center gap-2">
-            <ChefHat className="h-4 w-4 text-amber-700" />
+            {/* Alternatives can be for any missing resource, not only a meal ingredient. */}
+            <Lightbulb className="h-4 w-4 text-amber-700" aria-hidden="true" />
             <h4 className="text-sm font-semibold text-amber-900">{alternatives.title}</h4>
           </div>
           <ul className="p-4 space-y-1.5">
