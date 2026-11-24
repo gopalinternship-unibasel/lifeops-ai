@@ -12,7 +12,8 @@ import {
 import { formatLocalDate } from "@/lib/date";
 
 // Local times, whatever zone the tests run in.
-const local = (y: number, m: number, d: number, h: number, min = 0) => new Date(y, m - 1, d, h, min);
+const local = (y: number, m: number, d: number, h: number, min = 0) =>
+  new Date(y, m - 1, d, h, min);
 
 // The Plan page's rule (src/routes/app.plan.tsx startOfWeekMondayISO), copied here so the two
 // pages can be checked against each other.
@@ -61,7 +62,9 @@ describe("calendar hour labels", () => {
     for (const locale of ["de-CH", "en-GB", "fr-CH"]) {
       for (let h = 0; h < 24; h++) {
         // The event boxes format their times with these options (fmt in app.calendar.tsx).
-        expect(hourLabel(h, locale)).toBe(local(2026, 11, 24, h).toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" }));
+        expect(hourLabel(h, locale)).toBe(
+          local(2026, 11, 24, h).toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" }),
+        );
         expect(hourLabel(h, locale)).toMatch(/^\d{1,2}:00$/);
       }
     }
@@ -77,10 +80,20 @@ describe("calendar hour labels", () => {
 describe("short calendar events", () => {
   it("lays out a 30- or 45-minute event on one line so its time is not cut off", () => {
     const day = local(2026, 11, 24, 0);
-    const half = { starts_at: local(2026, 11, 24, 10).toISOString(), ends_at: local(2026, 11, 24, 10, 30).toISOString() };
-    const threeQuarters = { starts_at: local(2026, 11, 24, 10).toISOString(), ends_at: local(2026, 11, 24, 10, 45).toISOString() };
-    const hour = { starts_at: local(2026, 11, 24, 10).toISOString(), ends_at: local(2026, 11, 24, 11).toISOString() };
-    const height = (e: { starts_at: string; ends_at: string }) => positionOnDay(e, day, 6, 48)!.height;
+    const half = {
+      starts_at: local(2026, 11, 24, 10).toISOString(),
+      ends_at: local(2026, 11, 24, 10, 30).toISOString(),
+    };
+    const threeQuarters = {
+      starts_at: local(2026, 11, 24, 10).toISOString(),
+      ends_at: local(2026, 11, 24, 10, 45).toISOString(),
+    };
+    const hour = {
+      starts_at: local(2026, 11, 24, 10).toISOString(),
+      ends_at: local(2026, 11, 24, 11).toISOString(),
+    };
+    const height = (e: { starts_at: string; ends_at: string }) =>
+      positionOnDay(e, day, 6, 48)!.height;
     expect(height(half)).toBe(22);
     expect(isCompactEvent(height(half))).toBe(true);
     expect(isCompactEvent(height(threeQuarters))).toBe(true);
@@ -91,7 +104,15 @@ describe("short calendar events", () => {
   it("lets the time range wrap only in a box tall enough for a third line", () => {
     const day = local(2026, 11, 24, 0);
     const box = (minutes: number) =>
-      positionOnDay({ starts_at: local(2026, 11, 24, 10).toISOString(), ends_at: local(2026, 11, 24, 10, minutes).toISOString() }, day, 6, 48)!.height;
+      positionOnDay(
+        {
+          starts_at: local(2026, 11, 24, 10).toISOString(),
+          ends_at: local(2026, 11, 24, 10, minutes).toISOString(),
+        },
+        day,
+        6,
+        48,
+      )!.height;
     // A one-hour box (46 px) holds the title and one time line; a wrapped range was cut in half.
     expect(canWrapEventTime(box(60))).toBe(false);
     expect(canWrapEventTime(box(90))).toBe(true);
@@ -116,9 +137,17 @@ describe("calendar week loads", () => {
     const weekA = deferred<string>();
     const weekB = deferred<string>();
     // The page starts week A, the user clicks Next (effect cleanup cancels A), week B loads.
-    const cancelA = settleUnlessCancelled(weekA.promise, { onResult: (v) => shown.push(v), onError: () => {}, onSettled: () => settled.push("A") });
+    const cancelA = settleUnlessCancelled(weekA.promise, {
+      onResult: (v) => shown.push(v),
+      onError: () => {},
+      onSettled: () => settled.push("A"),
+    });
     cancelA();
-    settleUnlessCancelled(weekB.promise, { onResult: (v) => shown.push(v), onError: () => {}, onSettled: () => settled.push("B") });
+    settleUnlessCancelled(weekB.promise, {
+      onResult: (v) => shown.push(v),
+      onError: () => {},
+      onSettled: () => settled.push("B"),
+    });
     weekB.resolve("events of week B");
     await weekB.promise;
     weekA.resolve("events of week A");

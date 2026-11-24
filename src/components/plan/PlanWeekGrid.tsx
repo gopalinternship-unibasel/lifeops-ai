@@ -157,15 +157,11 @@ function PlanItemRow({ item, added, editable, onSave }: {
               <Check className="h-3 w-3" /> in calendar
             </span>
           )}
-          {/* Screens that can hover show the pencil on hover or keyboard focus; touch screens,
-              which cannot hover, always show it. */}
           {editable && !editing && (
             <button
               onClick={() => setEditing(true)}
-              className="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition text-muted-foreground hover:text-foreground"
+              className="opacity-0 group-hover:opacity-100 transition text-muted-foreground hover:text-foreground"
               title="Edit time"
-              aria-label="Edit time"
-              type="button"
             >
               <Pencil className="h-3 w-3" />
             </button>
@@ -175,7 +171,6 @@ function PlanItemRow({ item, added, editable, onSave }: {
           <div className="mt-1 flex items-center gap-1.5">
             <input
               type="time"
-              aria-label={`Start time for ${item.title}`}
               value={start}
               onChange={(e) => setStart(e.target.value)}
               className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
@@ -183,7 +178,6 @@ function PlanItemRow({ item, added, editable, onSave }: {
             <span className="text-[11px] text-muted-foreground">–</span>
             <input
               type="time"
-              aria-label={`End time for ${item.title}`}
               value={end}
               onChange={(e) => setEnd(e.target.value)}
               className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
@@ -191,7 +185,7 @@ function PlanItemRow({ item, added, editable, onSave }: {
             <button onClick={save} disabled={saving} className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50">
               {saving ? "…" : "Save"}
             </button>
-            <button type="button" aria-label="Cancel editing" onClick={() => { setEditing(false); setStart(toLocalHM(item.starts_at)); setEnd(toLocalHM(item.ends_at)); }} className="text-muted-foreground hover:text-foreground">
+            <button onClick={() => { setEditing(false); setStart(toLocalHM(item.starts_at)); setEnd(toLocalHM(item.ends_at)); }} className="text-muted-foreground hover:text-foreground">
               <XIcon className="h-3 w-3" />
             </button>
           </div>

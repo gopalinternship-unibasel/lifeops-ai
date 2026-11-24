@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { normalizeServerFnOrigin } from "@/lib/server-fn-origin";
 
@@ -68,14 +68,18 @@ type SessionLike = Pick<Session, "access_token" | "refresh_token" | "expires_at"
 };
 
 /**
- * The session to keep when auth reports `next`. Supabase re-reads the stored session and emits
- * SIGNED_IN with a new but identical object every time the tab becomes visible again. Storing
- * that copy gave `user` a new identity, and the profile forms, which reload when the user
- * changes, overwrote what had been typed. The previous object is kept while nothing in it
- * changed: same user, same update time, same tokens.
+ * The session to keep when auth reports `next` with `event`. Supabase re-reads the stored
+ * session and emits SIGNED_IN with a new but identical object every time the tab becomes
+ * visible again. Storing that copy gave `user` a new identity, and the profile forms, which
+ * reload when the user changes, overwrote what had been typed. For those re-sends (SIGNED_IN,
+ * and INITIAL_SESSION or the first getSession read) the previous object is kept while nothing
+ * in it changed: same user, same update time, same tokens. Every other event (USER_UPDATED,
+ * TOKEN_REFRESHED, SIGNED_OUT, ...) reports a real change, so its session is always taken, even
+ * if the fields compared here happen to be equal.
  */
-export function nextSession<S extends SessionLike>(prev: S | null, next: S | null): S | null {
+export function nextSession<S extends SessionLike>(prev: S | null, next: S | null, event: AuthChangeEvent): S | null {
   if (!prev || !next) return next;
+  if (event !== "SIGNED_IN" && event !== "INITIAL_SESSION") return next;
   const same =
     prev.user.id === next.user.id &&
     prev.user.updated_at === next.user.updated_at &&
@@ -96,6 +100,34 @@ export function signOutWarning(user: { is_anonymous?: boolean } | null): string 
     : null;
 }
 
+/**
+ * The signed-in pages' session guard and their Sign out button, as plain functions so the order
+ * of steps can be tested without a browser. The guard sends a visitor without a session to
+ * /login. A deliberate sign-out ends the session too, and the guard used to answer that by
+ * moving the user on to /login, over the button's own move to the landing page. So the guard
+ * stays quiet once a sign-out has started, and the landing page opens when the sign-out call
+ * has finished, also when it failed: auth-js removes the local session in that case as well.
+ * One flow belongs to one mounted layout; a fresh layout starts with a fresh flow.
+ */
+export function createSignOutFlow() {
+  let signingOut = false;
+  return {
+    /** Where the guard sends the visitor now: "/login" when the session is gone, else nowhere. */
+    guardRedirect(loading: boolean, signedIn: boolean): "/login" | null {
+      return !loading && !signedIn && !signingOut ? "/login" : null;
+    },
+    /** Sign out, then go to the landing page. */
+    async signOut(signOut: () => Promise<void>, goToLanding: () => void): Promise<void> {
+      signingOut = true;
+      try {
+        await signOut();
+      } finally {
+        goToLanding();
+      }
+    },
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -103,12 +135,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     installAuthFetch();
     // CRITICAL: subscribe BEFORE getSession
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setSession((prev) => nextSession(prev, s));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession((prev) => nextSession(prev, s, event));
       setLoading(false);
     });
     supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession((prev) => nextSession(prev, s));
+      // The stored session read at start-up: the same one INITIAL_SESSION reports.
+      setSession((prev) => nextSession(prev, s, "INITIAL_SESSION"));
       setLoading(false);
     });
     return () => subscription.unsubscribe();

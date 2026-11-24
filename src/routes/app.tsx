@@ -1,6 +1,6 @@
 import { createFileRoute, Link, Outlet, useNavigate, useLocation } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { signOutWarning, useAuth } from "@/lib/auth-context";
+import { createSignOutFlow, signOutWarning, useAuth } from "@/lib/auth-context";
 import { MondayMark } from "@/components/MondayMark";
 import {
   AlertDialog,
@@ -22,16 +22,17 @@ function AppLayout() {
   const { user, loading, signOut } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  // Set while the Sign out button runs. The guard below cannot tell a deliberate sign-out from
-  // an expired session: it sent the user on to /login and overrode the handler's own move to
-  // the landing page.
-  const signingOut = useRef(false);
+  // The guard below cannot tell a deliberate sign-out from an expired session by itself: it sent
+  // the user on to /login and overrode the Sign out button's own move to the landing page. The
+  // flow keeps the guard quiet while a sign-out runs (one flow per mounted layout).
+  const [signOutFlow] = useState(createSignOutFlow);
   const [confirmingSignOut, setConfirmingSignOut] = useState(false);
   const navRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    if (!loading && !user && !signingOut.current) navigate({ to: "/login" });
-  }, [user, loading, navigate]);
+    const to = signOutFlow.guardRedirect(loading, Boolean(user));
+    if (to) navigate({ to });
+  }, [user, loading, navigate, signOutFlow]);
 
   // On a phone the navigation scrolls sideways; keep the current page's link in view (also once
   // the header first appears, when the session has loaded).
@@ -55,14 +56,7 @@ function AppLayout() {
     { to: "/app/profile", label: "Profile" },
   ] as const;
 
-  const finishSignOut = async () => {
-    signingOut.current = true;
-    try {
-      await signOut();
-    } finally {
-      navigate({ to: "/" });
-    }
-  };
+  const finishSignOut = () => signOutFlow.signOut(signOut, () => navigate({ to: "/" }));
 
   const demoSignOutWarning = signOutWarning(user);
 

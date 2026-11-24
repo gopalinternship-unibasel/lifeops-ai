@@ -157,8 +157,10 @@ export function WeekGrid({ days, events, startHour, today }: { days: Date[]; eve
     <div className="rounded-lg border border-border bg-card overflow-hidden">
       {/* Below the sm breakpoint seven readable days do not fit the screen, so the week scrolls
           sideways inside the card (the header and time grid together, the hour column stays in
-          view) instead of squeezing each day to a few pixels. */}
-      <div ref={scrollerRef} className="overflow-x-auto" data-testid="calendar-scroller">
+          view) instead of squeezing each day to a few pixels. overflow-y-hidden keeps the clipping
+          the card gave before: overflow-x-auto alone turns overflow-y to auto, and an event in the
+          last minutes of the day (its box is at least 20 px tall) then gave the card a scrollbar. */}
+      <div ref={scrollerRef} className="overflow-x-auto overflow-y-hidden" data-testid="calendar-scroller">
         <div className="min-w-[640px] sm:min-w-0">
           {/* Day headers */}
           <div className={`grid ${WEEK_COLUMNS} border-b border-border bg-muted/30`} data-testid="calendar-header-grid">

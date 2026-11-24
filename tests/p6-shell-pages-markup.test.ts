@@ -19,8 +19,16 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (options: Record<string, unknown>) => ({ options }),
-  Link: ({ children, to, activeOptions: _activeOptions, ...rest }: { children?: ReactNode; to: string; activeOptions?: unknown }) =>
-    createElement("a", { href: to, ...rest }, children),
+  Link: ({
+    children,
+    to,
+    activeOptions: _activeOptions,
+    ...rest
+  }: {
+    children?: ReactNode;
+    to: string;
+    activeOptions?: unknown;
+  }) => createElement("a", { href: to, ...rest }, children),
   Outlet: () => null,
   useNavigate: () => () => {},
   useLocation: () => ({ pathname: state.pathname }),
@@ -42,7 +50,8 @@ const { OnboardingProfileForm } = await import("@/routes/onboarding.profile");
 const { WeekGrid, Route: CalendarRoute } = await import("@/routes/app.calendar");
 const { hourLabel } = await import("@/lib/calendar-grid");
 
-const componentOf = (route: unknown) => (route as { options: { component: ComponentType } }).options.component;
+const componentOf = (route: unknown) =>
+  (route as { options: { component: ComponentType } }).options.component;
 const render = (element: ReturnType<typeof createElement>) => renderToStaticMarkup(element);
 
 /** The opening tag of the first element carrying `attr="value"`. */
@@ -67,7 +76,14 @@ beforeEach(() => {
 
 describe("MONDAY logo mark", () => {
   it("gives every mark its own gradient, so a second mark on the page is not blank (login on phones)", () => {
-    const html = render(createElement(Fragment, null, createElement(MondayMark), createElement(MondayMark, { size: 32 })));
+    const html = render(
+      createElement(
+        Fragment,
+        null,
+        createElement(MondayMark),
+        createElement(MondayMark, { size: 32 }),
+      ),
+    );
     const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(2);
@@ -79,7 +95,9 @@ describe("MONDAY logo mark", () => {
   });
 
   it("can hide its words below the sm breakpoint and keeps them by default", () => {
-    expect(render(createElement(MondayMark, { hideWordmarkOnPhone: true }))).toContain('class="hidden sm:flex flex-col leading-none"');
+    expect(render(createElement(MondayMark, { hideWordmarkOnPhone: true }))).toContain(
+      'class="hidden sm:flex flex-col leading-none"',
+    );
     expect(render(createElement(MondayMark))).toContain('class="flex flex-col leading-none"');
   });
 });
@@ -136,17 +154,27 @@ describe("signed-in header", () => {
   it("marks only the current page's link as active", () => {
     const html = header();
     expect(navLink(html, "Calendar")).toContain('data-active="true"');
-    for (const label of ["Workspace", "Dashboard", "Plan", "Profile"]) expect(navLink(html, label)).toContain('data-active="false"');
+    for (const label of ["Workspace", "Dashboard", "Plan", "Profile"])
+      expect(navLink(html, label)).toContain('data-active="false"');
   });
 });
 
 describe("profile forms", () => {
   const noop = () => {};
-  const props = { name: "Alex", role: "Student", goals: "Ship the paper", onNameChange: noop, onRoleChange: noop, onGoalsChange: noop, onSubmit: noop };
+  const props = {
+    name: "Alex",
+    role: "Student",
+    goals: "Ship the paper",
+    onNameChange: noop,
+    onRoleChange: noop,
+    onGoalsChange: noop,
+    onSubmit: noop,
+  };
 
   it("profile page: labels name their fields and the texts are capped at the database limits", () => {
     const html = render(createElement(ProfileForm, { ...props, saving: false }));
-    for (const id of ["profile-name", "profile-role", "profile-goals"]) expect(html).toContain(`<label for="${id}"`);
+    for (const id of ["profile-name", "profile-role", "profile-goals"])
+      expect(html).toContain(`<label for="${id}"`);
     expect(tagWith(html, "id", "profile-name")).toContain('maxLength="100"');
     expect(tagWith(html, "id", "profile-goals")).toContain('maxLength="2000"');
     expect(tagWith(html, "id", "profile-role")).toContain("<select");
@@ -164,7 +192,9 @@ describe("profile forms", () => {
     const checked = radios.filter((m) => m[0].includes('aria-checked="true"')).map((m) => m[1]);
     expect(checked).toEqual(["Student"]);
     // Only the chosen role is in the tab order; arrow keys move between the others.
-    expect(radios.filter((m) => m[0].includes('tabindex="0"')).map((m) => m[1])).toEqual(["Student"]);
+    expect(radios.filter((m) => m[0].includes('tabindex="0"')).map((m) => m[1])).toEqual([
+      "Student",
+    ]);
   });
 });
 
@@ -178,11 +208,35 @@ describe("calendar page", () => {
   const days = Array.from({ length: 7 }, (_, i) => new Date(2026, 10, 23 + i));
   const at = (d: number, h: number, m = 0) => new Date(2026, 10, d, h, m).toISOString();
   const events = [
-    { id: "e1", title: "Standup", starts_at: at(24, 10), ends_at: at(24, 10, 30), notes: null, source: "mock" },
-    { id: "e2", title: "Deep work", starts_at: at(25, 14), ends_at: at(25, 16), notes: null, source: "mock" },
-    { id: "e3", title: "Late call", starts_at: at(26, 0, 15), ends_at: at(26, 0, 45), notes: null, source: "mock" },
+    {
+      id: "e1",
+      title: "Standup",
+      starts_at: at(24, 10),
+      ends_at: at(24, 10, 30),
+      notes: null,
+      source: "mock",
+    },
+    {
+      id: "e2",
+      title: "Deep work",
+      starts_at: at(25, 14),
+      ends_at: at(25, 16),
+      notes: null,
+      source: "mock",
+    },
+    {
+      id: "e3",
+      title: "Late call",
+      starts_at: at(26, 0, 15),
+      ends_at: at(26, 0, 45),
+      notes: null,
+      source: "mock",
+    },
   ];
-  const grid = () => render(createElement(WeekGrid, { days, events, startHour: 0, today: new Date(2026, 10, 24, 9) }));
+  const grid = () =>
+    render(
+      createElement(WeekGrid, { days, events, startHour: 0, today: new Date(2026, 10, 24, 9) }),
+    );
 
   it("gives the header and the time grid the same seven equal day tracks inside a sideways scroller", () => {
     const html = grid();
@@ -195,11 +249,43 @@ describe("calendar page", () => {
     expect(html).toContain('class="min-w-[640px] sm:min-w-0"');
   });
 
+  it("clips an event box that runs past the end of the grid instead of scrolling the card", () => {
+    // 23:50-24:00 gets the minimum 20 px box, 12 px of which lie below the grid's last row.
+    const lateEvents = [
+      {
+        id: "e4",
+        title: "Night owl",
+        starts_at: at(24, 23, 50),
+        ends_at: at(25, 0, 0),
+        notes: null,
+        source: "mock",
+      },
+    ];
+    const html = render(
+      createElement(WeekGrid, {
+        days,
+        events: lateEvents,
+        startHour: 6,
+        today: new Date(2026, 10, 24, 9),
+      }),
+    );
+    const box = tagWith(html, "data-testid", "calendar-event");
+    const top = Number(box.match(/top:(\d+(?:\.\d+)?)px/)?.[1]);
+    const height = Number(box.match(/height:(\d+(?:\.\d+)?)px/)?.[1]);
+    expect(top + height).toBeGreaterThan((24 - 6) * 48);
+    // overflow-x-auto on its own makes overflow-y auto as well, so the scroller must clip.
+    expect(tagWith(html, "data-testid", "calendar-scroller")).toMatch(
+      /class="[^"]*\boverflow-y-hidden\b/,
+    );
+  });
+
   it("starts the week on Monday and labels the midnight row in the locale's clock, never '0 AM'", () => {
     const html = grid();
     const weekdays = [...html.matchAll(/data-day-index="(\d)"/g)].map((m) => Number(m[1]));
     expect(weekdays).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    expect(html.indexOf(`>${days[0].toLocaleDateString(undefined, { weekday: "short" })}<`)).toBeGreaterThan(-1);
+    expect(
+      html.indexOf(`>${days[0].toLocaleDateString(undefined, { weekday: "short" })}<`),
+    ).toBeGreaterThan(-1);
     expect(days[0].getDay()).toBe(1);
     expect(html).not.toContain(">0 AM<");
     expect(html).toContain(`>${hourLabel(0)}</span>`);
@@ -207,11 +293,17 @@ describe("calendar page", () => {
 
   it("shows a 30-minute event's start time on its one line, and a long event's start time on phones", () => {
     const html = grid();
-    const start = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const standup = html.slice(html.indexOf('data-compact="true"'), html.indexOf("</div></div>", html.indexOf('data-compact="true"')));
+    const start = (iso: string) =>
+      new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const standup = html.slice(
+      html.indexOf('data-compact="true"'),
+      html.indexOf("</div></div>", html.indexOf('data-compact="true"')),
+    );
     expect(standup).toContain(">Standup</span>");
     expect(standup).toContain(` · ${start(events[0].starts_at)}`);
     const deepWork = html.slice(html.indexOf('data-compact="false"'));
-    expect(deepWork).toContain(`<span class="whitespace-nowrap sm:hidden">${start(events[1].starts_at)}</span>`);
+    expect(deepWork).toContain(
+      `<span class="whitespace-nowrap sm:hidden">${start(events[1].starts_at)}</span>`,
+    );
   });
 });

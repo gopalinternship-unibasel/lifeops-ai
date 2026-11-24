@@ -67,13 +67,6 @@ const FIELD_LABELS: Record<string, string> = {
   starts_at: "The start time",
   ends_at: "The end time",
   timeZone: "The time zone",
-  name: "Your name",
-  role: "Your role",
-  goals: "Your goals text",
-  reason: "The reason",
-  subject: "The subject",
-  body: "The message text",
-  recipient: "The recipient",
 };
 
 function fieldLabel(path: unknown): string {
