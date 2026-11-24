@@ -1,4 +1,5 @@
 import { isRecord } from "@/lib/errors";
+import { isHostedDeployment } from "@/server/deployment.server";
 
 /**
  * Provider-agnostic LLM gateway. Server-only.
@@ -35,6 +36,16 @@ import { isRecord } from "@/lib/errors";
  * answer). The app's own fields (model, messages, tools, ...) are never overwritten by it.
  */
 
+/** The hosted demo has no AI provider set; the message is meant for visitors. */
+export class AiNotConfiguredError extends Error {
+  constructor() {
+    super(
+      "The AI assistant is not set up on this site yet, so this request could not be answered.",
+    );
+    this.name = "AiNotConfiguredError";
+  }
+}
+
 export const HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1";
 export const OLLAMA_BASE_URL = "http://localhost:11434/v1";
 export const DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct";
@@ -46,6 +57,12 @@ export type LLMRole = "chat" | "plan" | "draft" | "backend";
 export type StructuredOutputMode = "tools" | "tools_required" | "json_schema";
 
 export interface LLMConfig {
+  /**
+   * False when this is the hosted demo and no AI provider is set (no LLM_BASE_URL and no legacy
+   * HUGGINGFACE_API_KEY): the localhost Ollama default is only meant for a local run, so callAI
+   * refuses at once instead of trying it.
+   */
+  configured: boolean;
   provider: string;
   baseUrl: string;
   apiKey: string | null;
@@ -192,7 +209,11 @@ export function providerName(baseUrl: string): string {
 }
 
 /** Resolve the provider settings for one role from environment variables. */
-export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env): LLMConfig {
+export function resolveLLMConfig(
+  role: LLMRole = "chat",
+  env: Env = process.env,
+  hosted: boolean = isHostedDeployment(undefined, env),
+): LLMConfig {
   const roleKey = role.toUpperCase();
   const explicitBaseUrl = envValue(env, "LLM_BASE_URL");
   const hfKey = envValue(env, "HUGGINGFACE_API_KEY");
@@ -217,6 +238,7 @@ export function resolveLLMConfig(role: LLMRole = "chat", env: Env = process.env)
   const temperature = Number.parseFloat(envValue(env, "LLM_TEMPERATURE") ?? "");
 
   return {
+    configured: !!explicitBaseUrl || useLegacyHf || !hosted,
     provider: providerName(baseUrl),
     baseUrl,
     apiKey,
@@ -432,6 +454,12 @@ export async function callAI(opts: {
   role?: LLMRole;
 }) {
   const config = resolveLLMConfig(opts.role ?? "chat");
+  if (!config.configured) {
+    console.warn(
+      "[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty); the request was not sent.",
+    );
+    throw new AiNotConfiguredError();
+  }
   if (config.provider === "Hugging Face" && !config.apiKey) {
     throw new Error("HUGGINGFACE_API_KEY (or LLM_API_KEY) is not configured");
   }
