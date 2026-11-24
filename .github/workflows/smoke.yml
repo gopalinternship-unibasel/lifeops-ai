@@ -91,7 +91,9 @@ jobs:
 
       - name: Pages server functions answer for a demo user
         # Signs in a new anonymous demo user and calls server functions through the Supabase Edge
-        # Function; no AI call. The project's nightly clean-up removes the anonymous user.
+        # Function; no AI call. Fails when the function's dashboard shows the planner offline or no
+        # AI provider set up (a missing function secret; see PAGES_DEPLOYMENT.md). The project's
+        # nightly clean-up removes the anonymous user.
         if: steps.config.outputs.ready == 'true' && vars.PAGES_URL != ''
         env:
           PAGES_SERVER_FN_ORIGIN: ${{ vars.PAGES_SERVER_FN_ORIGIN }}
@@ -108,8 +110,10 @@ jobs:
           jq -e '.status == "ok" and .planner == "llm"' planner.json > /dev/null
 
       - name: Planner reads its database
-        # A real database query in the Supabase project: this is the daily activity.
-        if: steps.config.outputs.ready == 'true' && steps.config.outputs.token == 'true'
+        # A real database query in the Supabase project: this is the daily activity. It runs even
+        # when an earlier check failed (for example the Pages checks while a function secret is
+        # missing), so a failing check does not also let the project be paused.
+        if: ${{ !cancelled() && steps.config.outputs.ready == 'true' && steps.config.outputs.token == 'true' }}
         run: |
           curl -fsS --retry 3 --retry-delay 10 --max-time 60 \
             -H "Authorization: Bearer ${LIFEOPS_BACKEND_TOKEN}" \
@@ -120,18 +124,22 @@ jobs:
 
       - name: Planner makes a plan with the model (Mondays)
         # One real model call a week. No --retry: the POST stores a plan, so a retry could store two.
+        # It sends the local time in Zurich with the zone, as the web app does: with the zone alone
+        # the planner would read its own clock, which runs on UTC.
         if: steps.config.outputs.ready == 'true' && steps.config.outputs.token == 'true'
         run: |
           if [ "$(date -u +%u)" != "1" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
             echo "Not Monday: no model call today."
             exit 0
           fi
+          now="$(TZ=Europe/Zurich date +%Y-%m-%dT%H:%M:%S)"
+          body="$(jq -nc --arg now "$now" '{user_input: "Block Thursday 2-4 pm for deep work", timezone: "Europe/Zurich", current_datetime: $now, autonomous_mode: false}')"
           curl -fsS --max-time 120 \
             -X POST \
             -H "Authorization: Bearer ${LIFEOPS_BACKEND_TOKEN}" \
             -H "X-LifeOps-User: smoke-check" \
             -H "Content-Type: application/json" \
-            -d '{"user_input":"Block Thursday 2-4 pm for deep work","timezone":"Europe/Zurich","autonomous_mode":false}' \
+            -d "$body" \
             "${PLANNER_URL%/}/api/plan" -o plan.json
           jq -e '.planner == "llm"' plan.json > /dev/null
           echo "The planner answered with the model."

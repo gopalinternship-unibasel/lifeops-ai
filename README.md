@@ -13,8 +13,10 @@ project) combining:
 
 - Supabase authentication, row-level security, and application storage
 - A Google OAuth connector for Gmail and Google Calendar (with a built-in demo inbox and calendar)
-- An OpenAI-compatible LLM for planning and prioritisation: local Ollama by default, or the
-  original Hugging Face router (`meta-llama/Llama-3.1-8B-Instruct`), OpenAI, Gemini or the Lovable gateway
+- An OpenAI-compatible LLM for planning and prioritisation: local Ollama by default on a local run, or
+  the original Hugging Face router (`meta-llama/Llama-3.1-8B-Instruct`), OpenAI, Gemini or the Lovable
+  gateway; the hosted demo uses Cloudflare Workers AI, and a hosted site without an AI provider says the
+  assistant is not set up instead of trying a local model
 - A FastAPI planner service (`fastapi-backend/`) behind the productivity dashboard
 - A React/Tailwind workspace for inbox, calendar, weekly planning, dashboard and profile management
 

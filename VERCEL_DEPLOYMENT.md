@@ -64,8 +64,14 @@ Vercel by itself. The `nitro` package does, and `vite.config.ts` turns it on onl
   Function). It does not change the two builds above; see `PAGES_DEPLOYMENT.md`.
 
 `src/start.ts` sets TanStack Start's CSRF check explicitly (server-function calls must come from the
-page's own origin). This is the check Start applies by itself when an app has no `src/start.ts`, so the
-Vercel deployment behaves as before; the file exists for the GitHub Pages edition.
+page's own origin). This is the check Start applies by itself when an app has no `src/start.ts`. The
+file also installs, for this deployment as for the GitHub Pages edition, the handling of errors
+TanStack Start does not answer well by itself (`src/lib/server-fn-errors.ts`): in the browser, an error
+answer in JSON without TanStack's own header (a platform or gateway error) becomes a short sentence
+instead of being taken for the function's result; on the server, a call to a server function this
+deployment does not have (an open tab from before a deploy that renamed one) gets 404 with "MONDAY may
+have been updated since this page was opened. Reload the page and try again.", and an unreadable
+payload gets 400, instead of 500.
 
 ## 2. The AI provider
 
@@ -122,7 +128,7 @@ is read by the server at run time. Change a setting, then redeploy.
 | `VITE_ENABLE_ANONYMOUS_DEMO`           | `true`                                                           | no     | Shows "Try the live demo" (anonymous sign-in).                                                                                           |
 | `VITE_ENABLE_GOOGLE_SIGNIN`            | `false`                                                          | no     | Hides "Continue with Google".                                                                                                            |
 | `VITE_HOSTED_DEMO`                     | `true`                                                           | no     | Shows the one-line demo notice on the sign-in page. Leave unset locally.                                                                 |
-| `LLM_BASE_URL`                         | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | no     | Workers AI's OpenAI-compatible URL with the Cloudflare Account ID.                                                                       |
+| `LLM_BASE_URL`                         | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | no     | Workers AI's OpenAI-compatible URL with the Cloudflare Account ID. Kept private; without it the hosted site says AI is not set up.       |
 | `LLM_API_KEY`                          | the Workers AI API token                                         | yes    |                                                                                                                                          |
 | `LLM_MODEL`                            | `@cf/zai-org/glm-4.7-flash`                                      | no     | Main model for chat and plans.                                                                                                           |
 | `LLM_FALLBACK_MODEL`                   | `@cf/google/gemma-4-26b-a4b-it`                                  | no     | Tried after 401, 403, 404, 429 or 503 from the main model.                                                                               |
@@ -139,6 +145,12 @@ is read by the server at run time. Change a setting, then redeploy.
 | `AI_PLANNER_PER_HOUR`                  | `6`                                                              | no     | See section 4.                                                                                                                           |
 | `AI_CALLS_PER_DAY`                     | `150`                                                            | no     | See section 4. Sized for the shared free allowance of 10,000 neurons a day.                                                              |
 | `NITRO_PRESET`                         | `vercel`                                                         | no     | Build target. Optional on Vercel, which sets `VERCEL=1`.                                                                                 |
+| `LIFEOPS_MAX_REQUEST_MS`               | (unset)                                                          | no     | Longest time the host lets a request run. Unset on Vercel: the app uses Hobby's 300 s. The Pages edition sets 160000.                    |
+
+`LLM_BASE_URL` cannot be used without the API token, but it is kept private: the Pages edition stores it as a
+function secret, and the hosted site's messages to visitors leave it out. Without it the hosted site answers
+that the AI assistant is not set up; it never tries a local model. `LIFEOPS_MAX_REQUEST_MS` is the time after
+which an unfinished request shows as interrupted; set it only on a Vercel plan whose limit is not Hobby's 300 s.
 
 Leave these unset: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_STATE_SECRET`,
 `GOOGLE_OAUTH_REDIRECT_URI` (Gmail and Calendar stay off; the demo inbox and calendar are used and the
@@ -186,23 +198,27 @@ Set the variables with `gh variable set NAME --body VALUE -R OWNER/REPOSITORY`.
 All visitors share one AI key, so the web app can limit use. Each limit is active only when its setting is
 present. With none set (the local default) nothing is limited and no extra queries are made.
 
-| Setting               | What it limits                                                       | Window              |
-| --------------------- | -------------------------------------------------------------------- | ------------------- |
-| `AI_CHAT_PER_HOUR`    | chat messages one user sends                                         | the last 60 minutes |
-| `AI_PLANS_PER_DAY`    | week plans (new and refined) one user asks for                       | the last 24 hours   |
-| `AI_PLANNER_PER_HOUR` | dashboard "Plan it" requests one user makes                          | the last 60 minutes |
-| `AI_CALLS_PER_DAY`    | chat messages, week plans and planner requests of all users together | since midnight UTC  |
+| Setting               | What it limits                                                                      | Window              |
+| --------------------- | ----------------------------------------------------------------------------------- | ------------------- |
+| `AI_CHAT_PER_HOUR`    | chat messages and email reply drafts one user asks for                              | the last 60 minutes |
+| `AI_PLANS_PER_DAY`    | week plans (new and refined) one user asks for                                      | the last 24 hours   |
+| `AI_PLANNER_PER_HOUR` | dashboard "Plan it" requests one user makes                                         | the last 60 minutes |
+| `AI_CALLS_PER_DAY`    | chat messages, reply drafts, week plans and planner requests of all users together | since midnight UTC  |
 
-The rule: a request is allowed while the number of requests already stored in the window is below the
-limit, so a limit of 20 allows 20 and refuses the 21st. When a limit is reached the visitor gets a plain
-sentence, for example "You have reached this demo's limit of 20 chat messages per hour. Please try again
-later." or "This demo's AI allowance for today is used up. It starts again at midnight UTC. Please try
-again tomorrow." A refused request is not stored and the model is not called. One exception: "Plan it"
-checks only the planner limits before it stores its planner request; when the planner service cannot be
-reached, the request falls back to a chat turn, and if the chat or daily limit refuses that turn, the
-planner request stays stored as failed with the limit sentence (and counts towards the planner and daily
-limits). The automatic briefing of a first visit is never refused: it gives its rule-based answer
-instead. A later briefing over the limit is refused like any other message.
+The rule: a request is allowed while the number of uses already recorded in the window is below the
+limit, so a limit of 20 allows 20 and refuses the 21st. Each allowed request that calls the model
+records one use in a ledger table in the database that only the server can write (`public.ai_usage`);
+the check and the record are one database call, so requests sent at the same moment cannot pass a cap
+together. Work that makes no model call (such as the rule-based briefing) records nothing, and the caps
+no longer depend on how many chat messages, plans or planner requests are stored. When a limit is
+reached the visitor gets a plain sentence, for example "You have reached this demo's limit of 20 chat
+messages per hour. Please try again later." or "This demo's AI allowance for today is used up. It starts
+again at midnight UTC. Please try again tomorrow." A refused request records no use and the model is not
+called. "Plan it" checks the planner limits before it stores its planner request; when the planner
+service cannot be reached, the request falls back to a chat turn, which is checked against the chat and
+daily limits on its own, and if one of them refuses it, the planner request stays stored as failed with
+the limit sentence. The automatic briefing of a first visit is never refused: it gives its rule-based
+answer instead. A later briefing over the limit is refused like any other message.
 
 The values for the hosted demo (`AI_CHAT_PER_HOUR=20`, `AI_PLANS_PER_DAY=5`, `AI_PLANNER_PER_HOUR=6`,
 `AI_CALLS_PER_DAY=150`) are sized for Cloudflare's free 10,000 neurons a day, which the ai-scientist demo
@@ -213,8 +229,10 @@ allowance: 150 week plans would be about 15,750 neurons, a call to the fallback 
 token counts are estimates, not measured on Workers AI. Watch the usage in the Cloudflare dashboard during
 the first days.
 
-The caps count stored rows and then store the new one without a lock, so requests sent at the same moment
-can pass a cap by a few.
+Before the ledger, the caps counted stored rows and then stored the new one in a separate step, so
+requests sent at the same moment could all pass a cap, as many as were sent at once. A second running
+week plan for the same week, or a second running "Plan it" for the same user, is also refused by the
+database itself ("still being drafted" / "already running").
 
 Other protection that does not need code: the 4,000-character message cap, the 1,500-character cap for
 plan instructions, Supabase's limit of 30 anonymous sign-ins per hour per IP, no billing on any of the
@@ -315,8 +333,8 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
    function region `fra1` (`vercel.json` already asks for it). Add the non-secret settings of section 3.2 with
    `npx vercel@latest env add NAME production`.
 9. Link the web project from the repository root with `--project lifeops-ai` and add the non-secret settings of
-   section 3.1 the same way. Set the function region to `fra1` in Project Settings, Functions (the web project has no
-   `vercel.json`).
+   section 3.1 the same way. The function region `fra1` comes from the root `vercel.json`; check it under Project
+   Settings, Functions.
 10. OWNER: the secrets, without putting them in chat or in a file:
     - `SUPABASE_SECRET_KEY`: copy it from the dashboard (API keys), then
       `npx vercel@latest env add SUPABASE_SECRET_KEY production --sensitive` in the repository root.
@@ -338,9 +356,10 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
       `npx vercel@latest --help` (Vercel CLI 65.16.0, 14 Nov 2026); `--body` by `gh secret set --help`. Not yet
       run. The value is visible in the process list while each command runs, which is acceptable on the
       owner's own PC. Check afterwards that the copies match: the planner's `/api/dashboard` answers 401
-      without the token, and the web app's dashboard loads its planner section (a wrong copy gives "The
-      planner service rejected MONDAY's token"); the smoke workflow's `/api/dashboard` step checks the GitHub
-      copy.
+      without the token, and the web app's dashboard loads its planner section (a wrong copy gives the badge
+      "Planner service unavailable — in-app assistant" with "The planner service is not set up correctly for
+      this site.", and the runtime log shows `planner GET /api/dashboard: HTTP 401`); the smoke workflow's
+      `/api/dashboard` step checks the GitHub copy.
 11. Deploy the planner first: `npx vercel@latest deploy --prod --cwd fastapi-backend`. Open its address: `/` should
     answer `status: ok`, `planner: llm`, `auth_required: true`. Fix `LIFEOPS_BACKEND_URL` if the address differs.
     Then deploy the web app: `npx vercel@latest deploy --prod` in the repository root. If the web app's address
@@ -353,11 +372,13 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
 
 - `curl -sI https://lifeops-ai-sigma.vercel.app/login` answers 200. The planner's `/` answers `status ok`,
   `planner llm`. `/api/dashboard` on the planner without the token answers 401.
-- In a private window, "Try the live demo" signs in, `/app` loads, and the first-visit briefing arrives within
-  seconds and does not say "Ranked by simple rules".
-- Chat: "Block 3-5 pm tomorrow for a gym push workout." gives a card, and **Save** puts it in the calendar.
-- Week plan: **Create plan** gives a plan within seconds; a reload during drafting shows "Drafting your week
-  plan" and then the plan.
+- In a private window, "Try the live demo" signs in, `/app` loads, and the first-visit briefing arrives (about
+  27 s in a November 2026 measurement: the model writes the whole briefing) and does not say "Ranked by simple
+  rules".
+- Chat: "Block 3-5 pm tomorrow for a gym push workout." gives a card (2 to 6 s), and **Save** puts it in the
+  calendar.
+- Week plan: **Create plan** gives a plan (about 30 s in the same measurement); a reload during drafting shows
+  "Drafting your week plan" and then the plan.
 - Dashboard: "Plan it" with "Block Thursday 2-4 pm for deep work and draft an email to Sam" gives mode
   service and planner llm. **Approve**, then **Run**, writes the block. After about 15 minutes without use the
   dashboard still loads its planner section.
@@ -373,7 +394,10 @@ prompt + M completion tokens in X s`, and no "permission denied for table" or "M
 loads and names MONDAY, that Supabase's auth health answers, that the planner reports `status ok` and
 `planner llm`, and (with the token secret) that the planner can read its database through
 `/api/dashboard`. That query is the daily activity that keeps a free Supabase project from being paused.
-On Mondays and on manual runs it also asks the planner for one plan, which is one real model call.
+On Mondays and on manual runs it also asks the planner for one plan, which is one real model call; it sends
+the current time in Zurich with the zone, as the web app does. With the repository variable `PAGES_URL` set it
+also checks the GitHub Pages edition, and fails while that edition's function cannot reach the planner or has
+no AI provider set up (`PAGES_DEPLOYMENT.md`, "Checks").
 
 While the four variables are not set, the run ends with a notice and counts as passed. A failing run sends
 the usual GitHub email. The last step switches the workflow on again through the API, because GitHub turns
@@ -387,8 +411,11 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
 - Vercel Hobby: functions run up to 300 s, which covers a chat turn, a week plan and "Plan it" with a model that
   answers in seconds. Monthly limits (active CPU, invocations, memory) pause features for up to 30 days when
   exceeded. Waiting for the model counts as I/O, not CPU. Not verified: whether Vercel keeps a function
-  running after the browser disconnects; a request cut off that way stays "running" until the stale window
-  (`LLM_TIMEOUT_MS` plus 2 minutes) has passed and then shows "did not finish".
+  running after the browser disconnects; a request cut off that way stays "running" until its stale window
+  has passed and then shows "did not finish". The windows: a chat turn or a week plan, twice `LLM_TIMEOUT_MS`
+  (main model, then fallback) plus 2 minutes, 240 s with the values above; "Plan it",
+  `LIFEOPS_BACKEND_TIMEOUT_MS` plus a chat turn's window plus 1 minute, 360 s, which the app caps at Vercel
+  Hobby's 300 s (`LIFEOPS_MAX_REQUEST_MS` sets another cap).
 - Supabase free: 500 MB database, pauses after 7 days without database activity.
 - Cloudflare Workers AI free: 10,000 neurons a day for the whole account (shared with the ai-scientist demo),
   no card; above it nothing runs until the next day. The caps in section 4 are sized for it (not yet run).
@@ -398,9 +425,19 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
 - **"permission denied for table ..."**: the grants migration was not applied. Run `supabase db push`.
 - **"Missing Supabase environment variable"**: one of the five Supabase settings in section 3.1 is missing.
   `VITE_` settings are read at build time, so redeploy after changing them.
-- **The dashboard says the planner is stopped**: check `LIFEOPS_BACKEND_URL` and that the token is the same in
-  both projects. After an idle period the first call can be slow; raise `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS`.
-- **"The planner service rejected MONDAY's token"**: `LIFEOPS_BACKEND_TOKEN` differs between the projects.
+- **The dashboard shows "Planner service offline — in-app assistant"** ("The planner service could not be
+  reached."): check `LIFEOPS_BACKEND_URL` and that the planner is up. **"Planner service unavailable — in-app
+  assistant"** with "The planner service did not answer within 10 s.": after an idle period the first call can
+  be slow; raise `LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS`.
+- **"Planner service unavailable — in-app assistant" with "The planner service is not set up correctly for this
+  site."**: the planner refused the token (HTTP 401 in the runtime log): `LIFEOPS_BACKEND_TOKEN` is missing or
+  differs between the projects.
+- **"The AI assistant is not set up on this site yet, so this request could not be answered."** and the dashboard
+  badge "AI not set up on this site": `LLM_BASE_URL` is not set (the hosted site never falls back to a local
+  model). **"The AI assistant is not set up correctly on this site right now."**: Cloudflare refused
+  `LLM_API_KEY` or the model in `LLM_MODEL` / `LLM_FALLBACK_MODEL`; the runtime log names which.
+- **"MONDAY may have been updated since this page was opened. Reload the page and try again."**: a tab opened
+  before a deploy called a server function that was renamed, moved or removed since. Reloading fixes it.
 - **"... rate limit reached"** or other refusals from Cloudflare Workers AI: a rate limit, or the account's
   10,000 daily neurons are used up (possibly by the ai-scientist demo, which shares them). The fallback model
   is tried after a 429, but it draws on the same allowance. Look at the usage in the Cloudflare dashboard;

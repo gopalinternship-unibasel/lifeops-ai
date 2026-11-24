@@ -8,13 +8,18 @@ GitHub Pages serves only static files, and LifeOps needs a server: its 28 server
 server-only secrets (the AI key, the Supabase secret key, the planner token). So the Pages edition has
 two halves:
 
-| Part                   | Where                                                                     | Released by                                                       |
-| ---------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Pages and browser code | GitHub Pages, project site `/lifeops-ai/`                                 | `.github/workflows/pages.yml`, started by `npm run release:pages` |
-| Server functions       | Supabase Edge Function `lifeops-api` in the app's Supabase project (Deno) | `npm run release:pages` (from a computer)                         |
-| Database and sign-in   | The same Supabase project as the Vercel deployment                        | (unchanged)                                                       |
-| Planner (FastAPI)      | The same Vercel project `lifeops-planner`, called with its own token      | (unchanged)                                                       |
-| AI model               | Cloudflare Workers AI, the same account and models                        | (unchanged)                                                       |
+| Part                   | Where                                                                     | Released by                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Pages and browser code | GitHub Pages, project site `/lifeops-ai/`                                 | `.github/workflows/pages.yml`, started by `npm run release:pages`                               |
+| Server functions       | Supabase Edge Function `lifeops-api` in the app's Supabase project (Deno) | `npm run release:pages` (from a computer, on `main`)                                            |
+| Database and sign-in   | The same Supabase project as the Vercel deployment                        | (unchanged)                                                                                     |
+| Planner (FastAPI)      | The same Vercel project `lifeops-planner`, called with its own token      | (unchanged once the function's `LIFEOPS_BACKEND_TOKEN` is set and accepted; see below)         |
+| AI model               | Cloudflare Workers AI, the same account and models                        | (unchanged once the function's `LLM_BASE_URL` and `LLM_API_KEY` are set; see below)            |
+
+The function reaches the planner and the AI model only once its three secrets are set ("Settings and
+secrets of the function" below). `npm run release:pages` checks that they exist
+before it deploys, and its smoke test fails while the function cannot use the planner or has no AI
+provider set up (a wrong AI key shows only in an AI call, for example with the smoke test's `--chat`).
 
 ## How a request travels
 
@@ -32,6 +37,12 @@ two halves:
    Vercel, bundled for Deno; it checks the user's token (`requireSupabaseAuth`) and does the work.
 5. The answer goes back with the CORS headers, including `x-tss-serialized` and `x-tss-raw`, which the
    TanStack client must be able to read.
+6. An error the TanStack client cannot read by itself, such as the Supabase gateway's 546 or 504 in
+   JSON, becomes a short sentence in the browser (`src/lib/server-fn-errors.ts`, installed by
+   `src/start.ts` in every build, Vercel included). Without that check TanStack took such an answer for
+   the function's result: "Plan it", for example, cleared the text and showed no error. On the server,
+   a call to a server function the build does not have answers 404 and an unreadable payload 400,
+   instead of TanStack's 500.
 
 ## Building
 
@@ -67,20 +78,38 @@ The other builds are unchanged: `npm run build` (CI, local) and `NITRO_PRESET=ve
 npm run release:pages
 ```
 
-`scripts/pages/release.mjs` releases both halves from one commit, because the Pages client calls the
-function's server functions by an id made from their file path and export name. It:
+`scripts/pages/release.mjs` releases both halves from one commit of `main`, because the Pages client
+calls the function's server functions by an id made from their file path and export name. Run it from
+`main`. It:
 
-1. stops unless the working tree is clean, `HEAD` is pushed and CI passed for it (`--skip-ci-check`
-   skips the CI check);
-2. builds, applies `supabase/functions/lifeops-api/settings.env` (`supabase secrets set --env-file`),
-   deploys the function (`supabase functions deploy lifeops-api --no-verify-jwt --use-api`: bundled by
-   Supabase, no Docker, limit 5 MB) and runs the smoke test against it;
-3. starts the Pages workflow for the same branch (`gh workflow run pages.yml`), which builds and
-   publishes the browser files.
+1. stops unless the working tree is clean, the branch is `main`, `HEAD` is pushed and CI passed for it
+   (`--skip-ci-check` skips the CI check). The `github-pages` environment publishes from `main` only, so
+   a release from another branch would deploy that branch's server code and then fail to publish the
+   site;
+2. runs `scripts/pages/deploy-function.mjs`, which lists the project's secrets (names only) and stops
+   while `LLM_BASE_URL`, `LLM_API_KEY` or `LIFEOPS_BACKEND_TOKEN` is missing (`--allow-missing-secrets`
+   deploys anyway), builds, applies `supabase/functions/lifeops-api/settings.env`
+   (`supabase secrets set --env-file`), names project secrets that `settings.env` no longer lists
+   (`--prune` unsets them; see below) and deploys the function
+   (`supabase functions deploy lifeops-api --no-verify-jwt --use-api`: bundled by Supabase, no Docker,
+   limit 5 MB);
+3. runs the smoke test against the function as a new anonymous demo user (`--demo-user`, see "Checks"),
+   which also fails while the function cannot use the planner or has no AI provider set up. The
+   function is deployed by then: the script says so and how to publish the same commit once the cause
+   is fixed;
+4. starts the Pages workflow on `main` for exactly that commit
+   (`gh workflow run pages.yml --ref main -f sha=<commit>`), so a push to `main` in the meantime does not
+   change what is published, then waits for the run (`gh run watch --exit-status`). If the workflow
+   fails, the script fails too and says so: the function then runs the new commit and the site the old
+   one until the workflow passes (`gh run rerun <id>`, or a new release from `main`). `--no-wait` only
+   starts the workflow.
 
-It reads the public build values from the environment or from the repository variables
-`SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. `npm run deploy:pages-function` runs step 2 alone. The
-Supabase CLI is found on the PATH, in `SUPABASE_CLI`, or in `~/tools/supabase/`.
+The workflow checks that the commit it builds is on `main`; started by hand without `sha`, it builds
+the head of `main`. The script reads the public build values from the environment or from the
+repository variables `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. `npm run deploy:pages-function`
+runs step 2 alone and warns when the branch is not `main` or the working tree has changes, because the
+site is then not on the same commit as the function. The Supabase CLI is found on the PATH, in
+`SUPABASE_CLI`, or in `~/tools/supabase/`.
 
 JWT verification by the Supabase gateway is off for this function (`verify_jwt = false` in
 `supabase/config.toml` and `--no-verify-jwt`): the CORS preflight carries no token, and the function's
@@ -92,7 +121,8 @@ code checks the token of every call.
    GitHub Pages with "GitHub Actions" as its source
    (`gh api -X POST repos/OWNER/REPO/pages -f build_type=workflow`).
 2. The function's three secrets (below) and the planner's extra token, then a redeploy of the planner.
-3. Merge to `main`, wait for CI, run `npm run release:pages`.
+   `npm run release:pages` stops while one of the three is missing.
+3. Merge to `main`, wait for CI, run `npm run release:pages` on `main`.
 4. Optional: the repository variable `PAGES_URL` (`https://gopalinternship-unibasel.github.io/lifeops-ai/`)
    so the daily `smoke.yml` checks the Pages site and the function too.
 5. Optional: in Supabase, Authentication, URL Configuration, add the redirect URL
@@ -106,6 +136,12 @@ code checks the token of every call.
 app path, the models, the timeouts, the planner's URL and the demo limits (the same values as on
 Vercel except the timeouts below).
 
+Deleting a line from `settings.env` does not remove the setting: `supabase secrets set --env-file`
+adds and overwrites names but never removes one, so the old value stays in force on the project. The
+deploy names such settings (they are on the project but not in the file); remove them with
+`supabase secrets unset NAME --remote=<project>`, or deploy with `--prune`, which unsets them. The three
+secrets below and Supabase's own `SUPABASE_` names are never unset that way.
+
 Three secrets are set separately and never written to the repository:
 
 | Secret                  | Value                                                            |
@@ -115,11 +151,22 @@ Three secrets are set separately and never written to the repository:
 | `LIFEOPS_BACKEND_TOKEN` | a token of its own for the planner                               |
 
 Set them with `supabase secrets set --env-file <file> --remote=<project>` from a file outside the
-repository (delete it afterwards), or in the Supabase dashboard (Edge Functions, Secrets). The planner
-accepts the function's token through `LIFEOPS_BACKEND_EXTRA_TOKENS` in the Vercel project
-`lifeops-planner` (`vercel env add LIFEOPS_BACKEND_EXTRA_TOKENS --environment production --sensitive`),
-next to the web app's `LIFEOPS_BACKEND_TOKEN`; redeploy the planner after changing it, and add the token
-there before the function starts sending it. Either token can then be replaced without the other.
+repository (delete it afterwards), or in the Supabase dashboard (Edge Functions, Secrets). The function
+reads a new secret at once, without a redeploy (Supabase's secrets guide, read 24 Nov 2026);
+`supabase secrets list --remote=<project>` shows which names are set. The planner accepts the
+function's token through `LIFEOPS_BACKEND_EXTRA_TOKENS` in the Vercel project `lifeops-planner`
+(`vercel env add LIFEOPS_BACKEND_EXTRA_TOKENS --environment production --sensitive`), next to the web
+app's `LIFEOPS_BACKEND_TOKEN`; redeploy the planner after changing it, and add the token there before
+the function starts sending it. Either token can then be replaced without the other.
+
+What visitors get while a secret is missing (the function also names the missing ones in its log
+when a worker starts: `lifeops-api: function secrets not set: ...`):
+
+| Missing                                                | Visitors see                                                                                                                                                                                                                 | The function's log says                                                                                     |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `LLM_BASE_URL`                                         | Chat, week plans and reply drafts answer "The AI assistant is not set up on this site yet, so this request could not be answered." The dashboard's AI badge says "AI not set up on this site". No local model is tried. | `[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty); the request was not sent.` (a `[plan]` line that starts the same way for week plans) |
+| `LLM_API_KEY`, or a wrong one                          | "The AI assistant is not set up correctly on this site right now. Please try again later." (when Cloudflare refuses the key with 401 or 403)                                                                             | `[llm] Cloudflare Workers AI rejected the API key (HTTP 401); check LLM_API_KEY.`                           |
+| `LIFEOPS_BACKEND_TOKEN`, or one the planner does not accept | The dashboard's planner badge "Planner service unavailable — in-app assistant" and "The planner service is not set up correctly for this site."; "Plan it" answers with the in-app assistant instead.           | `[lifeops] planner GET /api/dashboard: HTTP 401: ...` (no token is sent while the secret is unset)          |
 
 `SUPABASE_URL` and the project's keys are injected by Supabase. Names starting with `SUPABASE_` are
 reserved there, so `index.ts` derives the `SUPABASE_PUBLISHABLE_KEY` and `SUPABASE_SECRET_KEY` the
@@ -129,15 +176,23 @@ today `lifeops-api` is the only one.
 
 ## Differences from the Vercel deployment
 
-- **Time per request.** Supabase answers 504 when a function sends nothing for 150 s (request idle
-  timeout, every plan; the wall clock is 150 s on the Free plan and 400 s on paid plans). Vercel allows
-  300 s. So `LLM_TIMEOUT_MS` is 40000 (Vercel: 60000), `LIFEOPS_BACKEND_TIMEOUT_MS` is 55000 (the
-  planner's own model timeout is 45 s; a slower planner answer turns into the in-app fallback), and
-  `LIFEOPS_MAX_REQUEST_MS` is 160000, so a request Supabase cut off shows as interrupted after 160 s
-  instead of up to 5 minutes later. The longest "Plan it" request the code allows is about 55 s for the
-  planner, then a chat turn of up to 40 s (plus 40 s on the fallback model after a fast 401, 403, 404,
-  429 or 503), plus database work: it should stay under 150 s, and with the usual answer times of a few
-  seconds the limit does not come up.
+- **Time per request.** Supabase answers 504 when a request sends nothing for 150 s (the request idle
+  timeout, on every plan). Separately, a function worker lives at most 150 s on the Free plan and 400 s
+  on paid plans (the wall clock, counted per worker), and one worker can serve several requests in that
+  time (Supabase's limits page, read 24 Nov 2026). Vercel allows 300 s per request. So `LLM_TIMEOUT_MS`
+  is 40000 (Vercel: 60000), `LIFEOPS_BACKEND_TIMEOUT_MS` is 55000 (the planner's own model timeout is
+  45 s; the request asks the planner to stop a few seconds before 55 s, and a plan it finishes later is
+  not stored, so "Plan it" then answers with the in-app assistant without leaving a second set of
+  proposals), and `LIFEOPS_MAX_REQUEST_MS` is 160000, so a request Supabase cut off shows as interrupted
+  after 160 s instead of up to 5 minutes later. The longest "Plan it" request the code allows is about
+  55 s for the planner, then a chat turn of up to 40 s (plus 40 s on the fallback model after a 401,
+  403, 404, 429 or 503), plus database work: that stays under the 150 s idle timeout. The wall clock is
+  not bounded this way: a long request that lands on a worker that is already warm may be cut short with
+  546 ("wall clock time limit reached") sooner, however short the timeouts are. It then shows as
+  interrupted and can be tried again. Answer times measured on the Vercel edition with the same model
+  (November 2026): about 30 s for a week plan, about 27 s for the first-visit briefing and 2 to 6 s for
+  other chat turns, so a week plan has about 10 s to spare under the 40 s model timeout. 60000 as on
+  Vercel would give more room, but the longest "Plan it" could then pass 150 s.
 - **CPU time.** Supabase allows 2 s of CPU per worker (waiting for the model or the database does not
   count). Very heavy requests would show as `CPU Time exceeded` in the function's logs.
 - **Shared origin.** All GitHub Pages sites of one account share the origin
@@ -146,8 +201,9 @@ today `lifeops-api` is the only one.
   trusted pages on this account, or give the Pages edition its own domain.
 - **Google.** Connecting Gmail and Google Calendar is not set up on either deployment; both use the demo
   inbox and calendar. The Google OAuth callback is a server route that the Pages edition does not serve.
-- **Shared limits.** The demo limits (`AI_*`) count rows in the shared database, so a user's messages on
-  both editions count together. Both editions use the same Cloudflare daily allowance.
+- **Shared limits.** The demo limits (`AI_*`) are counted in the shared database (see
+  `VERCEL_DEPLOYMENT.md`, section 4), so a user's requests on both editions count together. Both
+  editions use the same Cloudflare daily allowance.
 - **Pages are drawn in the browser.** Every address gets the same static shell with an empty slot for
   the page, so the Pages build marks every route client-only (`src/router.tsx`, `src/lib/static-shell.ts`)
   and the page appears right after the shell is hydrated. Without that, the landing page logged React
@@ -170,17 +226,33 @@ node scripts/pages/smoke-edge.mjs --url https://<project>.supabase.co/functions/
 
 `smoke-edge.mjs` checks the preflight, the Origin allow-list, routing and that the server code answers.
 `--demo-user` signs in a new anonymous user (needs `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`) and
-calls real server functions; `--chat` adds one chat turn (uses the AI allowance). CI (on every push to
-`main` and every pull request to it) builds the Pages edition, type-checks the function with Deno and
-runs the local Deno check (job `pages` in `ci.yml`).
+calls real server functions. It also fails when the dashboard shows that the function cannot use the
+planner (offline, token refused or too slow: `FAIL planner reachable from the function`) or has no AI
+provider set up (`FAIL AI provider configured on the function`), without making an AI call: the
+dashboard itself answers 200 in both cases. A wrong `LLM_API_KEY` passes this check; only an AI call
+(`--chat`) shows it. `npm run release:pages` and the daily `smoke.yml` use `--demo-user`.
+`--chat` adds one chat turn (uses the AI allowance). CI (on every push to `main` and every pull request
+to it) builds the Pages edition, type-checks the function with Deno and runs the local Deno check (job
+`pages` in `ci.yml`); that local check runs without the secrets and without `--demo-user`.
 
 ## Common errors
 
-| What you see                                                              | Cause and fix                                                                                                                                                      |
-| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Every action fails with "Failed to fetch"                                 | The function is not deployed, or the page's Origin is not in `LIFEOPS_ALLOWED_ORIGINS`.                                                                            |
-| "Not found" from the function                                             | The client and the function were built with different app paths (`LIFEOPS_PAGES_BASE` / `LIFEOPS_APP_BASE`).                                                       |
-| "Server function info not found for ...", validation errors or wrong data | The function and the Pages site come from different commits (a server function was added, renamed or moved, or its input changed): run `npm run release:pages`.    |
-| "Missing Supabase environment variable(s)"                                | The function could not derive the Supabase keys; check the function's logs in the Supabase dashboard.                                                              |
-| The dashboard says the planner is unavailable                             | The function's `LIFEOPS_BACKEND_TOKEN` is not among the planner's accepted tokens, or the planner was not redeployed after `LIFEOPS_BACKEND_EXTRA_TOKENS` changed. |
-| 546 or 504 from the function                                              | The time or CPU limit was reached; see the function's logs.                                                                                                        |
+The sentences in quotes are what visitors read; the function's logs are in the Supabase dashboard
+(Edge Functions, `lifeops-api`, Logs).
+
+| What you see                                                                                                                         | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every action fails with "Could not reach MONDAY. Check your connection and try again." (the browser's "Failed to fetch")             | The page's Origin is not in `LIFEOPS_ALLOWED_ORIGINS` (the function answers 403 without CORS headers), or the network is down. A function that is not deployed may show this row or the next one, depending on how the gateway answers the browser's preflight (not checked).                                                                                                                      |
+| Every action fails with "The server is not available right now. Please try again in a moment."                                       | The function could not start (503; its log says `lifeops-api: start-up failed` and why), the gateway answered 502 or 503, or the function is not deployed (the gateway's 404). Deploy with `npm run release:pages`.                                                                                                                                                                                |
+| "Not found" from the function                                                                                                        | The client and the function were built with different app paths (`LIFEOPS_PAGES_BASE` / `LIFEOPS_APP_BASE`).                                                                                                                                                                                                                                                                                       |
+| "MONDAY may have been updated since this page was opened. Reload the page and try again."                                            | The page called a server function this build of the function does not have (HTTP 404; the log says `Server function info not found for <id>`). Usually a tab opened before a release in which a server function was renamed, moved or removed: reloading fixes it. If it stays after a reload, the function and the Pages site come from different commits: run `npm run release:pages` on `main`. |
+| Validation errors or wrong data after a release                                                                                      | Same cause as the row above when a server function's input changed: reload, and if it stays, release both halves again from `main`.                                                                                                                                                                                                                                                                |
+| "Missing Supabase environment variable(s)"                                                                                           | The function could not derive the Supabase keys; check the function's logs.                                                                                                                                                                                                                                                                                                                        |
+| "The AI assistant is not set up on this site yet, so this request could not be answered." and the badge "AI not set up on this site" | `LLM_BASE_URL` is not set as a function secret. Set it, and `LLM_API_KEY`, as in "Settings and secrets of the function"; no redeploy is needed. Check with `supabase secrets list --remote=<project>`.                                                                                                                                                                                             |
+| "Could not reach Ollama at http://localhost:11434/v1 ..." in a chat                                                                  | A message stored before the hosted sites stopped falling back to a local model (old chat history keeps it). If a new request shows it, the function bundle was built without `VITE_HOSTED_DEMO=true` (the default of `scripts/pages/build.mjs`): rebuild and deploy with the default, or add `LIFEOPS_HOSTED=1` to `settings.env`.                                                                 |
+| "The AI assistant is not set up correctly on this site right now. Please try again later."                                           | Cloudflare refused the key or the model: `LLM_API_KEY` is missing or wrong, or `LLM_MODEL` / `LLM_FALLBACK_MODEL` is not served. The function's log names which.                                                                                                                                                                                                                                   |
+| The planner badge "Planner service unavailable — in-app assistant" and "The planner service is not set up correctly for this site."  | The planner refused the function's token (HTTP 401 in the log): the secret `LIFEOPS_BACKEND_TOKEN` is not set on the function (then no token is sent at all), or it is not in the planner's `LIFEOPS_BACKEND_EXTRA_TOKENS`, or the planner was not redeployed after that changed.                                                                                                                  |
+| The planner badge "Planner service offline — in-app assistant" and "The planner service could not be reached."                       | `LIFEOPS_BACKEND_URL` in `settings.env` is wrong, or the planner is down (open its address: `/` answers `status: ok`).                                                                                                                                                                                                                                                                             |
+| "The server took too long to answer. Please try again in a moment." (546 or 504 in the browser's network tab)                        | The gateway's idle timeout, the worker's wall clock or the CPU limit was reached (see "Time per request"); the function's logs say which (`wall clock time limit reached`, `CPU Time exceeded`).                                                                                                                                                                                                   |
+| `release:pages` or `deploy:pages-function` stops: "the function secrets ... are not set"                                             | Set them (above), or pass `--allow-missing-secrets` to deploy anyway.                                                                                                                                                                                                                                                                                                                              |
+| The smoke test reports `FAIL planner reachable from the function` or `FAIL AI provider configured on the function`                   | See the planner and AI rows above; the smoke test prints what the dashboard returned.                                                                                                                                                                                                                                                                                                              |
