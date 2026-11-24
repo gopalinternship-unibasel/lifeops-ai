@@ -91,6 +91,55 @@ describe("guardServerFnResponse with TanStack's client fetcher", () => {
     await expect(callWith(unauthorized)).rejects.toThrow("Unauthorized: Invalid token");
     const session = () => new Response("Chat session not found", { status: 404 });
     await expect(callWith(session)).rejects.toThrow("Chat session not found");
+    // The sign-in check's developer message on a local run without Supabase settings: capitals
+    // and underscores alone do not make a body the platform's.
+    const missing =
+      "Missing Supabase environment variable(s): SUPABASE_URL. Configure them in .env.local or Vercel Project Settings.";
+    await expect(callWith(() => new Response(missing, { status: 500 }))).rejects.toThrow(missing);
+  });
+
+  // Vercel's own plain-text error answers. The 414 body and headers were read from the live
+  // site on 24 Nov 2026 (an address of 70,000 characters); the 500 is assumed to have the same
+  // layout (not seen live).
+  const vercelText = (status: number, code: string, withHeader = true) => () =>
+    new Response(`An error occurred\n\n${code}\n\nfra1::bfdqb-1795559271982-f774878aeac9\n`, {
+      status,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        ...(withHeader ? { "x-vercel-error": code } : {}),
+      },
+    });
+
+  it("turns Vercel's plain-text 500 for a crashed function into a sentence", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(callWith(vercelText(500, "FUNCTION_INVOCATION_FAILED"))).rejects.toThrow(SERVER_FN_MESSAGES.failed);
+    // Also when a proxy dropped the header: the request id at the end of the text gives it away.
+    await expect(callWith(vercelText(500, "FUNCTION_INVOCATION_FAILED", false))).rejects.toThrow(
+      SERVER_FN_MESSAGES.failed,
+    );
+  });
+
+  it("turns a request the platform found too large into the 'too large' sentence", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // toThrow(undefined) would accept any error, so pin the sentence first.
+    expect(SERVER_FN_MESSAGES.tooLarge).toBe(
+      "This request is too large for the server. Please shorten what you entered and try again.",
+    );
+    await expect(callWith(vercelText(414, "URI_TOO_LONG"))).rejects.toThrow(SERVER_FN_MESSAGES.tooLarge);
+    await expect(callWith(vercelText(413, "FUNCTION_PAYLOAD_TOO_LARGE"))).rejects.toThrow(SERVER_FN_MESSAGES.tooLarge);
+    // A gateway's 413 without any Vercel marker, in plain text or HTML.
+    await expect(
+      callWith(() => new Response("Request Entity Too Large", { status: 413, headers: { "content-type": "text/plain" } })),
+    ).rejects.toThrow(SERVER_FN_MESSAGES.tooLarge);
+    await expect(
+      callWith(
+        () =>
+          new Response("<html><body>413 Request Entity Too Large</body></html>", {
+            status: 413,
+            headers: { "content-type": "text/html" },
+          }),
+      ),
+    ).rejects.toThrow(SERVER_FN_MESSAGES.tooLarge);
   });
 
   it("passes TanStack's own answers through: serialized results and errors, notFound()", async () => {

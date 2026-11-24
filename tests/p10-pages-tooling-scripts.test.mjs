@@ -13,6 +13,8 @@ import { findNewRun, release, releaseBlocker, runFromOutput } from "../scripts/p
 import {
   REQUIRED_SECRETS,
   missingRequiredSecrets,
+  pruneRequest,
+  secretListError,
   secretNamesFromList,
   staleSettingNames,
 } from "../scripts/pages/secrets.mjs";
@@ -65,6 +67,15 @@ const ALL_SECRETS = JSON.stringify([
   })),
 ]);
 
+// The exact output of Supabase CLI 3.0.0 (`secrets list --remote=<ref>`), read on 24 Nov 2026 by
+// running the CLI against a local stand-in for the Management API (made-up ref and digests).
+const CLI_3_JSON =
+  '{"secrets":[{"name":"LIFEOPS_BACKEND_URL","value":"3f0c000000000000000000000000000000000000000000000000000000000000","updated_at":"2026-11-20T10:00:00Z"},{"name":"LLM_BASE_URL","value":"9a1b111111111111111111111111111111111111111111111111111111111111","updated_at":"2026-11-20T10:00:00Z"},{"name":"SUPABASE_URL","value":"77aa222222222222222222222222222222222222222222222222222222222222"}],"message":"","target":{"kind":"linked","project_ref":"abcdefghijklmnopqrst","environment":"unverified"}}\n';
+const CLI_3_TABLE =
+  "\n  \n   NAME                | DIGEST                                                           \n  ---------------------|------------------------------------------------------------------\n   LIFEOPS_BACKEND_URL | 3f0c000000000000000000000000000000000000000000000000000000000000 \n   LLM_BASE_URL        | 9a1b111111111111111111111111111111111111111111111111111111111111 \n   SUPABASE_URL        | 77aa222222222222222222222222222222222222222222222222222222222222 \n\n";
+const CLI_3_ERROR =
+  '{"target":{"kind":"linked","project_ref":"abcdefghijklmnopqrst","environment":"unverified"},"_tag":"Error","error":{"code":"SecretsListUnexpectedStatusError","message":"unexpected list secrets status 401: {\\"message\\":\\"Invalid access token\\"}"}}\n';
+
 describe("secret names", () => {
   it("keeps one list of required secrets for the deploy check and the function's start-up log", () => {
     expect(REQUIRED_SECRETS).toEqual([...HANDLER_REQUIRED]);
@@ -104,6 +115,19 @@ describe("secret names", () => {
     ]);
     // An older CLI's table prints the names as Markdown code.
     expect(secretNamesFromList("  NAME | DIGEST\n  `LLM_API_KEY` | `abc`\n")).toEqual(["LLM_API_KEY"]);
+  });
+
+  it("reads the Supabase CLI 3.0.0 output exactly as it prints it", () => {
+    const names = ["LIFEOPS_BACKEND_URL", "LLM_BASE_URL", "SUPABASE_URL"];
+    expect(secretNamesFromList(CLI_3_JSON)).toEqual(names);
+    expect(secretNamesFromList(CLI_3_TABLE)).toEqual(names);
+    expect(secretListError(CLI_3_JSON)).toBeNull();
+    expect(secretNamesFromList(CLI_3_ERROR)).toEqual([]);
+    expect(secretListError(CLI_3_ERROR)).toMatch(/^unexpected list secrets status 401: .*Invalid access token/);
+    // A target that names a branch is not a secret.
+    const branch = CLI_3_JSON.replace('"kind":"linked"', '"kind":"branch","name":"develop"');
+    expect(secretNamesFromList(branch)).toEqual(names);
+    expect(secretNamesFromList('{"secrets":[],"message":"","target":{"name":"develop"}}')).toEqual([]);
   });
 
   it("names the missing required secrets", () => {
@@ -157,15 +181,44 @@ describe("deploy-function.mjs", () => {
     expect(done[0]).toMatch(/^supabase secrets set --env-file \S*settings\.env --remote=projectref --yes$/);
     expect(done[1]).toBe("supabase functions deploy lifeops-api --remote=projectref --no-verify-jwt --use-api --yes");
     expect(fake.logs.join("\n")).toMatch(/WARN .*LLM_EXTRA_OLD is set on the project but not in settings\.env/);
+    expect(fake.logs.join("\n")).toMatch(/deploy with --prune=LLM_EXTRA_OLD\)/);
   });
 
-  it("unsets those settings with --prune, before the deploy", async () => {
-    const listed = JSON.stringify([...JSON.parse(ALL_SECRETS), { name: "LLM_EXTRA_OLD" }]);
-    const fake = fakeIo({ "supabase secrets list": { stdout: listed } });
-    await deploy(fake.io, ["--skip-build", "--prune"]);
+  // A secret of another function in the same project looks like a removed setting too.
+  const withStale = JSON.stringify([...JSON.parse(ALL_SECRETS), { name: "LLM_EXTRA_OLD" }, { name: "OTHER_FUNCTION_KEY" }]);
+
+  it("unsets only the settings named with --prune=, before the deploy", async () => {
+    const fake = fakeIo({ "supabase secrets list": { stdout: withStale } });
+    await deploy(fake.io, ["--skip-build", "--prune=LLM_EXTRA_OLD"]);
     const done = runs(fake.calls);
     expect(done[1]).toBe("supabase secrets unset LLM_EXTRA_OLD --remote=projectref --yes");
     expect(done[2]).toMatch(/^supabase functions deploy/);
+    expect(done.join("\n")).not.toContain("OTHER_FUNCTION_KEY");
+    expect(fake.logs.join("\n")).toMatch(/WARN .*OTHER_FUNCTION_KEY is set on the project but not in settings\.env/);
+  });
+
+  it("refuses a bare --prune, or a name that is not a removed setting, before anything changes", async () => {
+    const fake = fakeIo({ "supabase secrets list": { stdout: withStale } });
+    await expect(deploy(fake.io, ["--prune"])).rejects.toThrow(
+      /--prune needs the names to unset, as --prune=NAME,NAME.*LLM_EXTRA_OLD, OTHER_FUNCTION_KEY\. Nothing was changed\./,
+    );
+    await expect(deploy(fake.io, ["--prune=LLM_API_KEY"])).rejects.toThrow(/--prune names LLM_API_KEY, which is not a setting/);
+    await expect(deploy(fake.io, ["--prune=SUPABASE_URL,NOT_LISTED"])).rejects.toThrow(/--prune names SUPABASE_URL, NOT_LISTED/);
+    expect(runs(fake.calls)).toEqual([]);
+    // Without the list there is nothing to check the names against.
+    const unreadable = fakeIo({ "supabase secrets list": { status: 1, stderr: "Access token not provided" } });
+    await expect(deploy(unreadable.io, ["--allow-missing-secrets", "--prune=LLM_EXTRA_OLD"])).rejects.toThrow(
+      /--prune needs the project's list of secrets/,
+    );
+    expect(runs(unreadable.calls)).toEqual([]);
+  });
+
+  it("reads --prune names given in one or several flags", () => {
+    const stale = ["A", "B", "C"];
+    expect(pruneRequest([], stale)).toEqual({ names: [] });
+    expect(pruneRequest(["--prune=A, B", "--prune=B,C"], stale)).toEqual({ names: ["A", "B", "C"] });
+    expect(pruneRequest(["--prune="], stale).error).toMatch(/needs the names/);
+    expect(pruneRequest(["--prune"], []).error).toMatch(/not in settings\.env: none\./);
   });
 
   it("falls back to the plain list when the CLI does not know --output-format", () => {
@@ -174,6 +227,26 @@ describe("deploy-function.mjs", () => {
       "supabase secrets list --remote=projectref": { stdout: "  NAME | DIGEST\n  LLM_API_KEY | abc\n" },
     });
     expect(listSecretNames(fake.io, "supabase", "projectref")).toEqual({ names: ["LLM_API_KEY"] });
+  });
+
+  it("reads the CLI 3.0.0 list, and takes its error in JSON for a failure, not for no secrets", () => {
+    const ok = fakeIo({ "supabase secrets list --remote=projectref --output-format": { stdout: CLI_3_JSON } });
+    expect(listSecretNames(ok.io, "supabase", "projectref")).toEqual({
+      names: ["LIFEOPS_BACKEND_URL", "LLM_BASE_URL", "SUPABASE_URL"],
+    });
+    // An error document with exit status 0 is not an empty list: the plain list is asked next.
+    const failed = fakeIo({
+      "supabase secrets list --remote=projectref --output-format": { status: 0, stdout: CLI_3_ERROR },
+      "supabase secrets list --remote=projectref": { status: 0, stdout: CLI_3_TABLE },
+    });
+    expect(listSecretNames(failed.io, "supabase", "projectref")).toEqual({
+      names: ["LIFEOPS_BACKEND_URL", "LLM_BASE_URL", "SUPABASE_URL"],
+    });
+    const bothFail = fakeIo({
+      "supabase secrets list --remote=projectref --output-format": { status: 1, stdout: CLI_3_ERROR },
+      "supabase secrets list --remote=projectref": { status: 0, stdout: CLI_3_ERROR },
+    });
+    expect(listSecretNames(bothFail.io, "supabase", "projectref").error).toMatch(/Invalid access token/);
   });
 
   it("stops when the secrets cannot be listed, unless told to go on", async () => {
@@ -223,9 +296,9 @@ describe("release.mjs", () => {
 
   it("deploys, smoke-tests as a demo user, publishes exactly the released commit and waits for it", async () => {
     const fake = fakeIo(releaseAnswers());
-    await runRelease(fake.io, ["--prune"]);
+    await runRelease(fake.io, ["--prune=LLM_EXTRA_OLD", "--allow-missing-secrets"]);
     const runs = fake.calls.filter((c) => c.kind === "run");
-    expect(runs[0].line).toMatch(/deploy-function\.mjs --prune$/);
+    expect(runs[0].line).toMatch(/deploy-function\.mjs --prune=LLM_EXTRA_OLD --allow-missing-secrets$/);
     expect(runs[0].env.VITE_SERVER_FN_ORIGIN).toBe("https://ref.supabase.co/functions/v1/lifeops-api");
     expect(runs[1].line).toMatch(/smoke-edge\.mjs --url https:\/\/ref\.supabase\.co\/functions\/v1\/lifeops-api --demo-user$/);
     expect(runs[1].env).toEqual({ SUPABASE_URL: "https://ref.supabase.co", SUPABASE_PUBLISHABLE_KEY: "sb_publishable_x" });

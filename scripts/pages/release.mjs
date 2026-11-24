@@ -6,7 +6,7 @@
  *   npm run release:pages
  *   npm run release:pages -- --skip-ci-check            do not require a passed CI run
  *   npm run release:pages -- --allow-missing-secrets    passed on to deploy-function.mjs
- *   npm run release:pages -- --prune                    passed on to deploy-function.mjs
+ *   npm run release:pages -- --prune=NAME,NAME          passed on to deploy-function.mjs
  *   npm run release:pages -- --no-wait                  start the Pages workflow and do not wait for it
  *
  * 1. Checks that the working tree is clean, the branch is main (GitHub Pages publishes from main
@@ -25,10 +25,11 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { StepError, isMainModule, processIo, runScript } from "./process.mjs";
+import { isPruneFlag } from "./secrets.mjs";
 
 const PREFIX = "release:pages";
-/** Flags release:pages hands on to deploy-function.mjs. */
-const DEPLOY_FLAGS = ["--allow-missing-secrets", "--prune"];
+/** Flags release:pages hands on to deploy-function.mjs (--prune with its names). */
+const isDeployFlag = (arg) => arg === "--allow-missing-secrets" || isPruneFlag(arg);
 
 /** Why a release from `branch` is refused, or null for main. */
 export function releaseBlocker(branch) {
@@ -93,7 +94,7 @@ export async function release({ io, argv, root, env = process.env }) {
   step(
     "build and deploy the function",
     process.execPath,
-    [path.join(root, "scripts", "pages", "deploy-function.mjs"), ...DEPLOY_FLAGS.filter(has)],
+    [path.join(root, "scripts", "pages", "deploy-function.mjs"), ...argv.filter(isDeployFlag)],
     buildEnv,
   );
   // As a new anonymous demo user: real server functions, including the planner and AI checks.

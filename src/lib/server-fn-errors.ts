@@ -27,6 +27,7 @@ export const SERVER_FN_MESSAGES = {
   slow: "The server took too long to answer. Please try again in a moment.",
   unavailable: "The server is not available right now. Please try again in a moment.",
   busy: "The server is busy. Please wait a moment and try again.",
+  tooLarge: "This request is too large for the server. Please shorten what you entered and try again.",
   failed: "Something went wrong on the server. Please try again.",
 } as const;
 
@@ -35,10 +36,23 @@ const RAW_HEADER = "x-tss-raw";
 
 /**
  * Statuses that only a gateway or the hosting platform sends for a server-function call (bad
- * gateway, unavailable, gateway timeout, and Supabase's 546 for a worker that hit its time or
- * resource limit). Their bodies are the platform's, never a sentence the app wrote.
+ * gateway, unavailable, gateway timeout, Supabase's 546 for a worker that hit its time or
+ * resource limit, and the platform's refusals of a request body, address or headers that are too
+ * large). The app never answers with them, so their bodies are never a sentence the app wrote.
  */
-const PLATFORM_STATUSES = new Set([502, 503, 504, 546]);
+const PLATFORM_STATUSES = new Set([413, 414, 431, 502, 503, 504, 546]);
+
+/**
+ * Vercel's own error answers, whatever their status. Vercel names the error in an
+ * `x-vercel-error` header and ends its plain-text body with the request id, which starts with the
+ * region, for example (a 414 from the live site, 24 Nov 2026):
+ * "An error occurred\n\nURI_TOO_LONG\n\nfra1::bfdqb-1795559271982-f774878aeac9". Its 500 for a
+ * crashed function (FUNCTION_INVOCATION_FAILED) would otherwise reach a toast as it is, because a
+ * plain-text 500 is also how the app sends its own sentences. The app never sets that header or
+ * writes such an id, so its own plain-text errors still pass unchanged.
+ */
+const PLATFORM_ERROR_HEADER = "x-vercel-error";
+const PLATFORM_REQUEST_ID = /^[a-z]{3}\d(?:::[a-z]{3}\d)*::[a-z0-9]+-\d+-[0-9a-f]+\s*$/m;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -59,6 +73,7 @@ export function messageForStatus(status: number, body?: unknown): string {
   if (status === 500 && isRecord(body) && body.unhandled === true) return SERVER_FN_MESSAGES.outdated;
   if (status === 504 || status === 546) return SERVER_FN_MESSAGES.slow;
   if (status === 429) return SERVER_FN_MESSAGES.busy;
+  if (status === 413 || status === 414) return SERVER_FN_MESSAGES.tooLarge;
   // A 404 in JSON comes from a gateway (the Supabase gateway when the function is not deployed);
   // TanStack's own JSON 404 (notFound()) is passed on before this is asked.
   if (status === 502 || status === 503 || status === 404) return SERVER_FN_MESSAGES.unavailable;
@@ -70,7 +85,8 @@ export function messageForStatus(status: number, body?: unknown): string {
  * would misread (see the top of this file). Everything TanStack understands passes unchanged:
  * successful answers, serialized results and errors, raw responses, its notFound() and redirect
  * answers, and plain-text errors the app wrote ("Unauthorized: ..." from the sign-in check, which
- * the pages recognise as a signed-out state, or "Chat session not found").
+ * the pages recognise as a signed-out state, or "Chat session not found"). A plain-text answer
+ * from the hosting platform itself (see PLATFORM_ERROR_HEADER) gets a sentence instead.
  */
 export async function guardServerFnResponse(response: Response): Promise<Response> {
   if (response.ok) return response;
@@ -79,12 +95,16 @@ export async function guardServerFnResponse(response: Response): Promise<Respons
   const type = (response.headers.get("content-type") ?? "").toLowerCase();
   const isJson = type.includes("json");
   const isHtml = type.includes("text/html");
-  if (type && !isJson && !isHtml && !PLATFORM_STATUSES.has(response.status)) return response;
-
   const text = await response
     .clone()
     .text()
     .catch(() => "");
+  const fromPlatform =
+    PLATFORM_STATUSES.has(response.status) ||
+    response.headers.has(PLATFORM_ERROR_HEADER) ||
+    PLATFORM_REQUEST_ID.test(text);
+  if (type && !isJson && !isHtml && !fromPlatform) return response;
+
   let body: unknown;
   if (isJson) {
     try {

@@ -90,7 +90,7 @@ calls the function's server functions by an id made from their file path and exp
    while `LLM_BASE_URL`, `LLM_API_KEY` or `LIFEOPS_BACKEND_TOKEN` is missing (`--allow-missing-secrets`
    deploys anyway), builds, applies `supabase/functions/lifeops-api/settings.env`
    (`supabase secrets set --env-file`), names project secrets that `settings.env` no longer lists
-   (`--prune` unsets them; see below) and deploys the function
+   (`--prune=NAME,NAME` unsets the ones named; see below) and deploys the function
    (`supabase functions deploy lifeops-api --no-verify-jwt --use-api`: bundled by Supabase, no Docker,
    limit 5 MB);
 3. runs the smoke test against the function as a new anonymous demo user (`--demo-user`, see "Checks"),
@@ -139,8 +139,12 @@ Vercel except the timeouts below).
 Deleting a line from `settings.env` does not remove the setting: `supabase secrets set --env-file`
 adds and overwrites names but never removes one, so the old value stays in force on the project. The
 deploy names such settings (they are on the project but not in the file); remove them with
-`supabase secrets unset NAME --remote=<project>`, or deploy with `--prune`, which unsets them. The three
-secrets below and Supabase's own `SUPABASE_` names are never unset that way.
+`supabase secrets unset NAME --remote=<project>`, or deploy with `--prune=NAME,NAME`, which unsets the
+names given. Function secrets belong to the whole Supabase project, not to one function, so a secret
+that another function of the project uses would be named too: that is why `--prune` takes the names
+(only `lifeops-api` exists today). A bare `--prune`, or a name that is not on the list, stops the
+deploy before anything changes. The three secrets below and Supabase's own `SUPABASE_` names are
+never unset that way.
 
 Three secrets are set separately and never written to the repository:
 
@@ -254,5 +258,7 @@ The sentences in quotes are what visitors read; the function's logs are in the S
 | The planner badge "Planner service unavailable — in-app assistant" and "The planner service is not set up correctly for this site."  | The planner refused the function's token (HTTP 401 in the log): the secret `LIFEOPS_BACKEND_TOKEN` is not set on the function (then no token is sent at all), or it is not in the planner's `LIFEOPS_BACKEND_EXTRA_TOKENS`, or the planner was not redeployed after that changed.                                                                                                                  |
 | The planner badge "Planner service offline — in-app assistant" and "The planner service could not be reached."                       | `LIFEOPS_BACKEND_URL` in `settings.env` is wrong, or the planner is down (open its address: `/` answers `status: ok`).                                                                                                                                                                                                                                                                             |
 | "The server took too long to answer. Please try again in a moment." (546 or 504 in the browser's network tab)                        | The gateway's idle timeout, the worker's wall clock or the CPU limit was reached (see "Time per request"); the function's logs say which (`wall clock time limit reached`, `CPU Time exceeded`).                                                                                                                                                                                                   |
+| "Something went wrong on the server. Please try again."                                                                              | The function failed while handling the request (HTTP 500; its log says `lifeops-api: request failed` and why). Other error answers the page cannot read by itself, such as a gateway's error page, show the same sentence; the browser console then has a line `[lifeops] A server function answered HTTP <status>: ...` with what the server sent.                                                |
+| "This request is too large for the server. Please shorten what you entered and try again." (413 or 414)                              | The gateway refused a request body or address that was too large for it; the browser console line `[lifeops] A server function answered HTTP <status>: ...` shows what it sent.                                                                                                                                                                                                                    |
 | `release:pages` or `deploy:pages-function` stops: "the function secrets ... are not set"                                             | Set them (above), or pass `--allow-missing-secrets` to deploy anyway.                                                                                                                                                                                                                                                                                                                              |
 | The smoke test reports `FAIL planner reachable from the function` or `FAIL AI provider configured on the function`                   | See the planner and AI rows above; the smoke test prints what the dashboard returned.                                                                                                                                                                                                                                                                                                              |

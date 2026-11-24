@@ -23,9 +23,21 @@ export function isPlatformName(name) {
 }
 
 /**
- * Collects secret names from parsed JSON. The CLI's JSON shape is not documented, so this reads
- * the likely ones: an array of names or of { name, value } rows (possibly wrapped in an object),
- * and a plain map of name to digest. Strings that are values (digests) are never taken as names.
+ * Keys of the CLI's JSON envelope that describe the command, not secrets. Supabase CLI 3.0.0
+ * prints `secrets list --output-format json` as
+ *   {"secrets":[{"name":"LLM_BASE_URL","value":"<digest>","updated_at":"..."}],"message":"",
+ *    "target":{"kind":"linked","project_ref":"<ref>","environment":"unverified"}}
+ * and a failure as {"target":{...},"_tag":"Error","error":{"code":"...","message":"..."}} (exit 1).
+ * Both were read from the CLI's own output on 24 Nov 2026, run against a local stand-in for the
+ * Management API. A target of another kind (a branch) may carry a name, which is not a secret.
+ */
+const ENVELOPE_KEYS = new Set(["target", "error", "message", "_tag"]);
+
+/**
+ * Collects secret names from parsed JSON: the CLI 3.0.0 envelope above, and other likely shapes
+ * of other CLI versions (an array of names or of { name, value } rows, possibly wrapped in an
+ * object, or a plain map of name to digest). Strings that are values (digests) are never taken
+ * as names.
  */
 function namesFromJson(value, out) {
   if (Array.isArray(value)) {
@@ -39,6 +51,11 @@ function namesFromJson(value, out) {
     return;
   }
   if (!value || typeof value !== "object") return;
+  // The CLI's envelope: only its list holds secrets.
+  if (Array.isArray(value.secrets)) {
+    namesFromJson(value.secrets, out);
+    return;
+  }
   const name = value.name ?? value.Name ?? value.NAME;
   if (typeof name === "string") {
     if (NAME.test(name)) out.add(name);
@@ -50,7 +67,20 @@ function namesFromJson(value, out) {
     for (const [key] of entries) out.add(key);
     return;
   }
-  for (const [, item] of entries) namesFromJson(item, out);
+  for (const [key, item] of entries) if (!ENVELOPE_KEYS.has(key)) namesFromJson(item, out);
+}
+
+/**
+ * The CLI's error message when its JSON output is an error envelope ({"_tag":"Error", "error":
+ * {...}}), otherwise null. A list that reports an error must not be read as "no secrets".
+ */
+export function secretListError(output) {
+  const document = parseJsonDocument(String(output ?? "").trim());
+  if (!document || typeof document !== "object" || Array.isArray(document)) return null;
+  if (document._tag !== "Error" && !(document.error && !Array.isArray(document.secrets))) return null;
+  const error = document.error;
+  const message = error && typeof error === "object" ? (error.message ?? error.code) : error;
+  return typeof message === "string" && message.trim() ? message.trim() : "the CLI reported an error";
 }
 
 /** Parses `text` as JSON, or else the JSON document that starts on a line of its own (null if none). */
@@ -126,4 +156,41 @@ export function settingNames(envFileText) {
 export function staleSettingNames(listedNames, envFileText) {
   const keep = new Set([...settingNames(envFileText), ...REQUIRED_SECRETS]);
   return [...new Set(listedNames)].filter((name) => !keep.has(name) && !isPlatformName(name)).sort();
+}
+
+/** True for the deploy's --prune flag, with or without names. */
+export function isPruneFlag(arg) {
+  return arg === "--prune" || arg.startsWith("--prune=");
+}
+
+/**
+ * The names `--prune=NAME,NAME` asks to unset, or the reason to refuse. Function secrets belong to
+ * the whole project, so a secret another function of the project uses looks like a removed
+ * setting here too. The deploy therefore unsets only names written out on the command line, and
+ * only names that are on the stale list; a bare --prune is refused with that list.
+ */
+export function pruneRequest(argv, staleNames) {
+  const flags = argv.filter(isPruneFlag);
+  if (!flags.length) return { names: [] };
+  const names = [
+    ...new Set(
+      flags
+        .flatMap((flag) => flag.slice("--prune=".length).split(","))
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const staleText = staleNames.length ? staleNames.join(", ") : "none";
+  if (!names.length) {
+    return {
+      error: `--prune needs the names to unset, as --prune=NAME,NAME: function secrets belong to the whole project, and another function may use one. Set on the project but not in settings.env: ${staleText}. Nothing was changed.`,
+    };
+  }
+  const notStale = names.filter((name) => !staleNames.includes(name));
+  if (notStale.length) {
+    return {
+      error: `--prune names ${notStale.join(", ")}, which ${notStale.length === 1 ? "is not a setting" : "are not settings"} set on the project and missing from settings.env (the three secrets and Supabase's own names are never unset). Set on the project but not in settings.env: ${staleText}. Nothing was changed.`,
+    };
+  }
+  return { names };
 }

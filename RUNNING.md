@@ -719,9 +719,10 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   Limits of the hosted demo: each allowed request that calls the model records one use in a ledger in
   the database that only the server writes (`public.ai_usage`), in the same database call that checks
   the cap, so requests sent at the same moment cannot pass a cap together, and a request that is cut off
-  in the middle still counts. The planner's `Plan it` that falls back to the in-app assistant counts as
-  a planner request and a chat message; if the chat or daily cap refuses that fallback turn, the planner
-  request stays stored as failed with the limit sentence. The global allowance is counted per UTC day
+  in the middle still counts. Each `Plan it` records one planner use, also when it falls back to the
+  in-app assistant; that fallback chat turn is checked against the chat and daily caps but records no
+  use of its own, and if one of them refuses it, the planner request stays stored as failed with the
+  limit sentence. The global allowance is counted per UTC day
   across all users. The caps are sized for Cloudflare Workers AI's free
   10,000 neurons a day (shared with another demo on the same account) from estimated token counts, not
   measured ones; they do not guarantee that the allowance lasts the day. The nightly clean-up deletes

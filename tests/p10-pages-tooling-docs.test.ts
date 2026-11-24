@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AiNotConfiguredError } from "@/server/ai/llm.server";
 import { SERVER_FN_MESSAGES } from "@/lib/server-fn-errors";
-import { STARTUP_FAILED_MESSAGE } from "../supabase/functions/lifeops-api/handler.ts";
+import { REQUEST_FAILED_MESSAGE, STARTUP_FAILED_MESSAGE } from "../supabase/functions/lifeops-api/handler.ts";
 
 const read = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const pages = read("PAGES_DEPLOYMENT.md");
@@ -26,6 +26,11 @@ describe("PAGES_DEPLOYMENT.md", () => {
     expect(pages).toContain(SERVER_FN_MESSAGES.slow);
     expect(pages).toContain(SERVER_FN_MESSAGES.unavailable);
     expect(STARTUP_FAILED_MESSAGE).toBe(SERVER_FN_MESSAGES.unavailable);
+    for (const docs of [pages, vercel]) {
+      expect(docs).toContain(SERVER_FN_MESSAGES.failed);
+      expect(docs).toContain(SERVER_FN_MESSAGES.tooLarge);
+    }
+    expect(REQUEST_FAILED_MESSAGE).toBe(SERVER_FN_MESSAGES.failed);
   });
 
   it("covers the old local-model error and a missing function secret", () => {
@@ -40,7 +45,9 @@ describe("PAGES_DEPLOYMENT.md", () => {
   it("says that the release runs from main for one commit and that removed settings stay set", () => {
     expect(pages).toContain("gh workflow run pages.yml --ref main -f sha=<commit>");
     expect(pages).toMatch(/Deleting a line from `settings.env` does not remove the setting/);
-    expect(pages).toContain("`--prune`");
+    expect(pages).toContain("`--prune=NAME,NAME`");
+    expect(pages).toMatch(/A bare `--prune`, or a name that is not on the list, stops the\s+deploy/);
+    expect(settings).toContain("--prune=NAME,NAME");
   });
 });
 
@@ -114,6 +121,9 @@ describe("VERCEL_DEPLOYMENT.md", () => {
   it("no longer says that parallel requests pass the caps or that the planner is 'stopped'", () => {
     expect(vercel).not.toContain("can pass a cap by a few");
     expect(read("RUNNING.md")).not.toContain("can pass a cap by a few");
+    // One planner use per "Plan it"; its fallback chat turn only checks the chat and daily caps.
+    expect(read("RUNNING.md")).not.toContain("counts as\n  a planner request and a chat message");
+    expect(read("RUNNING.md").replace(/\s+/g, " ")).toContain("Each `Plan it` records one planner use");
     expect(vercel).not.toContain("The dashboard says the planner is stopped");
     expect(vercel).toContain(new AiNotConfiguredError().message);
   });

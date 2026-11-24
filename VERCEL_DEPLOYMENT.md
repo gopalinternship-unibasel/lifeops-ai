@@ -68,7 +68,9 @@ page's own origin). This is the check Start applies by itself when an app has no
 file also installs, for this deployment as for the GitHub Pages edition, the handling of errors
 TanStack Start does not answer well by itself (`src/lib/server-fn-errors.ts`): in the browser, an error
 answer in JSON without TanStack's own header (a platform or gateway error) becomes a short sentence
-instead of being taken for the function's result; on the server, a call to a server function this
+instead of being taken for the function's result, and Vercel's own plain-text error pages (for example
+`FUNCTION_INVOCATION_FAILED` for a crashed function) become a sentence too, instead of reaching a message
+as they are; on the server, a call to a server function this
 deployment does not have (an open tab from before a deploy that renamed one) gets 404 with "MONDAY may
 have been updated since this page was opened. Reload the page and try again.", and an unreadable
 payload gets 400, instead of 500.
@@ -214,10 +216,10 @@ no longer depend on how many chat messages, plans or planner requests are stored
 reached the visitor gets a plain sentence, for example "You have reached this demo's limit of 20 chat
 messages per hour. Please try again later." or "This demo's AI allowance for today is used up. It starts
 again at midnight UTC. Please try again tomorrow." A refused request records no use and the model is not
-called. "Plan it" checks the planner limits before it stores its planner request; when the planner
-service cannot be reached, the request falls back to a chat turn, which is checked against the chat and
-daily limits on its own, and if one of them refuses it, the planner request stays stored as failed with
-the limit sentence. The automatic briefing of a first visit is never refused: it gives its rule-based
+called. "Plan it" checks the planner limits and records one planner use before it stores its planner
+request; when the planner service cannot be reached, the request falls back to a chat turn, which is
+checked against the chat and daily limits on its own but records no use of its own, and if one of them
+refuses it, the planner request stays stored as failed with the limit sentence. The automatic briefing of a first visit is never refused: it gives its rule-based
 answer instead. A later briefing over the limit is refused like any other message.
 
 The values for the hosted demo (`AI_CHAT_PER_HOUR=20`, `AI_PLANS_PER_DAY=5`, `AI_PLANNER_PER_HOUR=6`,
@@ -438,6 +440,11 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
   `LLM_API_KEY` or the model in `LLM_MODEL` / `LLM_FALLBACK_MODEL`; the runtime log names which.
 - **"MONDAY may have been updated since this page was opened. Reload the page and try again."**: a tab opened
   before a deploy called a server function that was renamed, moved or removed since. Reloading fixes it.
+- **"Something went wrong on the server. Please try again."**: an error answer the page cannot read by itself,
+  such as Vercel's `FUNCTION_INVOCATION_FAILED` (the function crashed; the runtime log has the stack). The
+  browser console has a line `[lifeops] A server function answered HTTP <status>: ...` with what was sent.
+- **"This request is too large for the server. Please shorten what you entered and try again."**: Vercel refused
+  the request body (413, `FUNCTION_PAYLOAD_TOO_LARGE`) or its address (414, `URI_TOO_LONG`) as too large.
 - **"... rate limit reached"** or other refusals from Cloudflare Workers AI: a rate limit, or the account's
   10,000 daily neurons are used up (possibly by the ai-scientist demo, which shares them). The fallback model
   is tried after a 429, but it draws on the same allowance. Look at the usage in the Cloudflare dashboard;
