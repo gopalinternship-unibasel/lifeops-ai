@@ -10,6 +10,7 @@
 """
 
 import json
+import logging
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -129,7 +130,7 @@ def test_a_repeated_request_with_the_same_key_returns_the_stored_plan(client, fa
     assert _count(PlanRun) == 3
 
 
-def test_a_duplicate_that_finishes_second_returns_the_first_plan(client, fake_llm, monkeypatch):  # noqa: F811
+def test_a_duplicate_that_finishes_second_returns_the_first_plan(client, fake_llm, monkeypatch, caplog):  # noqa: F811
     fake_llm.answer = _llm_plan()
     body = {"user_input": TEXT, "idempotency_key": "plan-request-42"}
     first = client.post("/api/plan", json=body, headers=ALICE).json()
@@ -143,10 +144,14 @@ def test_a_duplicate_that_finishes_second_returns_the_first_plan(client, fake_ll
         return None if len(calls) == 1 else real(*args)
 
     monkeypatch.setattr(plan_route, "_stored_answer", checked_too_early)
-    second = client.post("/api/plan", json=body, headers=ALICE)
+    with caplog.at_level(logging.WARNING, logger="app.routes.plan"):
+        second = client.post("/api/plan", json=body, headers=ALICE)
     assert second.status_code == 200, second.text
     assert second.json() == first
     assert (_count(PlanRun), _count(Task), _count(ActionProposal)) == (1, 1, 2)
+    # Concurrent duplicates each call the model; the discarded second plan is logged.
+    assert len(fake_llm.calls) == 2
+    assert "same idempotency key ran at the same time" in caplog.text
 
 
 def test_stored_answers_older_than_two_days_are_deleted(client):

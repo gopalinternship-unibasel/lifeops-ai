@@ -129,8 +129,10 @@ actions always require approval, common quirks are repaired (`""` or `null` fiel
 out-of-range priorities and estimates are clamped), and texts are cut to what the MONDAY app can store.
 
 The keyword planner recognises exams, assignments and meetings as whole words and simple dates
-("tomorrow", "Friday", "2026-11-28", "28 Nov"). It leaves a deadline empty when it cannot read one,
-and its proposals always need approval, because their times are guesses.
+("tomorrow", "Friday", "Friday next week", "2026-11-28", "28 Nov"; weeks start on Monday). It leaves
+a deadline empty when it cannot read one exactly ("next week", "Friday after next", or "next Friday",
+which can mean this coming Friday or the one after) and asks the user to confirm it, and its
+proposals always need approval, because their times are guesses.
 
 ## Users and the shared secret
 
@@ -157,6 +159,11 @@ changed it in the meantime; the one that loses answers 409.
 | `deadline`         | when the caller stops waiting (UTC). The model gets at most the time left; a plan ready only after it is not stored (504).                                      |
 | `idempotency_key`  | up to 100 characters chosen by the caller. A repeat with the same key and text returns the stored answer (no second plan); the same key with another text: 409. |
 | `autonomous_mode`  | `true` runs low-risk actions that need no approval at once; `false` never does; left out, the stored setting (`/api/settings/autonomous-mode`) applies.         |
+
+The idempotency key fully covers a retry sent after the first request has finished. Two requests with
+the same key sent at the same moment both pass the check, so each calls the model (two AI uses) and,
+in autonomous mode, each runs its safe actions; only the plan stored first is kept, both get it, and
+the second plan's rows are rolled back (the planner logs this).
 
 `GET /api/dashboard?limit=N` lists at most N tasks and N actions (default 200, at most 500; open ones
 first); the `metrics` always count all of them.

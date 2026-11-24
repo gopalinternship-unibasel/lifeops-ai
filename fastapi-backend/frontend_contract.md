@@ -88,6 +88,10 @@ await fetch(`${base}/api/actions/${id}/execute`, {
 await fetch(`${base}/api/actions/execute-safe`, { method: "POST", headers });
 ```
 
+The answer lists the actions that ran (`executed`, `executed_count`), the ones whose executor
+failed and that are now stored as failed (`failed`, `failed_count`), and the ones left alone
+(`skipped`, `skipped_count`, each with a `reason`).
+
 ## Suggested UI
 
 Main dashboard sections:

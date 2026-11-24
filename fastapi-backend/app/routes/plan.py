@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,7 @@ from app.services.llm_planner import create_plan, local_now
 from app.services.safety import can_auto_execute, requires_human_approval
 
 router = APIRouter(prefix="/api", tags=["plan"])
+logger = logging.getLogger(__name__)
 
 # How long a stored answer for an idempotency key is kept: enough for a client's retries.
 IDEMPOTENCY_KEY_DAYS = 2
@@ -29,7 +31,12 @@ def _input_sha256(user_input: str) -> str:
 
 
 def _stored_answer(session: Session, owner: str, payload: PlanRequest) -> PlanResponse | None:
-    """The answer stored for this request's idempotency key, if a request with it already ran."""
+    """The answer stored for this request's idempotency key, if a request with it already ran.
+
+    This covers a retry sent after the first request finished. Two requests with the same key sent
+    at the same moment both find nothing here and both call the model; the unique key then keeps
+    only the plan stored first (see the commit at the end of create_lifeops_plan).
+    """
     if not payload.idempotency_key:
         return None
     row = session.exec(
@@ -183,5 +190,12 @@ def create_lifeops_plan(
         stored = _stored_answer(session, owner, payload)
         if stored is None:
             raise
+        # This request's model call (and, in autonomous mode, its adapter runs) did happen.
+        logger.warning(
+            "Two plan requests with the same idempotency key ran at the same time; the second plan "
+            "(planner %s, %d safe actions run) was discarded and the first returned.",
+            planner,
+            executed_safe_actions,
+        )
         return stored
     return response

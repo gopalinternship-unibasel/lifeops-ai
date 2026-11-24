@@ -6,3 +6,6 @@ pydantic-settings==2.7.1
 python-dotenv==1.0.1
 openai==1.59.7
 psycopg[binary]==3.2.13
+# Time zone data for zoneinfo on hosts without /usr/share/zoneinfo (a serverless image may lack
+# it); without it every caller's zone would be unknown and the server's UTC clock used instead.
+tzdata==2026.6

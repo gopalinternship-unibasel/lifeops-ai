@@ -103,14 +103,55 @@ def test_read_date_understands_simple_dates():
     assert read_date("tonight", today) == today
     assert read_date("on friday", today) == date(2026, 11, 27)
     assert read_date("tuesday", today) == today
-    assert read_date("next tuesday", today) == date(2026, 12, 1)
     assert read_date("due 2026-12-03", today) == date(2026, 12, 3)
+    # An ISO date with a time: the "T" after the date stopped the match before.
+    assert read_date("submit by 2026-11-28T10:00", today) == date(2026, 11, 28)
+    assert read_date("2026-11-28T10:00:00Z", today) == date(2026, 11, 28)
     assert read_date("28 Nov", today) == date(2026, 11, 28)
     assert read_date("December 2nd", today) == date(2026, 12, 2)
     assert read_date("3 Jan", today) == date(2027, 1, 3)
     assert read_date("31 Feb", today) is None
     assert read_date("next week", today) is None
     assert read_date("mondays are long", today) is None
+
+
+def test_next_weekday_is_not_taken_as_a_firm_date():
+    # On a Tuesday, "next Friday" was read as this Friday (3 days ahead), though many people mean
+    # the Friday of next week, so the deadline could be a week early.
+    today = date(2026, 11, 24)  # a Tuesday
+    assert read_date("next friday", today) is None
+    assert read_date("next tuesday", today) is None
+    # A later exact date in the same words still counts.
+    assert read_date("next friday, the 4th of december", today) == date(2026, 12, 4)
+
+    plan = build_demo_plan("Exam next Friday", NOW)
+    task = plan.tasks[0]
+    assert task.deadline is None
+    assert "Confirm the date of the exam: your text says next Friday" in task.description
+
+    meeting = build_demo_plan("A meeting next Friday", NOW)
+    assert meeting.tasks[0].deadline is None
+    assert "your text says next Friday" in meeting.tasks[0].description
+
+
+def test_a_weekday_of_next_week_is_not_read_as_this_week():
+    # "Friday next week" was read as this Friday, a week early: the week words were ignored.
+    today = date(2026, 11, 24)  # a Tuesday; next week runs from Monday 30 Nov to Sunday 6 Dec
+    assert read_date("friday next week", today) == date(2026, 12, 4)
+    assert read_date("next week on friday", today) == date(2026, 12, 4)
+    assert read_date("thursday of next week", today) == date(2026, 12, 3)
+    assert read_date("monday next week", today) == date(2026, 11, 30)
+    assert read_date("tuesday next week", today) == date(2026, 12, 1)
+    assert read_date("this week on friday", today) == date(2026, 11, 27)
+    # Other week words: not read, so the user is asked.
+    for text in ("a week from friday", "friday after next", "friday in two weeks"):
+        assert read_date(text, today) is None, text
+
+    plan = build_demo_plan("Exam on Friday next week", NOW)
+    assert plan.tasks[0].deadline == datetime(2026, 12, 4, 8, 0)
+    unread = build_demo_plan("Exam the Friday after next", NOW)
+    assert unread.tasks[0].deadline is None
+    assert "the day in your text could not be read exactly" in unread.tasks[0].description
 
 
 def test_keyword_proposals_need_approval_and_are_never_run_automatically(client):

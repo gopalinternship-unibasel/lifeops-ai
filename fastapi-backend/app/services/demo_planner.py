@@ -1,10 +1,11 @@
 """The keyword planner: used when no AI model is set up, or when the model's answer is unusable.
 
 It recognises three things (exams, assignments, meetings) as whole words and a few plain dates
-("today", "tomorrow", "Friday", "2026-11-28", "28 Nov"), and it says so in its summary. It never
-invents dates: a deadline it cannot read stays empty, and the description asks the user to
-confirm it. The times of its blocks and reminders are guesses, so every proposal needs the user's
-approval (requires_approval), and neither autonomous mode nor execute-safe runs them on their own.
+("today", "tomorrow", "Friday", "Friday next week", "2026-11-28", "28 Nov"), and it says so in its
+summary. It never invents dates: a deadline it cannot read exactly ("next week", "next Friday")
+stays empty, and the description asks the user to confirm it. The times of its blocks and
+reminders are guesses, so every proposal needs the user's approval (requires_approval), and
+neither autonomous mode nor execute-safe runs them on their own.
 """
 
 import re
@@ -30,11 +31,24 @@ _DATE = re.compile(
     r"|(?P<tomorrow>tomorrow)"
     r"|(?P<today>today|tonight)"
     r"|(?P<next>next\s+)?(?P<weekday>" + "|".join(_WEEKDAYS) + r")"
-    r"|(?P<iso>\d{4}-\d{2}-\d{2})"
+    # An ISO date may carry a time ("2026-11-28T10:00", lower-cased here); only the date is used.
+    r"|(?P<iso>\d{4}-\d{2}-\d{2})(?:t\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?"
     r"|(?P<dm_day>\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<dm_month>" + _MONTH + r")(?:\s+(?P<dm_year>\d{4}))?"
     r"|(?P<md_month>" + _MONTH + r")\.?\s+(?P<md_day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<md_year>\d{4}))?"
     r")\b"
 )
+_WEEKDAY_NAMES = "|".join(_WEEKDAYS)
+_NEXT_WEEKDAY = re.compile(r"\bnext\s+(" + _WEEKDAY_NAMES + r")\b")
+_ANY_WEEKDAY = re.compile(r"\b(?:" + _WEEKDAY_NAMES + r")\b")
+# "Friday next week", "Friday of next week", "next week on Friday": that day in the next week
+# (weeks start on Monday, as in the MONDAY app).
+_DAY_OF_NEXT_WEEK = re.compile(
+    r"\b(?:(?P<before>" + _WEEKDAY_NAMES + r")\s+(?:of\s+)?next\s+week"
+    r"|next\s+week\s+(?:on\s+)?(?P<after>" + _WEEKDAY_NAMES + r"))\b"
+)
+# Other week words change which Friday is meant ("a week from Friday", "Friday after next",
+# "Friday in two weeks"), so a weekday next to them is not read. "this week" changes nothing.
+_WEEK_WORDS = re.compile(r"\b(?<!this )weeks?\b|\bafter next\b|\bfortnight\b")
 
 _DRAFT_BODY = (
     "Hi,\n\nI hope you are well. I have a scheduling conflict, so I wanted to ask whether we could "
@@ -63,10 +77,16 @@ def _calendar_date(year: str | None, month: str, day: str, today: date) -> date 
 def read_date(text: str, today: date) -> date | None:
     """The first date the text names exactly, or None ("next week" is not an exact date).
 
-    A weekday is its next occurrence, today included; "next Friday" is the same as "Friday",
-    except on a Friday, where it is a week later.
+    A weekday is its next occurrence, today included, and "Friday next week" is the Friday of the
+    next Monday-to-Sunday week. "next Friday" is not exact: said on a Tuesday, some mean the Friday
+    three days ahead and some the one ten days ahead, so it is skipped (a later exact date in the
+    text still counts) and the user is asked to confirm it. So is a weekday next to other week
+    words ("Friday after next"), which used to be read as this week's day.
     """
-    for match in _DATE.finditer(text.lower()):
+    text = text.lower()
+    day_of_next_week = _DAY_OF_NEXT_WEEK.search(text)
+    week_words = _WEEK_WORDS.search(text)
+    for match in _DATE.finditer(text):
         if match.group("day_after"):
             return today + timedelta(days=2)
         if match.group("tomorrow"):
@@ -74,9 +94,15 @@ def read_date(text: str, today: date) -> date | None:
         if match.group("today"):
             return today
         if match.group("weekday"):
-            ahead = (_WEEKDAYS.index(match.group("weekday")) - today.weekday()) % 7
-            if match.group("next") and ahead == 0:
-                ahead = 7
+            weekday = match.group("weekday")
+            if match.group("next"):
+                continue
+            if day_of_next_week and weekday in (day_of_next_week.group("before"), day_of_next_week.group("after")):
+                monday_of_next_week = today + timedelta(days=7 - today.weekday())
+                return monday_of_next_week + timedelta(days=_WEEKDAYS.index(weekday))
+            if week_words:
+                continue
+            ahead = (_WEEKDAYS.index(weekday) - today.weekday()) % 7
             return today + timedelta(days=ahead)
         if match.group("iso"):
             try:
@@ -108,6 +134,15 @@ def _day_label(day: date) -> str:
 def _no_date_hint(clause: str, what: str) -> str:
     if "next week" in clause:
         return f"Confirm the date of {what}: your text says next week."
+    next_weekday = _NEXT_WEEKDAY.search(clause)
+    if next_weekday:
+        day = next_weekday.group(1).capitalize()
+        return (
+            f"Confirm the date of {what}: your text says next {day}, "
+            f"which can mean this coming {day} or the one after."
+        )
+    if _ANY_WEEKDAY.search(clause):
+        return f"Confirm the date of {what}: the day in your text could not be read exactly."
     return f"Confirm the date of {what}: no date was found in your text."
 
 
@@ -206,7 +241,7 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
             PlannerTask(
                 title=f"Decide whether to reschedule {label}",
                 description="Check whether the meeting clashes with your other plans and ask to move it if needed."
-                + ("" if day else " Confirm when the meeting is."),
+                + ("" if day else " " + _no_date_hint(clause, "the meeting")),
                 deadline=decide_by if decide_by and decide_by > now else None,
                 estimated_minutes=15,
                 priority=3,

@@ -9,6 +9,7 @@
 """
 
 import json
+import logging
 
 import pytest
 from sqlmodel import Session
@@ -120,7 +121,8 @@ def test_of_two_overlapping_runs_the_first_outcome_stays(client, two_actions, mo
     assert client.get(f"/api/actions/{action['id']}", headers=ALICE).json()["external_id"] == "evt-first"
 
 
-def test_execute_safe_leaves_an_action_another_request_changed(client, two_actions, monkeypatch):
+def _reject_while_the_adapter_runs(monkeypatch):
+    """Make another request reject the action while the built-in adapter is running."""
     real = actions_route.execute_action
 
     def rejected_meanwhile(action):
@@ -132,10 +134,30 @@ def test_execute_safe_leaves_an_action_another_request_changed(client, two_actio
         return real(action)
 
     monkeypatch.setattr(actions_route, "execute_action", rejected_meanwhile)
-    result = client.post("/api/actions/execute-safe", headers=ALICE).json()
+
+
+def test_execute_safe_leaves_an_action_another_request_changed(client, two_actions, monkeypatch, caplog):
+    _reject_while_the_adapter_runs(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="app.routes.actions"):
+        result = client.post("/api/actions/execute-safe", headers=ALICE).json()
     assert result["executed_count"] == 0
     assert {"action_id": two_actions["Water plants"]["id"], "reason": "changed_meanwhile"} in result["skipped"]
     assert client.get(f"/api/actions/{two_actions['Water plants']['id']}", headers=ALICE).json()["status"] == "rejected"
+    # The adapter had run: its outcome is not stored, but it is not lost without a trace either.
+    assert f"Action {two_actions['Water plants']['id']} was changed by another request" in caplog.text
+    assert "provider lifeops" in caplog.text
+
+
+def test_an_adapter_run_that_lost_the_race_is_logged(client, two_actions, monkeypatch, caplog):
+    study = two_actions["Study"]
+    client.post(f"/api/actions/{study['id']}/approve", headers=ALICE)
+    _reject_while_the_adapter_runs(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="app.routes.actions"):
+        response = client.post(f"/api/actions/{study['id']}/execute", headers=ALICE)
+    assert response.status_code == 409
+    assert client.get(f"/api/actions/{study['id']}", headers=ALICE).json()["status"] == "rejected"
+    # Before, the external id of a write the adapter had already made was dropped silently.
+    assert "provider mock_calendar, external id mock-calendar-" in caplog.text
 
 
 def test_unchanged_refusals_keep_their_status_codes(client, two_actions):

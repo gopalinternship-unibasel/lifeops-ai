@@ -52,6 +52,21 @@ def test_missing_settings_fail_the_actions_not_the_request(client, fake_llm, zap
     assert actions["Call the bank"]["provider"] == "lifeops"
 
 
+def test_execute_safe_counts_only_the_actions_that_ran(client, fake_llm, zapier_without_settings):  # noqa: F811
+    # Since failures became a failed result instead of a 500, execute-safe reached them, and it
+    # counted every stored result as executed: "executed_count 3" with two actions stored as failed.
+    fake_llm.answer = json.dumps(PLAN)
+    client.post("/api/plan", json={"user_input": "meeting tomorrow at 10", "autonomous_mode": False}, headers=ALICE)
+    ids = {action["title"]: action["id"] for action in client.get("/api/actions", headers=ALICE).json()}
+    result = client.post("/api/actions/execute-safe", headers=ALICE).json()
+    assert result["executed_count"] == 1
+    assert [item["action_id"] for item in result["executed"]] == [ids["Call the bank"]]
+    assert result["failed_count"] == 2
+    assert sorted(item["action_id"] for item in result["failed"]) == sorted([ids["Meeting prep"], ids["Draft"]])
+    assert all(item["result"]["status"] == "failed" for item in result["failed"])
+    assert result["skipped_count"] == 0
+
+
 def test_reminder_and_task_are_not_sent_to_zapier(zapier_without_settings):
     for kind in ("reminder", "task"):
         action = ActionProposal(owner="alice", action_type=kind, title="x", risk_level="low")

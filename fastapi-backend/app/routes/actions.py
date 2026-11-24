@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import case, update
 from sqlalchemy.orm.attributes import set_committed_value
@@ -15,6 +17,7 @@ from app.services.action_executor import (
 from app.services.safety import can_auto_execute
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
+logger = logging.getLogger(__name__)
 
 # Statuses from which each step may start. Every change of an action's status is a conditional
 # UPDATE on these, so of two requests that overlap (a Reject while a Run is being recorded, two
@@ -74,6 +77,20 @@ def _transition(session: Session, action: ActionProposal, allowed_from: set[Acti
     for key, value in values.items():
         set_committed_value(action, key, value)
     return True
+
+
+def _log_unrecorded_run(action_id: int | None, result: dict) -> None:
+    """Log an adapter run whose outcome was not stored because another request changed the action
+    first. The adapter has already run by then (with Zapier, an outside write may exist), so the
+    provider and external id are kept in the log instead of being lost without a trace."""
+    logger.warning(
+        "Action %s was changed by another request while it ran, so this run was not recorded "
+        "(status %s, provider %s, external id %s).",
+        action_id,
+        result.get("status"),
+        result.get("provider"),
+        result.get("external_id"),
+    )
 
 
 def _already_executed_response(action: ActionProposal, outcome: ExternalExecution | None) -> dict:
@@ -172,6 +189,9 @@ def execute_single_action(
         result = execute_action(action)
 
     if not _transition(session, action, allowed_from, execution_values(result)):
+        if outcome is None:
+            # The built-in or Zapier adapter ran before the conditional write lost.
+            _log_unrecorded_run(action_id, result)
         current = _owned_action(session, action_id, owner)
         if current.status == ActionStatus.rejected:
             detail = "This action was rejected while it was being run, so its result was not recorded"
@@ -199,6 +219,7 @@ def execute_all_safe_actions(session: Session = Depends(get_session), owner: str
     actions = session.exec(statement).all()
 
     executed = []
+    failed = []
     skipped = []
 
     for action in actions:
@@ -211,11 +232,16 @@ def execute_all_safe_actions(session: Session = Depends(get_session), owner: str
                 .values(**execution_values(result))
                 .execution_options(synchronize_session=False)
             ).rowcount
-            if changed == 1:
+            if changed != 1:
+                # Approved, rejected or run by another request meanwhile: left as that request set it.
+                _log_unrecorded_run(action.id, result)
+                skipped.append({"action_id": action.id, "reason": "changed_meanwhile"})
+            elif result.get("status") == "executed":
                 executed.append({"action_id": action.id, "result": result})
             else:
-                # Approved, rejected or run by another request meanwhile: left as that request set it.
-                skipped.append({"action_id": action.id, "reason": "changed_meanwhile"})
+                # Stored as failed (for example Zapier unreachable): it ran, but nothing was done,
+                # so it is not counted as executed.
+                failed.append({"action_id": action.id, "result": result})
         else:
             skipped.append({"action_id": action.id, "reason": "not_safe_for_auto_execution"})
 
@@ -223,7 +249,9 @@ def execute_all_safe_actions(session: Session = Depends(get_session), owner: str
 
     return {
         "executed_count": len(executed),
+        "failed_count": len(failed),
         "skipped_count": len(skipped),
         "executed": executed,
+        "failed": failed,
         "skipped": skipped,
     }
