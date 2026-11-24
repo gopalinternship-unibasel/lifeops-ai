@@ -18,15 +18,27 @@ import { formatTimeInZone } from "@/server/timezone.server";
 import type { EmailDraftSuggestion, PendingEvent, PendingEventChange } from "@/types/panel";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** What may stand between a short id and the rest of a copied row: "E1: ", "E1. ", "E1 — ". */
+const ID_SEPARATOR = "\\s*[:.)\\-–—]?\\s+";
 const MARKERS: RegExp[] = [
   /\s*\[(?:event[_ ]?id|id|task|email[_ ]?id|message[_ ]?id)\s*[:=][^\]\n]*\]/gi,
   /\s*\((?:event[_ ]?id|id|email[_ ]?id)\s*[:=][^)\n]*\)/gi,
   /\s*\b(?:event[_ ]?id|id)\s*[:=]\s*(?:E\d{1,3}|e\d{1,2}|[0-9a-f-]{36})\b/gi,
   /\s*\[E\d{1,3}\]/g,
   /\s*\(E\d{1,3}\)/g,
-  // A calendar row copied from the prompt: "E3 14:00-15:30 Dentist appointment".
-  /\bE\d{1,3}\s+(?=\d{1,2}:\d{2})/g,
+  // A calendar row copied from the prompt: "E3 14:00-15:30 Dentist appointment", also with a
+  // separator after the id ("E1: 19:00", "E1 — 19:00"). With only whitespace allowed, "E1:" was
+  // kept and later replaced by the title, so the title showed twice (review of 24 Nov 2026).
+  new RegExp(`\\bE\\d{1,3}${ID_SEPARATOR}(?=\\d{1,2}:\\d{2})`, "g"),
   new RegExp(`\\s*\\(?\\b${UUID}\\b\\)?`, "gi"),
+  // The prompt's own annotations of the inbox: " (UNREAD)" (upper case, so a model's own
+  // "(unread)" in prose stays), " (task: Lunch with Sam, importance low)" (a task title may hold
+  // one pair of brackets of its own), a bare importance tag, and the prompt's note that an email
+  // is about a calendar event. Two of three live briefings copied them (review of 24 Nov 2026).
+  /[ \t]*\(UNREAD\)/g,
+  /[ \t]*\(task\s*:(?:[^()\n]|\([^()\n]*\))*\)/gi,
+  /[ \t]*\(importance\s*[:=]?\s*(?:high|medium|low)\)/gi,
+  /[ \t]*\(same (?:meeting|commitment) as calendar event[^)\n]*\)/gi,
 ];
 
 /** Lines copied from the prompt's own instructions, not about the user's data. */
@@ -83,6 +95,15 @@ const NO_CARD_CLAIMS: RegExp[] = [
   // "The email was dispatched to Sam.", "Your calendar is updated."
   /\b(?:e-?mail|reply|message|invite|invitation)\s+(?:has\s+been|was|is|got)\s+(?:successfully\s+)?(?:sent|dispatched|delivered|forwarded)\b/i,
   /\byour\s+(?:calendar|schedule)\s+(?:is|was|has\s+been)\s+(?:now\s+)?(?:updated|changed)\b/i,
+  // Near variants of the claims above that got through (review of 24 Nov 2026): "Your reminder
+  // is all set for Thursday", "... is in the calendar", "Sam has been told", "locked in",
+  // "Done — yoga is on for tomorrow", "I'll make sure you remember".
+  /\b(?:is|are)\s+all\s+set\b/i,
+  /\b(?:is|are)\s+(?:now\s+)?(?:in|on)\s+(?:the|your)\s+(?:calendar|schedule|agenda)\b/i,
+  /\b(?:has|have)\s+been\s+(?:told|informed|let\s+know)\b/i,
+  /\blocked\s+in\b/i,
+  /^[^\p{L}\d]*done\b/iu,
+  /\bI(?:'ll|\s+will)\s+make\s+sure\b/i,
 ];
 
 /**
@@ -100,6 +121,13 @@ const WEEKDAY_INDEX: Record<string, number> = {
   sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6,
 };
 const MONTH_INDEX: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/**
+ * A month word, whole: "nov", "november", "sept". Until the review of 24 Nov 2026 any word that
+ * began like a month counted ("3 marketing calls" read as 3 March, "2 decks" as 2 December), so
+ * a correct sentence was dropped as a wrong weekday.
+ */
+const MONTH_WORD =
+  "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\b";
 
 /**
  * A weekday next to a date it is not ("Thursday 2026-11-14", "Thu, Nov 14" when Nov 14 is a
@@ -112,11 +140,17 @@ export function hasWrongWeekday(sentence: string, year: number): boolean {
     return Number.isFinite(date.getTime()) && date.getUTCDate() === d ? date.getUTCDay() : null;
   };
   const text = sentence.toLowerCase();
-  const pattern =
-    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)\b,?\s+(?:(\d{4})-(\d{2})-(\d{2})|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})|(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*)\b/g;
+  const pattern = new RegExp(
+    `\\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)\\b,?\\s+(?:(\\d{4})-(\\d{2})-(\\d{2})|${MONTH_WORD}\\.?\\s+(\\d{1,2})|(\\d{1,2})\\s+${MONTH_WORD})\\b`,
+    "g",
+  );
   for (const m of text.matchAll(pattern)) {
     const weekday = WEEKDAY_INDEX[m[1]];
-    const [mo, d] = m[2] ? [Number(m[3]), Number(m[4])] : m[5] ? [MONTH_INDEX[m[5]], Number(m[6])] : [MONTH_INDEX[m[8]], Number(m[7])];
+    const [mo, d] = m[2]
+      ? [Number(m[3]), Number(m[4])]
+      : m[5]
+        ? [MONTH_INDEX[m[5].slice(0, 3)], Number(m[6])]
+        : [MONTH_INDEX[m[8].slice(0, 3)], Number(m[7])];
     const readings = (m[2] ? [Number(m[2])] : [year, year + 1]).map((y) => weekdayOf(y, mo, d)).filter((value) => value !== null);
     if (readings.length > 0 && !readings.includes(weekday)) return true;
   }
@@ -159,8 +193,12 @@ export function describeRange(startsAt: string, endsAt: string, timeZone = "UTC"
 export function stripInternalMarkers(text: string): string {
   let out = text ?? "";
   for (const re of MARKERS) out = out.replace(re, "");
-  // A bullet that starts with a short id: "- E3 Dentist appointment" -> "- Dentist appointment".
-  out = out.replace(/^(\s*(?:[-*•]|\d+[.)])\s+)E\d{1,3}\s+/gm, "$1");
+  // A bullet that starts with a short id: "- E3 Dentist appointment" -> "- Dentist appointment",
+  // also "- E1: Team sync" and "- E1 — Team sync".
+  out = out.replace(new RegExp(`^(\\s*(?:[-*•]|\\d+[.)])\\s+)E\\d{1,3}${ID_SEPARATOR}`, "gm"), "$1");
+  // "• item" lines are not a Markdown list: the chat showed them run together as one paragraph
+  // (review of 24 Nov 2026). They become "- item" lines; the prompt also asks for "- ".
+  out = out.replace(/^([ \t]*)[•●▪◦‣][ \t]+(?=\S)/gm, "$1- ");
   const lines = out
     .split("\n")
     .filter((line) => !TEMPLATE_LINES.some((re) => re.test(line)))
@@ -212,10 +250,43 @@ export function removeSentences(text: string, matches: (sentence: string) => boo
   return { text: collapseBlankLines(cleaned).join("\n").trim(), removed };
 }
 
-/** `actionRequest`: the user asked for something new or for a change (see ACTION_REQUEST_CLAIMS). */
-export function removeActionClaims(text: string, actionRequest = false): { text: string; removed: number } {
+/** Words the model quotes ("Sam wrote: \"I'll send the deck\"") are not its own claims. */
+export function unquoted(sentence: string): string {
+  return sentence.replace(/"[^"\n]*"|“[^”\n]*”/g, " ");
+}
+
+/**
+ * Words that report what an email or a person said: "Alicia's email says the team sync has been
+ * moved to 7 PM", "Stripe says your invoice has been sent", "according to Sam's message ...".
+ */
+const ATTRIBUTION =
+  /\b(?:says?|said|wrote|writes|mentions?|mentioned|reports?|reported|according\s+to|per\s+(?:the|his|her|their|your)\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
+
+/**
+ * `actionRequest`: the user asked for something new or for a change (see ACTION_REQUEST_CLAIMS).
+ * `question`: the user asked a question and asked for nothing to be done (neither actionRequest
+ * nor askedForAction). Then a sentence that reports what an email or a person said ("Alicia's
+ * email says the team sync has been moved to 7 PM today") is an answer, not the model's claim:
+ * the review of 24 Nov 2026 saw such sentences removed, and with them the most urgent email of
+ * an inbox summary. Quoted words never count as a claim.
+ */
+export function removeActionClaims(
+  text: string,
+  actionRequest = false,
+  opts: { question?: boolean } = {},
+): { text: string; removed: number } {
   const patterns = actionRequest ? [...CLAIMS, ...ACTION_REQUEST_CLAIMS] : CLAIMS;
-  return removeSentences(text, (sentence) => patterns.some((re) => re.test(sentence)));
+  // The two claim patterns that also read reported speech ("has been moved", "I sent").
+  const reportable = new Set([CLAIMS[0], CLAIMS[1]]);
+  return removeSentences(text, (sentence) => {
+    const own = unquoted(sentence);
+    return patterns.some((re) => {
+      const m = re.exec(own);
+      if (!m) return false;
+      if (opts.question && reportable.has(re) && ATTRIBUTION.test(own.slice(0, m.index))) return false;
+      return true;
+    });
+  });
 }
 
 export function removeTimeStatements(text: string): { text: string; removed: number } {
@@ -253,8 +324,10 @@ export function cardConfirmations(opts: {
       const note = opts.notes?.[event.id];
       return `- **${event.title}**: ${describeRange(event.starts_at, event.ends_at, timeZone)}${note ? ` (${note})` : ""}`;
     });
+    // A blank line before the closing sentence: after a single line break Markdown reads it as
+    // part of the last bullet ("... 8:00 AM Nothing is saved ...", review of 24 Nov 2026).
     lines.push(
-      `Proposed for your calendar:\n${items.join("\n")}\nNothing is saved until you click **Save to Calendar** on the right.`,
+      `Proposed for your calendar:\n${items.join("\n")}\n\nNothing is saved until you click **Save to Calendar** on the right.`,
     );
   }
   return lines;
@@ -270,7 +343,18 @@ export function resolveRefs(text: string, refs: ReplyRefs): { text: string; remo
   // Only the kinds of id the prompt used: Gmail message ids are long, not "e3".
   const idPattern = new RegExp(`\\b(${[refs.events ? "E\\d{1,3}" : "", refs.emails ? "e\\d{1,2}" : ""].filter(Boolean).join("|") || "(?!)"})\\b`, "g");
   const result = removeSentences(text ?? "", (sentence) => [...sentence.matchAll(idPattern)].some((m) => !known(m[1])));
-  return { text: result.text.replace(idPattern, (id) => known(id) ?? id), removed: result.removed };
+  // An id on a line that already names its event ("E1: 19:00–20:00 Team sync — demo
+  // walkthrough") is dropped with the separator after it; replacing it would show the title
+  // twice (review of 24 Nov 2026). In running text the id becomes the name ("You have E1 at 7").
+  const withSeparator = new RegExp(`${idPattern.source}(\\s*[:.)\\-–—]?\\s*)`, "g");
+  const lines = result.text.split("\n").map((line) =>
+    line.replace(withSeparator, (whole, id: string, separator: string) => {
+      const name = known(id);
+      if (!name) return whole;
+      return line.toLowerCase().includes(name.toLowerCase()) ? "" : `${name}${separator}`;
+    }),
+  );
+  return { text: lines.join("\n"), removed: result.removed };
 }
 
 /**
@@ -298,6 +382,39 @@ export const NOTHING_ADDED =
 /** The same when the turn has a reply draft but no calendar card for the calendar part of the request. */
 export const NOTHING_ON_CALENDAR =
   "Nothing was added to or changed in your calendar in this turn: the AI model proposed no calendar entry. If you expected one, please try again, naming the day and the time.";
+/**
+ * After a request to send an email or a message: MONDAY never sends, so "try again, naming the
+ * day and the time" was the wrong advice (review of 24 Nov 2026). This says where drafts go.
+ */
+export const NOTHING_SENT =
+  "MONDAY never sends emails or messages itself. Ask it to draft a reply to an email in your inbox: the draft appears under **Insights**, where you can edit it and click **Save as draft**, and you send it yourself from your mail app.";
+/**
+ * The whole reply to a QUESTION when nothing the model wrote could be kept. NOTHING_PREPARED
+ * speaks of a proposal and of "naming the day and the time", which does not fit a question
+ * (review of 24 Nov 2026). Worded so that a short message after it is not read as an answer to
+ * a question back (see followsUpOnAction).
+ */
+export const NOTHING_ANSWERED =
+  "The AI model's answer could not be checked against your calendar and inbox, so it is not shown. Your calendar was not changed. Please try again or ask in other words.";
+
+/**
+ * A sentence that states a day or a time ("Your yoga session is on for tomorrow at 18:00."),
+ * after a request to add something to the calendar in a turn with no calendar card: with no card
+ * it is a claim or an echo of the request either way (review of 24 Nov 2026). Questions, bullet
+ * lines (a plan in words), intro lines ending in a colon and suggestions stay.
+ */
+function isDatedStatement(sentence: string): boolean {
+  const text = sentence.trim();
+  if (!TIME_WORDS.test(text)) return false;
+  if (/\?\s*["')\]]?\s*$/.test(text) || /:\s*$/.test(text)) return false;
+  if (/^\s*(?:[-*•]|\d+[.)])\s/.test(text)) return false;
+  return !/\b(?:could|would|might|may|can|shall|should|how about|what about|suggest\w*|options?|prefer\w*|if you)\b/i.test(text);
+}
+
+/** Lowercase letters and digits only, for comparing a reply with a draft body. */
+function comparable(text: string): string {
+  return (text ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").trim();
+}
 
 export function composeReply(opts: {
   modelReply: string;
@@ -331,6 +448,11 @@ export function composeReply(opts: {
    * question ("When is my dentist appointment?") the model's answer, with its times, stands.
    */
   changeNoteIsAside?: boolean;
+  /**
+   * The user asked MONDAY to send an email or a message (asksToSend). It never sends, so a turn
+   * without a draft card says where drafts go instead of asking for a day and a time.
+   */
+  sendRequest?: boolean;
 }): string {
   const cleaned = stripInternalMarkers(opts.modelReply);
   const resolved = opts.refs ? resolveRefs(cleaned, opts.refs) : { text: cleaned, removed: 0 };
@@ -338,7 +460,9 @@ export function composeReply(opts: {
   const year = opts.year ?? new Date().getUTCFullYear();
   const serverLines = removeServerLines(resolved.text);
   const weekdays = removeSentences(serverLines.text, (sentence) => hasWrongWeekday(sentence, year));
-  const claims = removeActionClaims(weekdays.text, opts.actionRequest ?? false);
+  // A question: the user asked for nothing to be done (see removeActionClaims).
+  const question = !opts.actionRequest && !opts.askedForAction;
+  const claims = removeActionClaims(weekdays.text, opts.actionRequest ?? false, { question });
   claims.removed += weekdays.removed + serverLines.removed;
   const calendarTurn = opts.pendingEvents.length > 0 || opts.pendingEventChanges.length > 0 || Boolean(opts.changeNote);
 
@@ -357,6 +481,13 @@ export function composeReply(opts: {
     const withoutDraftClaims = removeSentences(modelText, (sentence) => DRAFT_CLAIMS.some((re) => re.test(sentence)));
     modelText = withoutDraftClaims.text;
     draftClaims = withoutDraftClaims.removed;
+  } else if (modelText) {
+    // The model repeated the draft in the chat (live, 24 Nov 2026: the reply was the draft body
+    // word for word). The draft is on its card; the chat says where.
+    // Also when the card's body has more (the sign-off the server adds) than the repeated text.
+    const body = comparable(opts.emailDraft.body);
+    const text = comparable(modelText);
+    if (body && (text.includes(body) || (text.length >= 40 && body.includes(text)))) modelText = "";
   }
 
   // An action was asked for and the turn has no card and no note: nothing was prepared. The
@@ -373,12 +504,17 @@ export function composeReply(opts: {
   const calendarMissing = Boolean(opts.actionRequest) && noCalendarCard;
   const allMissing = Boolean(opts.askedForAction) && noCalendarCard && !opts.emailDraft;
   let notice: string | null = null;
+  // A request to send something, with no draft card: MONDAY never sends (see NOTHING_SENT).
+  const sendMissing = Boolean(opts.sendRequest) && allMissing;
   if (calendarMissing || allMissing) {
-    // Words the model quotes ("Sam wrote: \"I'll send the deck\"") are not its own claims.
-    const unquoted = (sentence: string) => sentence.replace(/"[^"\n]*"|“[^”\n]*”/g, " ");
     modelText = removeSentences(modelText, (sentence) => NO_CARD_CLAIMS.some((re) => re.test(unquoted(sentence)))).text;
+    // With no calendar card a sentence that gives a day or a time is a claim or an echo of the
+    // request ("... is all set for Thursday at 13:00", "... now starts tomorrow at 18:00").
+    if (calendarMissing) modelText = removeSentences(modelText, (sentence) => isDatedStatement(unquoted(sentence))).text;
     // A note about the change that was asked for already says that nothing changed.
-    if (!opts.changeNote && !opts.emailNote) notice = opts.emailDraft ? NOTHING_ON_CALENDAR : NOTHING_ADDED;
+    if (!opts.changeNote && !opts.emailNote) {
+      notice = sendMissing ? NOTHING_SENT : opts.emailDraft ? NOTHING_ON_CALENDAR : NOTHING_ADDED;
+    }
   }
 
   const lines: string[] = [];
@@ -391,7 +527,7 @@ export function composeReply(opts: {
   }
   if (notice) {
     // Nothing else to show: the short notice. Another card on the right is not what was asked for.
-    if (lines.length === 0) return opts.hasOtherCards ? notice : NOTHING_PREPARED;
+    if (lines.length === 0) return opts.hasOtherCards || sendMissing ? notice : NOTHING_PREPARED;
     lines.push(notice);
   }
   if (lines.length > 0) return lines.join("\n\n");
@@ -399,6 +535,49 @@ export function composeReply(opts: {
   if (draftClaims > 0 && claims.removed === 0 && resolved.removed === 0) {
     return "The AI model answered without a reply draft, so nothing was prepared. Please try again and say which email you want to answer.";
   }
-  if (claims.removed > 0 || resolved.removed > 0) return NOTHING_PREPARED;
+  // Everything the model wrote was removed. After a question nothing was asked for, so the
+  // notice about a missing proposal and "naming the day and the time" do not fit.
+  if (claims.removed > 0 || resolved.removed > 0) return question ? NOTHING_ANSWERED : NOTHING_PREPARED;
   return "I'm not sure how to help with that. Could you rephrase it?";
+}
+
+/** "14:00" on a 24-hour clock as "2:00 PM", as the cards and pages show times. */
+function twelveHour(hour: number, minute: string): string {
+  const suffix = hour >= 12 ? "PM" : "AM";
+  return `${hour % 12 === 0 ? 12 : hour % 12}:${minute} ${suffix}`;
+}
+
+/** A clock time "H:MM" that can only be a 24-hour time: 13-23, 0 or 12, or a leading zero. */
+function isClearly24h(hourText: string): boolean {
+  const hour = Number(hourText);
+  return hour >= 12 || hour === 0 || (hourText.length === 2 && hourText.startsWith("0"));
+}
+
+/**
+ * The reply's 24-hour clock times ("14:00", "14:00–15:30") written the way the cards and pages
+ * show them ("2:00 PM", "2:00 PM – 3:30 PM"). The prompt gives the model every time on a 24-hour
+ * clock (the fields it returns need that form), and it wrote them into the chat as well, next
+ * to cards with 12-hour times (review of 24 Nov 2026). Only times that can only be 24-hour are
+ * changed ("9:30" alone could be either), a range when either end is one; times with am/pm,
+ * ISO date-times and quoted text stay as they are.
+ */
+export function toTwelveHourClock(text: string): string {
+  const clock = "(?<![\\dT:.])([01]?\\d|2[0-3]):([0-5]\\d)(?![\\d:]|\\s*(?:[ap]\\.?\\s?m\\b))";
+  const range = new RegExp(`${clock}(\\s*[–—-]\\s*)${clock}`, "gi");
+  const single = new RegExp(clock, "gi");
+  // Quoted text (an email's own words) is left alone.
+  return (text ?? "")
+    .split(/("[^"\n]*"|“[^”\n]*”)/)
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      const ranged = part.replace(range, (whole, h1: string, m1: string, _sep: string, h2: string, m2: string) =>
+        isClearly24h(h1) || isClearly24h(h2) ? `${twelveHour(Number(h1), m1)} – ${twelveHour(Number(h2), m2)}` : whole,
+      );
+      return ranged.replace(single, (whole, h: string, m: string, offset: number, all: string) => {
+        // Already converted as part of a range above ("2:00 PM").
+        if (/^\s*[AP]M\b/.test(all.slice(offset + whole.length))) return whole;
+        return isClearly24h(h) ? twelveHour(Number(h), m) : whole;
+      });
+    })
+    .join("");
 }

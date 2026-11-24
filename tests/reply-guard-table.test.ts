@@ -6,7 +6,7 @@
  * proposal ...". Both directions are listed here.
  */
 import { describe, expect, it } from "vitest";
-import { composeReply, hasWrongWeekday, removeActionClaims } from "@/server/ai/reply-guard.server";
+import { composeReply, hasWrongWeekday, NOTHING_ANSWERED, removeActionClaims } from "@/server/ai/reply-guard.server";
 import { asksForCalendarAction } from "@/server/calendar/change-request.server";
 
 const ZRH = "Europe/Zurich";
@@ -75,7 +75,10 @@ describe("claims and descriptions", () => {
   it.each(CLAIMS_ALWAYS)("removed: %s", (sentence) => {
     expect(removeActionClaims(sentence).removed).toBe(1);
     expect(plain(`${sentence} Anything else?`)).toBe("Anything else?");
-    expect(plain(sentence)).toBe(NO_PROPOSAL);
+    // After a question the whole answer is replaced by the neutral notice; after a request to do
+    // something by the notice about a missing proposal (review of 24 Nov 2026).
+    expect(plain(sentence)).toBe(NOTHING_ANSWERED);
+    expect(plain(sentence, true)).toBe(NO_PROPOSAL);
   });
 
   it.each(CLAIMS_AFTER_ACTION_REQUEST)("removed after a request for something new or a change: %s", (sentence) => {

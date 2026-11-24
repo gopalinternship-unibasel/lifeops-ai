@@ -10,7 +10,7 @@ const followUp: PendingEvent = {
   ends_at: "2026-11-20T11:00:00.000Z",
 };
 const CARD_LINE =
-  "Proposed for your calendar:\n- **Follow-up emails to startups**: Fri, Nov 20, 10:00 AM – 12:00 PM\nNothing is saved until you click **Save to Calendar** on the right.";
+  "Proposed for your calendar:\n- **Follow-up emails to startups**: Fri, Nov 20, 10:00 AM – 12:00 PM\n\nNothing is saved until you click **Save to Calendar** on the right.";
 
 // Live on 19 Nov 2026: the model copied the server's own confirmation from an earlier reply in
 // the chat history; the guard removed its time line and kept the heading and the footer, so the
