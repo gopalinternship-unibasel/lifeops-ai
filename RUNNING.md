@@ -563,7 +563,8 @@ the owner's Google Cloud account:
    `GOOGLE_OAUTH_STATE_SECRET` is already there. Restart with the stop and start scripts.
 6. Sign in, open _Profile → Manage Google connection_ (or the Connectors step) and click
    **Connect Google**. Google warns that the app is unverified; continue as the test user. You come back
-   to `/onboarding/connectors?google=connected`; Gmail and Calendar then replace the demo data.
+   to `/onboarding/connectors`, which finishes the connection (only in the tab that started it, signed in
+   as the same user); Gmail and Calendar then replace the demo data.
 7. Disconnect from the same page (it also revokes the token at Google).
 
 Because `gmail.readonly` is a restricted scope, anything beyond private testing needs Google's app
