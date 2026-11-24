@@ -121,8 +121,10 @@ function PrioritiesView({ priorities, inbox }: { priorities: PriorityRow[]; inbo
       </div>
       <ol className="space-y-2">
         <AnimatePresence initial={false}>
-          {priorities.map((p) => (
-            <motion.li key={p.title} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+          {/* The AI can give two priorities the same title, so the key adds which of those it is;
+              a unique title keeps its key when the order changes, so the move still animates. */}
+          {priorities.map((p, i) => (
+            <motion.li key={`${p.title}#${priorities.slice(0, i).filter((q) => q.title === p.title).length}`} layout initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
               transition={{ type: "spring", stiffness: 380, damping: 30 }}
               className="rounded-md border border-border bg-card p-3 flex gap-3">
               <span className="shrink-0 h-7 w-7 rounded-md grid place-items-center text-xs font-mono font-semibold text-primary-foreground" style={{ background: "var(--gradient-brand)" }}>#{p.rank}</span>

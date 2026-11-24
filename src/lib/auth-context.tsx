@@ -63,6 +63,39 @@ function installAuthFetch() {
   };
 }
 
+type SessionLike = Pick<Session, "access_token" | "refresh_token" | "expires_at"> & {
+  user: Pick<User, "id" | "updated_at">;
+};
+
+/**
+ * The session to keep when auth reports `next`. Supabase re-reads the stored session and emits
+ * SIGNED_IN with a new but identical object every time the tab becomes visible again. Storing
+ * that copy gave `user` a new identity, and the profile forms, which reload when the user
+ * changes, overwrote what had been typed. The previous object is kept while nothing in it
+ * changed: same user, same update time, same tokens.
+ */
+export function nextSession<S extends SessionLike>(prev: S | null, next: S | null): S | null {
+  if (!prev || !next) return next;
+  const same =
+    prev.user.id === next.user.id &&
+    prev.user.updated_at === next.user.updated_at &&
+    prev.access_token === next.access_token &&
+    prev.refresh_token === next.refresh_token &&
+    prev.expires_at === next.expires_at;
+  return same ? prev : next;
+}
+
+/**
+ * The warning to confirm before signing out, or null when none is needed. A demo (anonymous)
+ * session cannot be opened again once it is signed out: "Try the live demo" always starts a
+ * new, empty one.
+ */
+export function signOutWarning(user: { is_anonymous?: boolean } | null): string | null {
+  return user?.is_anonymous
+    ? "You will not be able to come back to this demo's chats, plans and drafts. Starting the demo again opens a new, empty session."
+    : null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -71,11 +104,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     installAuthFetch();
     // CRITICAL: subscribe BEFORE getSession
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setSession(s);
+      setSession((prev) => nextSession(prev, s));
       setLoading(false);
     });
     supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
+      setSession((prev) => nextSession(prev, s));
       setLoading(false);
     });
     return () => subscription.unsubscribe();

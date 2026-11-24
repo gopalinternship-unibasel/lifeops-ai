@@ -74,6 +74,7 @@ export function ChatComposer({
         <div className="relative rounded-lg border border-border bg-card focus-within:ring-2 focus-within:ring-ring focus-within:border-transparent transition">
           <textarea
             ref={taRef}
+            aria-label="Message MONDAY"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKey}
