@@ -45,3 +45,24 @@ export function weekPlanRequestView(row: WeekPlanRequestRow, nowMs: number, maxR
     error: status === "failed" ? (row.error ?? "Drafting the plan failed.") : null,
   };
 }
+
+/**
+ * When a request started, for the banners: "3:14 PM" today, otherwise with the date
+ * ("Mon, Nov 23, 3:14 PM"), so an old failure does not read as if it had just happened.
+ * Local time of the browser.
+ */
+export function formatRequestTime(iso: string, now: Date = new Date()): string {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return "";
+  if (at.toDateString() === now.toDateString()) {
+    return at.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
+  return at.toLocaleString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(at.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
