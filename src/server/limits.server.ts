@@ -16,7 +16,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
-export type AiRequestKind = "chat" | "plan" | "planner";
+/** "draft" is an email reply draft (draftReplySuggestion); it shares the chat limit. */
+export type AiRequestKind = "chat" | "plan" | "planner" | "draft";
 
 export interface AiCaps {
   chatPerHour: number | null;
@@ -63,7 +64,7 @@ export function readCaps(env: Env = process.env): AiCaps {
 
 /** The user's limit for a request kind, or null when none is set. */
 export function userLimit(kind: AiRequestKind, caps: AiCaps): number | null {
-  if (kind === "chat") return caps.chatPerHour;
+  if (kind === "chat" || kind === "draft") return caps.chatPerHour;
   if (kind === "plan") return caps.plansPerDay;
   return caps.plannerPerHour;
 }
@@ -82,7 +83,7 @@ function plural(count: number, one: string, many: string): string {
 }
 
 function userMessage(kind: AiRequestKind, limit: number): string {
-  if (kind === "chat") {
+  if (kind === "chat" || kind === "draft") {
     return `You have reached this demo's limit of ${plural(limit, "chat message", "chat messages")} per hour. Please try again later.`;
   }
   if (kind === "plan") {
@@ -154,7 +155,9 @@ async function countUserRequests(
   userId: string,
   since: Date,
 ): Promise<number> {
-  if (kind === "chat") return countRows(client, "chat_messages", since, userId);
+  if (kind === "chat" || kind === "draft") {
+    return countRows(client, "chat_messages", since, userId);
+  }
   if (kind === "plan") return countRows(client, "week_plan_requests", since, userId);
   return countRows(client, "planner_requests", since, userId);
 }
