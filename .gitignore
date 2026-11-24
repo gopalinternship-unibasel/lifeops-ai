@@ -10,6 +10,9 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# GitHub Pages build (npm run build:pages) and the Edge Function bundle it writes
+dist-pages
+supabase/functions/lifeops-api/server.mjs
 .output
 .vinxi
 .tanstack/**

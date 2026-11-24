@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Shared secret for server-to-server calls from the MONDAY app. When set, every /api
     # request must send "Authorization: Bearer <token>" (or "X-LifeOps-Token: <token>").
     lifeops_backend_token: str | None = None
+    # More accepted tokens, comma separated, for further callers of the same planner (the
+    # GitHub Pages build's Supabase Edge Function has its own), so each can be rotated alone.
+    lifeops_backend_extra_tokens: str | None = None
 
     autonomous_mode_default: bool = False
 

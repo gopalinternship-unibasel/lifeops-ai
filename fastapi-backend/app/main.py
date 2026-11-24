@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.security import require_backend_token
+from app.core.security import accepted_backend_tokens, require_backend_token
 from app.db.session import create_db_and_tables
 from app.routes import actions, dashboard, plan, settings as settings_route, tasks
 
@@ -38,7 +38,7 @@ def root():
         "docs": "/docs",
         "planner": "llm" if endpoint else "demo",
         "llm_model": endpoint[2] if endpoint else None,
-        "auth_required": bool(settings.lifeops_backend_token),
+        "auth_required": bool(accepted_backend_tokens()),
     }
 
 

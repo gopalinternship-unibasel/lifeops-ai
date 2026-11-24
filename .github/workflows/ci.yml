@@ -39,6 +39,46 @@ jobs:
       - name: Build
         run: npm run build
 
+  pages:
+    name: GitHub Pages build and Edge Function (Deno smoke test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Placeholders: the build and the smoke test talk to no Supabase project.
+      VITE_SUPABASE_URL: https://placeholder.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+      VITE_SERVER_FN_ORIGIN: https://placeholder.supabase.co/functions/v1/lifeops-api
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build for GitHub Pages (client files and function bundle)
+        run: npm run build:pages
+
+      - name: Type-check the Edge Function with Deno 2.1.4
+        run: npx -y deno@2.1.4 check supabase/functions/lifeops-api/index.ts
+
+      # Runs the function under Deno 2.1.4 (the edge runtime's Deno version) and checks CORS, the
+      # Origin allow-list, routing and that the server code answers (401 without a user token).
+      - name: Edge Function smoke test
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+        run: |
+          node scripts/pages/serve-edge-local.mjs > deno.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -s -o /dev/null -X OPTIONS http://localhost:8000/lifeops-api/; then break; fi
+            sleep 2
+          done
+          node scripts/pages/smoke-edge.mjs --url http://localhost:8000/lifeops-api || { cat deno.log; exit 1; }
+
   planner:
     name: FastAPI planner (pytest)
     runs-on: ubuntu-latest

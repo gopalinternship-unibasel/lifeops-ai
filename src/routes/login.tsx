@@ -56,7 +56,7 @@ function LoginPage() {
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
-          options: { emailRedirectTo: `${window.location.origin}/onboarding/profile` },
+          options: { emailRedirectTo: `${window.location.origin}${import.meta.env.BASE_URL}onboarding/profile` },
         });
         if (error) throw error;
         if (!data.session) {
@@ -101,7 +101,7 @@ function LoginPage() {
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
-        options: { redirectTo: `${window.location.origin}/onboarding/profile` },
+        options: { redirectTo: `${window.location.origin}${import.meta.env.BASE_URL}onboarding/profile` },
       });
       if (error) throw error;
     } catch (err: unknown) {

@@ -84,6 +84,31 @@ def test_shared_secret_is_enforced_when_configured(client, use_settings):
     assert client.get("/").status_code == 200  # health stays open
 
 
+def test_extra_tokens_are_accepted_next_to_the_main_token(client, use_settings):
+    use_settings(lifeops_backend_token="main-token", lifeops_backend_extra_tokens=" pages-token , other-token ,")
+    for token in ("main-token", "pages-token", "other-token"):
+        assert client.get("/api/dashboard", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    assert client.get("/api/dashboard", headers={"Authorization": "Bearer pages"}).status_code == 401
+    assert client.get("/api/dashboard", headers={"Authorization": "Bearer "}).status_code == 401
+    assert client.get("/api/dashboard").status_code == 401
+
+
+def test_extra_tokens_alone_also_lock_the_service(client, use_settings):
+    use_settings(lifeops_backend_token=None, lifeops_backend_extra_tokens="pages-token")
+    assert client.get("/api/dashboard").status_code == 401
+    assert client.get("/api/dashboard", headers={"Authorization": "Bearer pages-token"}).status_code == 200
+
+
+def test_main_token_with_stray_whitespace_still_matches(client, use_settings):
+    use_settings(lifeops_backend_token="  main-token\n", lifeops_backend_extra_tokens=None)
+    assert client.get("/api/dashboard", headers={"Authorization": "Bearer main-token"}).status_code == 200
+
+
+def test_service_is_open_without_any_token(client, use_settings):
+    use_settings(lifeops_backend_token=None, lifeops_backend_extra_tokens=None)
+    assert client.get("/api/dashboard").status_code == 200
+
+
 def test_high_risk_actions_need_approval_before_execution(client, fake_llm):
     fake_llm.answer = json.dumps(
         {

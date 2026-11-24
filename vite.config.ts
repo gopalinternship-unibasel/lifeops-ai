@@ -41,9 +41,22 @@ function longLlmRequests(): Plugin {
  */
 const nitroPreset = process.env.NITRO_PRESET?.trim() || (process.env.VERCEL ? "vercel" : undefined);
 
+/**
+ * GitHub Pages build (LIFEOPS_PAGES=1; run it through `npm run build:pages`, see PAGES_DEPLOYMENT.md).
+ *
+ * TanStack Start's SPA mode writes a static shell (dist-pages/client/_shell.html) and the client
+ * files under the Pages project path, and still builds the server (dist-pages/server), which
+ * scripts/pages/build.mjs bundles for the Supabase Edge Function. No nitro: the SPA shell is
+ * rendered from that plain server build during `vite build`.
+ */
+const pages = process.env.LIFEOPS_PAGES === "1";
+const pagesBase = `/${(process.env.LIFEOPS_PAGES_BASE ?? "lifeops-ai").replace(/^\/+|\/+$/g, "")}/`;
+
 export default defineConfig({
-  nitro: nitroPreset ? { preset: nitroPreset } : false,
+  nitro: pages ? false : nitroPreset ? { preset: nitroPreset } : false,
+  ...(pages ? { tanstackStart: { spa: { enabled: true } } } : {}),
   vite: {
+    ...(pages ? { base: pagesBase, build: { outDir: "dist-pages" } } : {}),
     plugins: [longLlmRequests()],
     // With an empty dependency cache (a fresh install) Vite found these TanStack Start internals
     // only when the first page loaded, bundled them and then reloaded every open page

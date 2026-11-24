@@ -393,6 +393,11 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Server side of the GitHub Pages build (see PAGES_DEPLOYMENT.md). It checks the caller's Origin and
+# the user's Supabase token itself; the browser's CORS preflight carries no token.
+[functions.lifeops-api]
+verify_jwt = false
+
 [analytics]
 enabled = false
 port = 55327

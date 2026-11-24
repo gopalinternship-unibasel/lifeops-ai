@@ -1,0 +1,75 @@
+name: Pages
+
+# Builds the GitHub Pages edition of LifeOps (https://gopalinternship-unibasel.github.io/lifeops-ai/)
+# and publishes it with the GitHub Pages actions. It runs on demand only: `npm run release:pages`
+# deploys the Supabase Edge Function "lifeops-api" (the server side) and then starts this workflow
+# for the same commit, so both halves always come from one commit (see PAGES_DEPLOYMENT.md).
+# The build reads the public Supabase values from the repository variables SUPABASE_URL and
+# SUPABASE_PUBLISHABLE_KEY (also used by smoke.yml); PAGES_SERVER_FN_ORIGIN may override the
+# function's URL.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check settings
+        env:
+          URL: ${{ vars.SUPABASE_URL }}
+          KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$KEY" ]; then
+            echo "::error::Set the repository variables SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY (see PAGES_DEPLOYMENT.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (client files only)
+        env:
+          VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PAGES_SERVER_FN_ORIGIN: ${{ vars.PAGES_SERVER_FN_ORIGIN }}
+          VITE_ENABLE_ANONYMOUS_DEMO: "true"
+          VITE_ENABLE_GOOGLE_SIGNIN: "false"
+          VITE_HOSTED_DEMO: "true"
+        run: |
+          export VITE_SERVER_FN_ORIGIN="${PAGES_SERVER_FN_ORIGIN:-${VITE_SUPABASE_URL%/}/functions/v1/lifeops-api}"
+          node scripts/pages/build.mjs --client
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist-pages/client
+
+  deploy:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

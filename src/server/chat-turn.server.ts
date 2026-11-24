@@ -16,6 +16,7 @@ import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { callAI, resolveLLMConfig, type AITool } from "@/server/ai/llm.server";
 import { checkAiAllowance } from "@/server/limits.server";
+import { capToHostLimit } from "@/server/host-limit.server";
 import {
   briefingCoversInbox,
   buildRuleBasedBriefing,
@@ -79,7 +80,7 @@ export interface ChatTurnInput {
  */
 export function maxChatTurnMs(env: Record<string, string | undefined> = process.env): number {
   const config = resolveLLMConfig("chat", env);
-  return config.timeoutMs * (config.fallbackModel ? 2 : 1) + 120_000;
+  return capToHostLimit(config.timeoutMs * (config.fallbackModel ? 2 : 1) + 120_000, env);
 }
 
 /** The user's newest chat session, created on first use. */

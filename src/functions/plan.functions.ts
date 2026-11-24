@@ -4,6 +4,7 @@ import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { callAI, resolveLLMConfig, type AITool, type ChatMsg } from "@/server/ai/llm.server";
+import { capToHostLimit } from "@/server/host-limit.server";
 import { listCalendarEvents, insertCalendarEvent } from "@/server/google/calendar.server";
 import {
   createEvent as createMockCalendarEvent,
@@ -57,7 +58,7 @@ async function isGoogleConnected(userId: string): Promise<boolean> {
  */
 function maxPlanRequestMs(): number {
   const config = resolveLLMConfig("plan");
-  return config.timeoutMs * (config.fallbackModel ? 2 : 1) + 120_000;
+  return capToHostLimit(config.timeoutMs * (config.fallbackModel ? 2 : 1) + 120_000);
 }
 
 /** The newest plan request of this week, as the page shows it. */

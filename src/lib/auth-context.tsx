@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
+import { normalizeServerFnOrigin } from "@/lib/server-fn-origin";
 
 interface AuthContextValue {
   user: User | null;
@@ -21,6 +22,19 @@ const AuthContext = createContext<AuthContextValue>({
 // Supabase bearer token. Without this, `requireSupabaseAuth` returns 401.
 // ---------------------------------------------------------------------------
 let fetchPatched = false;
+
+/**
+ * Only the app's own server functions get the token: relative URLs, the page's own origin, and in
+ * the GitHub Pages build the Supabase Edge Function that runs them (VITE_SERVER_FN_ORIGIN).
+ */
+const serverFnOrigin = normalizeServerFnOrigin(import.meta.env.VITE_SERVER_FN_ORIGIN as string | undefined);
+function isServerFnUrl(url: string): boolean {
+  if (!url.includes("/_serverFn/")) return false;
+  if (url.startsWith("/") && !url.startsWith("//")) return true;
+  if (url.startsWith(`${window.location.origin}/`)) return true;
+  return Boolean(serverFnOrigin && url.startsWith(`${serverFnOrigin}/`));
+}
+
 function installAuthFetch() {
   if (fetchPatched || typeof window === "undefined") return;
   fetchPatched = true;
@@ -33,7 +47,7 @@ function installAuthFetch() {
           : input instanceof URL
             ? input.toString()
             : input.url;
-      if (url.includes("/_serverFn")) {
+      if (isServerFnUrl(url)) {
         const { data } = await supabase.auth.getSession();
         const token = data.session?.access_token;
         if (token) {

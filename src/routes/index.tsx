@@ -15,7 +15,7 @@ function Landing() {
   // If signed in, send to workspace
   useEffect(() => {
     if (!loading && user) {
-      window.location.href = "/app";
+      window.location.href = `${import.meta.env.BASE_URL}app`;
     }
   }, [user, loading]);
 

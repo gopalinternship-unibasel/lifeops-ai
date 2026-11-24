@@ -5,7 +5,8 @@ name: Smoke check of the hosted demo
 # paused for inactivity.
 #
 # Settings: repository variables WEB_URL, PLANNER_URL, SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY
-# (none of them is secret; the publishable key is shipped to every browser). The planner token is
+# (none of them is secret; the publishable key is shipped to every browser), and PAGES_URL for the
+# GitHub Pages edition (its checks are skipped while it is not set). The planner token is
 # the only secret: LIFEOPS_BACKEND_TOKEN. While the variables are not set the run ends with a
 # notice and counts as passed.
 
@@ -65,6 +66,38 @@ jobs:
             -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" \
             "${SUPABASE_URL%/}/auth/v1/health" -o /dev/null
           echo "Supabase auth health answered 200."
+
+      # GitHub Pages edition (PAGES_DEPLOYMENT.md); skipped while the variable PAGES_URL is not set.
+      - name: GitHub Pages site and a deep link load
+        if: steps.config.outputs.ready == 'true' && vars.PAGES_URL != ''
+        env:
+          PAGES_URL: ${{ vars.PAGES_URL }}
+        run: |
+          curl -fsS --retry 3 --retry-delay 10 --max-time 60 "${PAGES_URL%/}/" -o pages.html
+          grep -q "MONDAY" pages.html
+          # Deep links are answered by 404.html (status 404), which holds the same app shell.
+          curl -sS --retry 3 --retry-delay 10 --max-time 60 "${PAGES_URL%/}/app/plan" -o deep.html
+          grep -q "MONDAY" deep.html
+          echo "The Pages site and a deep link load the app."
+
+      - uses: actions/checkout@v7
+        if: steps.config.outputs.ready == 'true' && vars.PAGES_URL != ''
+
+      - uses: actions/setup-node@v7
+        if: steps.config.outputs.ready == 'true' && vars.PAGES_URL != ''
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pages server functions answer for a demo user
+        # Signs in a new anonymous demo user and calls server functions through the Supabase Edge
+        # Function; no AI call. The project's nightly clean-up removes the anonymous user.
+        if: steps.config.outputs.ready == 'true' && vars.PAGES_URL != ''
+        env:
+          PAGES_SERVER_FN_ORIGIN: ${{ vars.PAGES_SERVER_FN_ORIGIN }}
+        run: |
+          npm ci --ignore-scripts
+          node scripts/pages/smoke-edge.mjs --url "${PAGES_SERVER_FN_ORIGIN:-${SUPABASE_URL%/}/functions/v1/lifeops-api}" --demo-user
 
       - name: Planner is up and uses a model
         if: steps.config.outputs.ready == 'true'

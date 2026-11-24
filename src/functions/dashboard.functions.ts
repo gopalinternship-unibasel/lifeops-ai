@@ -10,6 +10,7 @@ import { withoutHandledCards } from "@/lib/panel-state";
 import { planRequestView, type PlanRequestResult, type PlanRequestView } from "@/lib/plan-request";
 import { cardIdsOfPanel, listCardStates } from "@/server/chat-cards.server";
 import { ensureChatSessionFor, maxChatTurnMs, runChatTurn } from "@/server/chat-turn.server";
+import { capToHostLimit } from "@/server/host-limit.server";
 import { enforceAiAllowance } from "@/server/limits.server";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
 import { listCalendarEvents } from "@/server/google/calendar.server";
@@ -37,7 +38,7 @@ const TimeZoneInput = z.object({ timeZone: z.string().max(100).optional() });
 
 /** The longest a "Plan it" request can take: the planner service, then the in-app assistant. */
 function maxPlanRequestMs(): number {
-  return planTimeoutMs() + maxChatTurnMs() + 60_000;
+  return capToHostLimit(planTimeoutMs() + maxChatTurnMs() + 60_000);
 }
 
 /**

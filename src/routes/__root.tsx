@@ -42,8 +42,9 @@ export const Route = createRootRoute({
     ],
     links: [
       // public/favicon.svg (modern browsers) and public/favicon.ico (the browser's default request).
-      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
-      { rel: "icon", href: "/favicon.ico", sizes: "48x48" },
+      // BASE_URL is "/" on Vercel and "/lifeops-ai/" in the GitHub Pages build.
+      { rel: "icon", href: `${import.meta.env.BASE_URL}favicon.svg`, type: "image/svg+xml" },
+      { rel: "icon", href: `${import.meta.env.BASE_URL}favicon.ico`, sizes: "48x48" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
