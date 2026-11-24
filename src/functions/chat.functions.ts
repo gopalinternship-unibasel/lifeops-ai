@@ -137,8 +137,10 @@ export const clearChatHistory = createServerFn({ method: "POST" })
 export const fetchCalendar = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => parseInput(z.object({
-    from: z.string().optional(),
-    to: z.string().optional(),
+    // Date-times with a zone, as the pages send them (toISOString): a loose check let "1" through,
+    // and the database answered with a raw error.
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
     timeZone: z.string().max(100).optional(),
   }).optional(), d))
   .handler(async ({ data, context }) => {

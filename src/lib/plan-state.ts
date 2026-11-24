@@ -103,9 +103,12 @@ const DAY_NAME_TO_OFFSET: Record<string, number> = {
   sunday: 6, sun: 6,
 };
 
-/** Words that may stand next to "approve" without changing what is approved. */
+/**
+ * Words that may stand next to "approve" without changing what is approved. Not "day": "approve
+ * this day" names one day without saying which, so it must not add the whole week.
+ */
 const APPROVE_FILLER = new Set([
-  "a", "all", "also", "and", "day", "days", "entire", "event", "events", "everything", "for", "full",
+  "a", "all", "also", "and", "days", "entire", "event", "events", "everything", "for", "full",
   "it", "item", "items", "just", "my", "now", "of", "on", "only", "plan", "plans", "please", "that",
   "the", "this", "too", "week", "weeks", "whole",
 ]);
@@ -211,6 +214,27 @@ export function canEditPlanItem(
   opts: { added: boolean; dayApproved: boolean; nowMs: number },
 ): boolean {
   return !opts.dayApproved && !opts.added && Date.parse(item.starts_at) > opts.nowMs;
+}
+
+/** "HH:MM" of an instant in local time (the page runs in the browser's zone). */
+export function localHM(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** An item's new times from the editor's "HH:MM" fields, each kept on its own day (local time). */
+export function editedItemTimes(
+  item: { starts_at: string; ends_at: string },
+  start: string,
+  end: string,
+): { starts_at: string; ends_at: string } {
+  const merge = (iso: string, hm: string) => {
+    const [h, m] = hm.split(":").map(Number);
+    const d = new Date(iso);
+    d.setHours(h, m, 0, 0);
+    return d.toISOString();
+  };
+  return { starts_at: merge(item.starts_at, start), ends_at: merge(item.ends_at, end) };
 }
 
 /** YYYY-MM-DD plus `days` (calendar arithmetic, independent of time zones). */

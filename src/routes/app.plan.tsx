@@ -565,7 +565,8 @@ function PlanPage() {
 
       {/* Recent messages */}
       {messages.length > 0 && (
-        <div className="rounded-xl border border-border bg-card/60 p-4 max-w-3xl mx-auto w-full space-y-3">
+        // Screen readers announce MONDAY's replies (a new plan, an approval summary) as they arrive.
+        <div className="rounded-xl border border-border bg-card/60 p-4 max-w-3xl mx-auto w-full space-y-3" aria-live="polite">
           {messages.slice(-6).map((m) => (
             <div key={m.id} className={`text-sm ${m.role === "user" ? "text-foreground" : "text-foreground/80"}`}>
               <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mr-2">

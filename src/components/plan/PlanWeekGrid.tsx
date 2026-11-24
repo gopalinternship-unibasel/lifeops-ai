@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import { Check, Calendar as CalIcon, Pencil, X as XIcon } from "lucide-react";
 import { minutesOnDay } from "@/lib/calendar-grid";
-import { canEditPlanItem, planDayStatus } from "@/lib/plan-state";
+import { canEditPlanItem, editedItemTimes, localHM, planDayStatus } from "@/lib/plan-state";
 
 interface Props {
   plan: WeekPlan | null;
@@ -141,30 +141,6 @@ function PlanItemRow({ item, added, editable, onSave }: {
   onSave: (starts_at: string, ends_at: string) => Promise<void> | void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [start, setStart] = useState(() => toLocalHM(item.starts_at));
-  const [end, setEnd] = useState(() => toLocalHM(item.ends_at));
-  const [saving, setSaving] = useState(false);
-
-  // The editor starts from the item's current times. The row stays mounted when a refinement
-  // replaces the plan, and saving kept the times from before, which moved the item back.
-  const openEditor = () => {
-    setStart(toLocalHM(item.starts_at));
-    setEnd(toLocalHM(item.ends_at));
-    setEditing(true);
-  };
-
-  const save = async () => {
-    if (!start || !end) return;
-    setSaving(true);
-    try {
-      const newStart = mergeDateAndHM(item.starts_at, start);
-      const newEnd = mergeDateAndHM(item.ends_at, end);
-      await onSave(newStart, newEnd);
-      setEditing(false);
-    } catch {
-      // The parent displays the server error. Keep the editor open for correction.
-    } finally { setSaving(false); }
-  };
 
   return (
     <li className="group flex items-start gap-2.5" data-testid="plan-item" data-added={added ? "true" : "false"}>
@@ -181,10 +157,10 @@ function PlanItemRow({ item, added, editable, onSave }: {
           {editable && !editing && (
             <button
               type="button"
-              onClick={openEditor}
-              // Visible on touch screens (no hover there) and under keyboard focus; with a mouse
-              // it appears on hover, as before.
-              className="pointer-fine:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition text-muted-foreground hover:text-foreground"
+              onClick={() => setEditing(true)}
+              // Hidden until hover only on screens that can hover (the same media rule as
+              // group-hover); touch screens always show it, and keyboard focus shows it too.
+              className="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition text-muted-foreground hover:text-foreground"
               title="Edit time"
               aria-label={`Edit time of ${item.title}`}
             >
@@ -193,35 +169,7 @@ function PlanItemRow({ item, added, editable, onSave }: {
           )}
         </div>
         {editing ? (
-          <div className="mt-1 flex items-center gap-1.5">
-            <input
-              type="time"
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-              aria-label={`Start time of ${item.title}`}
-              className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
-            />
-            <span className="text-[11px] text-muted-foreground">–</span>
-            <input
-              type="time"
-              value={end}
-              onChange={(e) => setEnd(e.target.value)}
-              aria-label={`End time of ${item.title}`}
-              className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
-            />
-            <button type="button" onClick={save} disabled={saving} className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50">
-              {saving ? "…" : "Save"}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setEditing(false); setStart(toLocalHM(item.starts_at)); setEnd(toLocalHM(item.ends_at)); }}
-              className="text-muted-foreground hover:text-foreground"
-              aria-label="Cancel editing"
-              title="Cancel"
-            >
-              <XIcon className="h-3 w-3" />
-            </button>
-          </div>
+          <ItemTimeEditor item={item} onSave={onSave} onClose={() => setEditing(false)} />
         ) : (
           <div className="text-[11px] font-mono text-muted-foreground">
             {fmt(item.starts_at)}–{fmt(item.ends_at)}
@@ -229,6 +177,65 @@ function PlanItemRow({ item, added, editable, onSave }: {
         )}
       </div>
     </li>
+  );
+}
+
+/**
+ * The time editor of one plan item. It is mounted each time it opens, so its fields start from
+ * the item's current times: the fields used to live in the row, which stays mounted when a
+ * refinement replaces the plan, and saving wrote the times from before the refinement back.
+ */
+export function ItemTimeEditor({ item, onSave, onClose }: {
+  item: WeekPlanItem;
+  onSave: (starts_at: string, ends_at: string) => Promise<void> | void;
+  onClose: () => void;
+}) {
+  const [start, setStart] = useState(() => localHM(item.starts_at));
+  const [end, setEnd] = useState(() => localHM(item.ends_at));
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!start || !end) return;
+    setSaving(true);
+    try {
+      const times = editedItemTimes(item, start, end);
+      await onSave(times.starts_at, times.ends_at);
+      onClose();
+    } catch {
+      // The parent displays the server error. Keep the editor open for correction.
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="mt-1 flex items-center gap-1.5">
+      <input
+        type="time"
+        value={start}
+        onChange={(e) => setStart(e.target.value)}
+        aria-label={`Start time of ${item.title}`}
+        className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
+      />
+      <span className="text-[11px] text-muted-foreground">–</span>
+      <input
+        type="time"
+        value={end}
+        onChange={(e) => setEnd(e.target.value)}
+        aria-label={`End time of ${item.title}`}
+        className="font-mono text-[11px] bg-background border border-border rounded px-1.5 py-0.5 w-[78px] focus:outline-none focus:ring-1 focus:ring-primary"
+      />
+      <button type="button" onClick={save} disabled={saving} className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50">
+        {saving ? "…" : "Save"}
+      </button>
+      <button
+        type="button"
+        onClick={onClose}
+        className="text-muted-foreground hover:text-foreground"
+        aria-label="Cancel editing"
+        title="Cancel"
+      >
+        <XIcon className="h-3 w-3" />
+      </button>
+    </div>
   );
 }
 
@@ -276,14 +283,4 @@ function busyTimeLabel(event: BusyEvent, dayStart: Date): string {
 /** Local midnight at the start of a YYYY-MM-DD day (the page runs in the browser's zone). */
 function localMidnight(ymd: string): Date {
   return new Date(`${ymd}T00:00:00`);
-}
-function toLocalHM(iso: string): string {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-function mergeDateAndHM(iso: string, hm: string): string {
-  const [h, m] = hm.split(":").map(Number);
-  const d = new Date(iso);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
 }

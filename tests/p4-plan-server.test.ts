@@ -486,6 +486,139 @@ describe("a refinement keeps the saved plan when the model's answer is not usabl
   });
 });
 
+describe("a regeneration keeps the saved plan where its answer is partial (finding 8)", () => {
+  it("days the answer leaves out stay as they were", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: WED, items: [{ emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" }] },
+      ]),
+    );
+
+    await generate({ weekStart: MONDAY });
+
+    const plan = storedPlan();
+    expect(plan.days.find((day) => day.date === WED)?.items.map((item) => item.title)).toEqual([
+      "Focus",
+    ]);
+    for (const date of [MON, TUE, THU, FRI, SAT, SUN]) {
+      expect(plan.days.find((day) => day.date === date)).toEqual(
+        savedPlan().days.find((day) => day.date === date),
+      );
+    }
+  });
+
+  it("in the middle of the week, the days that are over and the items in the calendar stay", async () => {
+    storePlan(savedPlan());
+    h.calendar.events.push({
+      id: "ev-tue",
+      title: "🎯 Deep work",
+      starts_at: at(TUE, 14),
+      ends_at: at(TUE, 15),
+      notes: null,
+      source: "plan",
+    });
+    mockedCallAI.mockResolvedValue(
+      answerDays(
+        week({
+          [TUE]: [{ emoji: "🚶", title: "Walk", start: "16:00", end: "16:30" }],
+          [WED]: [{ emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" }],
+        }),
+      ),
+    );
+
+    const result = await generate({ weekStart: MONDAY });
+
+    const plan = storedPlan();
+    // Monday is over: its item was replaced by "Day already over" with no items before.
+    expect(plan.days[0]).toEqual(savedPlan().days[0]);
+    // Tuesday: the approved item stays a plan item, next to the new suggestion.
+    expect(plan.days[1].items.map((item) => item.title)).toEqual(["Deep work", "Walk"]);
+    expect(result.addedItems).toEqual({ [TUE]: [0] });
+    expect(h.tables.get("weekly_plans")?.[0]?.approved_event_ids).toEqual(["ev-tue"]);
+    // Days the answer returned are drafted afresh: Wednesday's old reading is gone.
+    expect(plan.days[2].items.map((item) => item.title)).toEqual(["Focus"]);
+    // A fresh draft does not show the saved plan to the model.
+    const system = String(mockedCallAI.mock.calls[0][0].messages[0].content);
+    expect(system).not.toContain("CURRENT PLAN");
+  });
+
+  it("an answer with no items is refused and the saved plan is kept", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({})));
+    await expect(generate({ weekStart: MONDAY })).rejects.toThrow(/had no plan items/);
+    expect(storedPlan()).toEqual(savedPlan());
+    expect(requests()[0]).toMatchObject({ status: "failed" });
+  });
+});
+
+describe("developer wording never reaches a visitor of the hosted site (findings 6, 52, 50)", () => {
+  const ollamaText =
+    "Could not reach Ollama at http://localhost:11434/v1. Is it running? (For local Ollama: docker ps shows the Ollama container on port 11434.)";
+
+  function storeFailedRequest(error: string) {
+    h.tables.set("week_plan_requests", [
+      {
+        id: "r-failed",
+        user_id: USER,
+        week_start: MONDAY,
+        kind: "create",
+        status: "failed",
+        reply: null,
+        error,
+        created_at: new Date(NOW.getTime() - 3_600_000).toISOString(),
+        finished_at: new Date(NOW.getTime() - 3_590_000).toISOString(),
+      },
+    ]);
+  }
+
+  it("a stored failure with developer text is shown as a plain sentence on the hosted site", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    storeFailedRequest(ollamaText);
+    const result = await fetchPlan();
+    expect(result.request).toMatchObject({
+      status: "failed",
+      error: "Drafting the plan failed. Please try again.",
+    });
+    // The row itself is left as it was.
+    expect(requests()[0].error).toBe(ollamaText);
+  });
+
+  it("a plain failure sentence is shown as it is, and a local run keeps the developer text", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    storeFailedRequest("The AI's answer could not be used, so your plan was not changed. Please try again.");
+    expect((await fetchPlan()).request).toMatchObject({
+      error: "The AI's answer could not be used, so your plan was not changed. Please try again.",
+    });
+    vi.stubEnv("LIFEOPS_HOSTED", "");
+    storeFailedRequest(ollamaText);
+    expect((await fetchPlan()).request).toMatchObject({ error: ollamaText });
+  });
+
+  it("a new failure with developer text is stored and shown as a plain sentence on the hosted site", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    mockedCallAI.mockRejectedValue(
+      new Error("The AI provider did not answer within 60 s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again."),
+    );
+    await expect(generate({ weekStart: MONDAY })).rejects.toThrow(
+      /^Drafting the plan failed\. Please try again\.$/,
+    );
+    expect(requests()[0]).toMatchObject({
+      status: "failed",
+      error: "Drafting the plan failed. Please try again.",
+    });
+  });
+
+  it("a failure meant for the visitor (a limit) is kept on the hosted site", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    vi.mocked(enforceAiAllowance).mockRejectedValueOnce(
+      new Error("You have reached this demo's limit of 5 week plans per day. Please try again tomorrow."),
+    );
+    await expect(generate({ weekStart: MONDAY })).rejects.toThrow(/limit of 5 week plans per day/);
+    expect(mockedCallAI).not.toHaveBeenCalled();
+  });
+});
+
 describe("plan quality checks (finding 90)", () => {
   it("drops a repeat of a busy event and a meal outside its window, and says so", async () => {
     h.calendar.events.push({

@@ -11,13 +11,15 @@ import {
   APPROVE_CLARIFY_REPLY,
   NO_PLAN_YET_REPLY,
   canEditPlanItem,
+  editedItemTimes,
+  localHM,
   parseApproveCommand,
   planCalendarState,
   planCreateInstructions,
   weekIsOver,
 } from "@/lib/plan-state";
 import { formatRequestTime } from "@/lib/week-plan-request";
-import { PlanWeekGrid } from "@/components/plan/PlanWeekGrid";
+import { ItemTimeEditor, PlanWeekGrid } from "@/components/plan/PlanWeekGrid";
 import type { WeekPlan, BusyEvent } from "@/types/plan";
 
 const MONDAY = "2026-11-23";
@@ -62,6 +64,9 @@ describe("approve commands in the plan chat (finding 57)", () => {
       kind: "unclear",
       reply: APPROVE_CLARIFY_REPLY,
     });
+    // "this day" does not say which day, so it must not add the whole week.
+    expect(parse("approve this day")).toEqual({ kind: "unclear", reply: APPROVE_CLARIFY_REPLY });
+    expect(parse("approve all days")).toEqual({ kind: "week" });
   });
 
   it("today and tomorrow count only in the week shown", () => {
@@ -269,9 +274,28 @@ describe("the week grid", () => {
     expect(pencil).toContain('type="button"');
     expect(pencil).toContain("focus-visible:opacity-100");
     expect(pencil).toContain("group-focus-within:opacity-100");
-    // Hidden until hover only where a mouse can hover; never plain "opacity-0" for everyone.
-    expect(pencil).toContain("pointer-fine:opacity-0");
+    // Hidden until hover only where the screen can hover; never plain "opacity-0" for everyone.
+    expect(pencil).toContain("[@media(hover:hover)]:opacity-0");
     expect(pencil).not.toMatch(/class="opacity-0 /);
+  });
+
+  it("the time editor starts from the item it is opened for, and saving keeps the untouched time (finding 7)", () => {
+    // The plan after a refinement moved the item from 14:15-16:00 to 15:15-17:00.
+    const refined = { emoji: "🎯", title: "Focus", starts_at: local(25, 15, 15), ends_at: local(25, 17) };
+    const html = renderToStaticMarkup(
+      createElement(ItemTimeEditor, { item: refined, onSave: () => undefined, onClose: () => undefined }),
+    );
+    expect(html).toMatch(/aria-label="Start time of Focus"/);
+    expect(html).toMatch(/value="15:15"/);
+    expect(html).toMatch(/value="17:00"/);
+    expect(html).toMatch(/<button[^>]*type="button"[^>]*aria-label="Cancel editing"/);
+    // Only the start changed: the end stays at the item's current 17:00, not an older value.
+    expect(editedItemTimes(refined, "15:30", localHM(refined.ends_at))).toEqual({
+      starts_at: local(25, 15, 30),
+      ends_at: local(25, 17),
+    });
+    // The rows render no editor until it is opened.
+    expect(render()).not.toMatch(/type="time"/);
   });
 
   it("items that have started offer no time editor (finding 60)", () => {

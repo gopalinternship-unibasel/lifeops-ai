@@ -26,6 +26,7 @@ import {
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { checkAiAllowance, enforceAiAllowance } from "@/server/limits.server";
 import { dbError, publicError } from "@/server/public-error.server";
+import { isHostedDeployment } from "@/server/deployment.server";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import type { Json } from "@/integrations/supabase/types";
 import { isRecord } from "@/lib/errors";
@@ -75,6 +76,22 @@ const NO_ITEMS_ANSWER = "The AI's answer had no plan items, so your plan was not
 const NO_FITTING_ITEMS =
   "None of the AI's suggestions fit your free time, so your plan was not changed. Please try again.";
 const DEFAULT_REPLY = "Here's your week plan — review it and type 'approve' to add it to your calendar.";
+
+// Developer wording in a failure: addresses, commands and setting names, for example "Could not
+// reach Ollama at http://localhost:11434/v1. Is it running? (… docker ps …)" or "raise
+// LLM_TIMEOUT_MS". Hosted sites stored such text as a request's error and showed it to visitors.
+const DEVELOPER_WORDS_RE = /localhost|127\.0\.0\.1|\[::1\]|https?:\/\/|\bdocker\b|\bollama\b|\.md\b/i;
+const SETTING_NAME_RE = /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/;
+
+/**
+ * A failure as the person reading it should see it. On the hosted demo, text written for a
+ * developer becomes a plain sentence (the cause is in the server log); a local run keeps it,
+ * because the person reading it is the one who can change the setting it names.
+ */
+function failureForReader(message: string, hosted = isHostedDeployment()): string {
+  if (!hosted) return message;
+  return DEVELOPER_WORDS_RE.test(message) || SETTING_NAME_RE.test(message) ? DRAFT_FAILED : message;
+}
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // A date-time with an explicit offset, as the page sends it (toISOString). A date alone or free
@@ -127,7 +144,11 @@ async function latestWeekPlanRequest(supabase: UserSupabaseClient, userId: strin
     .limit(1)
     .maybeSingle();
   if (error) throw dbError("load the plan request", error);
-  return row ? weekPlanRequestView(row, Date.now(), maxPlanRequestMs()) : null;
+  if (!row) return null;
+  const view = weekPlanRequestView(row, Date.now(), maxPlanRequestMs());
+  // Rows stored before this check can hold developer text (the hosted site once tried a local
+  // model); they are shown as a plain sentence and left unchanged in the database.
+  return view.error ? { ...view, error: failureForReader(view.error) } : view;
 }
 
 /**
@@ -158,7 +179,8 @@ function weekIsOverIn(monday: string, timeZone: string, nowMs = Date.now()): boo
 
 /**
  * The error a failed draft shows and stores. Built-in programming errors (a TypeError from a bug)
- * carry internal text, so the visitor gets a plain sentence instead and the cause is logged.
+ * carry internal text, and so does developer wording on the hosted demo (see failureForReader),
+ * so the visitor gets a plain sentence instead and the cause is logged.
  */
 function visibleDraftError(error: unknown): Error {
   const internal =
@@ -166,7 +188,9 @@ function visibleDraftError(error: unknown): Error {
     error instanceof RangeError ||
     error instanceof ReferenceError ||
     error instanceof SyntaxError;
-  if (error instanceof Error && !internal && error.message.trim()) return error;
+  if (error instanceof Error && !internal && error.message.trim()) {
+    if (failureForReader(error.message) === error.message) return error;
+  }
   return publicError(DRAFT_FAILED, error, "plan request");
 }
 
@@ -592,11 +616,18 @@ function sameItem(a: { title: string; starts_at: string; ends_at: string }, titl
 }
 
 async function callPlanAI(opts: {
+  /**
+   * "create" drafts the week afresh, "refine" revises the saved plan (shown to the model). In
+   * both, the saved plan keeps the days the answer leaves out or that are over, and its items
+   * that have started or are in the calendar.
+   */
+  mode: "create" | "refine";
   monday: string;
   goals: string;
   days: PlanSlotDay[];
   instructions?: string;
   history?: { role: "user" | "assistant"; content: string }[];
+  /** The saved plan of this week, if any. */
   currentPlan?: WeekPlan | null;
   /** The week's calendar events (to tell which current items are in the calendar already). */
   events: PlanCalendarEvent[];
@@ -604,9 +635,9 @@ async function callPlanAI(opts: {
   timeZone: string;
 }): Promise<{ reply: string; days: WeekPlanDay[] }> {
   const currentPlan = opts.currentPlan ?? null;
-  // Items of the current plan that a refinement keeps as they are: those in the calendar already
-  // and those whose time has started. A refinement used to drop both, because they no longer fit
-  // the free time (approved items are busy events, the past has no free slots).
+  // Items of the saved plan that a new draft keeps as they are: those in the calendar already
+  // and those whose time has started. A refinement or a regeneration used to drop both, because
+  // they no longer fit the free time (approved items are busy events, the past has no free slots).
   const addedItems = currentPlan ? planCalendarState(currentPlan, opts.events, opts.nowMs).addedItems : {};
   const isKept = (date: string, item: WeekPlanItem, index: number) =>
     (addedItems[date] ?? []).includes(index) || toMs(item.starts_at) < opts.nowMs;
@@ -627,7 +658,8 @@ async function callPlanAI(opts: {
     })
     .join("\n");
 
-  const currentPlanTxt = currentPlan
+  // A fresh draft does not show the saved plan to the model ("Regenerate" starts over).
+  const currentPlanTxt = currentPlan && opts.mode === "refine"
     ? currentPlan.days
         .map((day) => `  ${day.date}: ${day.items.length === 0 ? "(nothing)" : day.items.map((item, index) => `${fmtHHMM(item.starts_at, opts.timeZone)}-${fmtHHMM(item.ends_at, opts.timeZone)} ${item.emoji} ${item.title}${(addedItems[day.date] ?? []).includes(index) ? " [in calendar]" : toMs(item.starts_at) < opts.nowMs ? " [started]" : ""}`).join("; ")}`)
         .join("\n")
@@ -728,7 +760,8 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
     const current = currentPlan?.days.find((day) => day.date === slot.date) ?? null;
     const raw = byDate.get(slot.date);
     // A day the model did not return, or one that is over, stays as it was: answers that
-    // returned only the changed day used to empty the other six.
+    // returned only the changed day used to empty the other six, and a regeneration in the
+    // middle of the week emptied the days already over.
     if (current && (!raw || slot.past)) return current;
 
     const kept = current ? current.items.filter((item, index) => isKept(slot.date, item, index)) : [];
@@ -787,8 +820,9 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
   if (suggested > 0 && accepted === 0) {
     throw publicError(NO_FITTING_ITEMS, { suggested }, "plan: no suggested item passed the checks");
   }
+  // A fresh draft must suggest something (a refinement may remove items on purpose).
   const hasFreeTime = opts.days.some((slot) => !slot.past && slot.free.length > 0);
-  if (!currentPlan && suggested === 0 && hasFreeTime) {
+  if (opts.mode === "create" && suggested === 0 && hasFreeTime) {
     throw publicError(NO_ITEMS_ANSWER, { days: byDate.size }, "plan: the model's answer has no items");
   }
 
@@ -798,6 +832,21 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
     reply += ` ${dropped === 1 ? "One suggested item was" : `${dropped} suggested items were`} left out because ${dropped === 1 ? "it" : "they"} did not fit your free time or repeated something already planned.`;
   }
   return { reply, days };
+}
+
+/** The user's goals and the saved plan of this week (checked; null when there is none). */
+async function loadGoalsAndSavedPlan(supabase: UserSupabaseClient, userId: string, monday: string) {
+  const [profileResult, planResult] = await Promise.all([
+    supabase.from("profiles").select("goals").eq("id", userId).maybeSingle(),
+    supabase.from("weekly_plans").select("payload").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
+  ]);
+  if (profileResult.error) throw dbError("load your goals", profileResult.error);
+  if (planResult.error) throw dbError("load this week's plan", planResult.error);
+  const payload = planResult.data?.payload;
+  return {
+    goals: profileResult.data?.goals ?? "",
+    currentPlan: payload ? parseStoredPlan(payload, monday) : null,
+  };
 }
 
 /* ============================================================
@@ -816,24 +865,27 @@ export const generateWeekPlan = createServerFn({ method: "POST" })
     const monday = toMondayISO(data.weekStart ?? todayInTimeZone(timeZone));
 
     return runWeekPlanRequest(context, monday, timeZone, "create", data.instructions, async () => {
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles").select("goals").eq("id", userId).maybeSingle();
-      if (profileError) throw dbError("load your goals", profileError);
-
-      const { events, days: slots, nowMs } = await loadCalendarOrStop(supabase, userId, monday, timeZone, CALENDAR_FOR_DRAFT);
+      // The reads do not depend on each other, so they run together before the model call.
+      const [{ goals, currentPlan }, calendar] = await Promise.all([
+        loadGoalsAndSavedPlan(supabase, userId, monday),
+        loadCalendarOrStop(supabase, userId, monday, timeZone, CALENDAR_FOR_DRAFT),
+      ]);
 
       // One use of the AI allowance per model call, recorded right before it.
       await enforceAiAllowance(supabaseAdmin, userId, "plan");
       const { reply, days } = await callPlanAI({
+        mode: "create",
         monday,
-        goals: profile?.goals ?? "",
-        days: slots,
+        goals,
+        days: calendar.days,
         instructions: data.instructions,
-        events,
-        nowMs,
+        // A regeneration keeps the days its answer leaves out or that are over (see callPlanAI).
+        currentPlan,
+        events: calendar.events,
+        nowMs: calendar.nowMs,
         timeZone,
       });
-      return { reply, plan: { week_start: monday, days }, events };
+      return { reply, plan: { week_start: monday, days }, events: calendar.events };
     });
   });
 
@@ -902,31 +954,25 @@ export const refineWeekPlan = createServerFn({ method: "POST" })
     const monday = toMondayISO(data.weekStart);
 
     return runWeekPlanRequest(context, monday, timeZone, "refine", data.message, async () => {
-      const [profileResult, planResult] = await Promise.all([
-        supabase.from("profiles").select("goals").eq("id", userId).maybeSingle(),
-        supabase.from("weekly_plans").select("payload").eq("user_id", userId).eq("week_start", monday).maybeSingle(),
+      const [{ goals, currentPlan }, calendar] = await Promise.all([
+        loadGoalsAndSavedPlan(supabase, userId, monday),
+        loadCalendarOrStop(supabase, userId, monday, timeZone, CALENDAR_FOR_DRAFT),
       ]);
-      if (profileResult.error) throw dbError("load your goals", profileResult.error);
-      if (planResult.error) throw dbError("load this week's plan", planResult.error);
-      const profile = profileResult.data;
-      const payload = planResult.data?.payload;
-      const currentPlan = payload ? parseStoredPlan(payload, monday) : null;
-
-      const { events, days: slots, nowMs } = await loadCalendarOrStop(supabase, userId, monday, timeZone, CALENDAR_FOR_DRAFT);
 
       // One use of the AI allowance per model call, recorded right before it.
       await enforceAiAllowance(supabaseAdmin, userId, "plan");
       const { reply, days } = await callPlanAI({
+        mode: "refine",
         monday,
-        goals: profile?.goals ?? "",
-        days: slots,
+        goals,
+        days: calendar.days,
         instructions: data.message,
         currentPlan,
-        events,
-        nowMs,
+        events: calendar.events,
+        nowMs: calendar.nowMs,
         timeZone,
       });
-      return { reply, plan: { week_start: monday, days }, events };
+      return { reply, plan: { week_start: monday, days }, events: calendar.events };
     });
   });
 
