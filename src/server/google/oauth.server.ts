@@ -19,9 +19,10 @@ function googleOAuthSignal() {
   return AbortSignal.timeout(GOOGLE_OAUTH_TIMEOUT_MS);
 }
 
+// The state carries no return path: every sign-in comes back to the connectors page, the only
+// page that can finish it (see callback.server.ts), so a return path would only be unused input.
 type OAuthStatePayload = {
   uid: string;
-  rt: string;
   exp: number;
   /**
    * SHA-256 (base64url) of the browser key: a random value only the browser that started the
@@ -36,15 +37,26 @@ export const GOOGLE_OAUTH_ENV = [
   "GOOGLE_OAUTH_STATE_SECRET",
 ] as const;
 
+const OAUTH_NOT_AVAILABLE =
+  "Connecting a Google account is not available on this site yet. You can continue with the demo inbox and calendar.";
+
+/**
+ * For a user who is already connected, when the server can no longer renew Google access because
+ * its Google settings were removed: "connecting is not available yet" would not fit them.
+ */
+const GOOGLE_NOT_AVAILABLE_NOW =
+  "Google is not available on this site right now, so your Gmail and Calendar cannot be reached. Please try again later.";
+
 /**
  * Thrown when the server has no Google OAuth client. The message is shown to visitors as-is, so
  * it names no settings; `missing` (the setting names) is for the server log and tests.
  */
 export class GoogleOAuthNotConfiguredError extends Error {
-  constructor(readonly missing: string[]) {
-    super(
-      "Connecting a Google account is not available on this site yet. You can continue with the demo inbox and calendar.",
-    );
+  constructor(
+    readonly missing: string[],
+    message: string = OAUTH_NOT_AVAILABLE,
+  ) {
+    super(message);
     this.name = "GoogleOAuthNotConfiguredError";
   }
 }
@@ -57,10 +69,10 @@ export function googleOAuthConfigStatus(env: Record<string, string | undefined> 
   return { configured: missing.length === 0, missing };
 }
 
-function notConfigured(missing: string[]): GoogleOAuthNotConfiguredError {
+function notConfigured(missing: string[], message?: string): GoogleOAuthNotConfiguredError {
   // The setting names are for the person who runs the server (RUNNING.md explains them).
   console.warn(`[google] Google OAuth is not configured (missing ${missing.join(", ")}; see RUNNING.md).`);
-  return new GoogleOAuthNotConfiguredError(missing);
+  return new GoogleOAuthNotConfiguredError(missing, message);
 }
 
 export function assertGoogleOAuthConfigured() {
@@ -68,9 +80,10 @@ export function assertGoogleOAuthConfigured() {
   if (!status.configured) throw notConfigured(status.missing);
 }
 
-function requiredEnv(name: string): string {
+/** `message` is what the user reads when the setting is missing (default: connecting is not available). */
+function requiredEnv(name: string, message?: string): string {
   const value = process.env[name];
-  if (!value) throw notConfigured([name]);
+  if (!value) throw notConfigured([name], message);
   return value;
 }
 
@@ -91,13 +104,6 @@ function fromBase64Url(value: string): ArrayBuffer {
   }
 
   return bytes.buffer;
-}
-
-function sanitizeReturnTo(value?: string): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) {
-    return "/onboarding/connectors";
-  }
-  return value;
 }
 
 async function getStateKey() {
@@ -148,13 +154,11 @@ export async function stateMatchesBrowser(
 
 export async function createSignedOAuthState(params: {
   userId: string;
-  returnTo?: string;
   /** The key the starting browser keeps (newBrowserKey); required to finish the sign-in. */
   browserKey: string;
 }): Promise<string> {
   const payload: OAuthStatePayload = {
     uid: params.userId,
-    rt: sanitizeReturnTo(params.returnTo),
     exp: Date.now() + STATE_TTL_MS,
     nonce: await browserKeyHash(params.browserKey),
   };
@@ -188,7 +192,6 @@ export async function verifySignedOAuthState(state: string): Promise<OAuthStateP
 
     if (
       typeof payload.uid !== "string" ||
-      typeof payload.rt !== "string" ||
       typeof payload.exp !== "number" ||
       typeof payload.nonce !== "string" ||
       payload.exp < Date.now()
@@ -198,7 +201,6 @@ export async function verifySignedOAuthState(state: string): Promise<OAuthStateP
 
     return {
       uid: payload.uid,
-      rt: sanitizeReturnTo(payload.rt),
       exp: payload.exp,
       nonce: payload.nonce,
     };
@@ -281,10 +283,11 @@ export async function exchangeCodeForTokens(code: string, origin: string) {
 }
 
 export async function refreshAccessToken(refreshToken: string) {
+  // Only reached for a user who is already connected, so they get their own sentence.
   const res = await postToGoogleToken(
     new URLSearchParams({
-      client_id: requiredEnv("GOOGLE_OAUTH_CLIENT_ID"),
-      client_secret: requiredEnv("GOOGLE_OAUTH_CLIENT_SECRET"),
+      client_id: requiredEnv("GOOGLE_OAUTH_CLIENT_ID", GOOGLE_NOT_AVAILABLE_NOW),
+      client_secret: requiredEnv("GOOGLE_OAUTH_CLIENT_SECRET", GOOGLE_NOT_AVAILABLE_NOW),
       refresh_token: refreshToken,
       grant_type: "refresh_token",
     }),

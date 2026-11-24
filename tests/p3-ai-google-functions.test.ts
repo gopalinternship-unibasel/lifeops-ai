@@ -207,6 +207,35 @@ describe("a move card made for an older version of the event (finding 26)", () =
     expect(mocks.releaseCard).toHaveBeenCalledWith(harness.user.client, USER, "change-b");
   });
 
+  it("accepts a retry of the same card when the move went through but recording it failed", async () => {
+    const tomorrow = { starts_at: "2026-11-25T08:00:00.000Z", ends_at: "2026-11-25T09:00:00.000Z" };
+    mocks.recordCardResult.mockRejectedValueOnce(new Error("The card could not be updated."));
+    const failed = await updateCalendarEvent({ data: card("change-r", tomorrow) });
+    expect(failed.ok).toBe(false);
+    // The event did move, and the claim was released, so the user can click the card again.
+    expect(harness.user.tables.get("calendar_events")?.[0]?.starts_at).toBe(tomorrow.starts_at);
+    expect(mocks.releaseCard).toHaveBeenCalledWith(harness.user.client, USER, "change-r");
+
+    const retry = await updateCalendarEvent({ data: card("change-r", tomorrow) });
+    expect(retry).toMatchObject({ ok: true });
+    expect(retry.error).toBeNull();
+    expect(mocks.recordCardResult).toHaveBeenLastCalledWith(
+      harness.user.client,
+      USER,
+      "change-r",
+      EVENT,
+    );
+
+    // A card that would move it somewhere else is still refused.
+    const other = await updateCalendarEvent({
+      data: card("change-s", {
+        starts_at: "2026-11-24T14:00:00.000Z",
+        ends_at: "2026-11-24T15:00:00.000Z",
+      }),
+    });
+    expect(other.error).toMatch(/has changed since/);
+  });
+
   it("compares instants, not spellings of the same time", async () => {
     const result = await updateCalendarEvent({
       data: {
@@ -394,13 +423,22 @@ describe("starting and finishing a Google sign-in (finding 98)", () => {
   });
 
   it("gives the browser a key whose hash is the state's nonce", async () => {
-    const { url, browserKey } = await getGoogleOAuthUrl({
-      data: { returnTo: "/onboarding/connectors" },
-    });
+    const { url, browserKey } = await getGoogleOAuthUrl();
     const state = new URL(url).searchParams.get("state") ?? "";
     const payload = await verifySignedOAuthState(state);
     expect(payload?.uid).toBe(USER);
     expect(payload?.nonce).toBe(await browserKeyHash(browserKey));
+  });
+
+  it("ignores a return path an older page still sends", async () => {
+    const { url } = await (
+      getGoogleOAuthUrl as unknown as (opts: { data: unknown }) => Promise<{ url: string }>
+    )({
+      data: { returnTo: "//evil.example" },
+    });
+    const state = new URL(url).searchParams.get("state") ?? "";
+    expect((await verifySignedOAuthState(state))?.uid).toBe(USER);
+    expect(Buffer.from(state.split(".")[0], "base64url").toString("utf8")).not.toContain("evil");
   });
 
   it("finishes the sign-in for the signed-in user, never for an id taken from the request body", async () => {
@@ -477,6 +515,30 @@ describe("reply suggestions use the shared AI allowance (finding 45)", () => {
     expect(prompt).toContain("Write a reply on behalf of Ada");
     expect(prompt).not.toMatch(/n{80}/);
     expect(prompt.length).toBeLessThan(2_000);
+  });
+
+  it("clips an over-long suggestion to what a saved draft may hold before saving it", async () => {
+    mocks.callAI.mockResolvedValueOnce(answer(`Dear Ada,\n${"x".repeat(20_000)}`));
+    mocks.saveReplyDraft.mockResolvedValueOnce({
+      draftId: "d1",
+      subject: "Re: x",
+      to: "a@example.com",
+      provider: "demo",
+    });
+    const result = await draftReplySuggestion({ data: { messageId: "e1", save: true } });
+    expect(result.ok).toBe(true);
+    const saved = (mocks.saveReplyDraft.mock.calls[0]?.[0] as { replyBody: string }).replyBody;
+    expect(saved.length).toBe(10_000);
+    expect(saved.startsWith("Dear Ada,")).toBe(true);
+    expect(result.suggestion).toBe(saved);
+    // The same text is accepted by saveGmailDraft, which saves a reviewed suggestion later.
+    mocks.saveReplyDraft.mockResolvedValueOnce({
+      draftId: "d2",
+      subject: "Re: x",
+      to: "a@example.com",
+      provider: "demo",
+    });
+    expect((await saveGmailDraft({ data: { messageId: "e1", replyBody: saved } })).ok).toBe(true);
   });
 
   it("an answer whose content is not text is treated as empty, not a crash", async () => {

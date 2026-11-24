@@ -177,7 +177,7 @@ describe("configuration", () => {
   });
 
   it("builds the consent URL with offline access, the exact redirect URI and the scopes", async () => {
-    const state = await createSignedOAuthState({ userId: USER, returnTo: "/onboarding/connectors", browserKey: KEY });
+    const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
     const url = new URL(buildAuthUrl({ origin: ORIGIN, state }));
     expect(url.origin + url.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
     expect(url.searchParams.get("client_id")).toBe("test-client.apps.googleusercontent.com");
@@ -198,12 +198,12 @@ describe("configuration", () => {
 });
 
 describe("signed OAuth state", () => {
-  it("round-trips and keeps only same-site return paths", async () => {
-    const good = await verifySignedOAuthState(await createSignedOAuthState({ userId: USER, returnTo: "/app/profile", browserKey: KEY }));
+  it("round-trips and carries no return path (every sign-in returns to the connectors page)", async () => {
+    const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+    const good = await verifySignedOAuthState(state);
     expect(good?.uid).toBe(USER);
-    expect(good?.rt).toBe("/app/profile");
-    const evil = await verifySignedOAuthState(await createSignedOAuthState({ userId: USER, returnTo: "//evil.example", browserKey: KEY }));
-    expect(evil?.rt).toBe("/onboarding/connectors");
+    expect(good).not.toHaveProperty("rt");
+    expect(JSON.parse(Buffer.from(state.split(".")[0], "base64url").toString("utf8"))).not.toHaveProperty("rt");
   });
 
   it("carries only a hash of the browser key, never the key itself", async () => {
@@ -238,7 +238,7 @@ describe("signed OAuth state", () => {
 describe("OAuth callback", () => {
   it("hands the code and state to the connectors page and stores nothing itself", async () => {
     mockGoogle({});
-    const state = await createSignedOAuthState({ userId: USER, returnTo: "/onboarding/connectors", browserKey: KEY });
+    const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
 
     const res = await handleGoogleOAuthCallback(
       new Request(`${ORIGIN}/api/public/google/callback?code=auth-code-1&state=${encodeURIComponent(state)}`),
@@ -254,6 +254,32 @@ describe("OAuth callback", () => {
     expect(calls).toHaveLength(0);
     expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
     expect(db.tables.get("connector_status")).toBeUndefined();
+  });
+
+  it("returns to the connectors page even for a signed state that names another return path", async () => {
+    mockGoogle({});
+    // A state as an earlier version signed it, with a return path: the path is not followed.
+    const encoded = Buffer.from(
+      JSON.stringify({ uid: USER, rt: "//evil.example/x", exp: Date.now() + 60_000, nonce: "n" }),
+    ).toString("base64url");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode("x".repeat(48)),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
+    const state = `${encoded}.${Buffer.from(signature).toString("base64url")}`;
+    expect((await verifySignedOAuthState(state))?.uid).toBe(USER);
+
+    const res = await handleGoogleOAuthCallback(
+      new Request(`${ORIGIN}/api/public/google/callback?code=c&state=${encodeURIComponent(state)}`),
+    );
+
+    expect(res.status).toBe(302);
+    const location = new URL(String(res.headers.get("location")));
+    expect(location.origin + location.pathname).toBe(`${ORIGIN}/onboarding/connectors`);
   });
 
   it("refuses a forged state and surfaces Google errors as a page, not a crash", async () => {
@@ -278,7 +304,7 @@ describe("finishing a Google sign-in (completeGoogleConnection)", () => {
 
   it("exchanges the code, stores the tokens for the signed-in user and marks both connectors", async () => {
     mockGoogle(tokenRoutes());
-    const state = await createSignedOAuthState({ userId: USER, returnTo: "/onboarding/connectors", browserKey: KEY });
+    const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
     const before = Date.now();
 
     const result = await completeGoogleConnection({ userId: USER, code: "auth-code-1", state, browserKey: KEY, origin: ORIGIN });
@@ -386,6 +412,25 @@ describe("token refresh", () => {
   it("treats a user without tokens as not connected", async () => {
     mockGoogle({});
     await expect(getValidAccessToken(USER)).rejects.toThrow("GOOGLE_NOT_CONNECTED");
+  });
+
+  it("tells a connected user that Google is unavailable, not that connecting is 'not available yet', when the server lost its Google settings", async () => {
+    db.tables.set("google_oauth_tokens", [
+      { user_id: USER, access_token: "old", refresh_token: "rt-9", expires_at: new Date(Date.now() + 10_000).toISOString(), google_email: null },
+    ]);
+    vi.stubEnv("GOOGLE_OAUTH_CLIENT_ID", "");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockGoogle({});
+
+    const failure = await getValidAccessToken(USER).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(GoogleOAuthNotConfiguredError);
+    expect((failure as Error).message).toBe(
+      "Google is not available on this site right now, so your Gmail and Calendar cannot be reached. Please try again later.",
+    );
+    expect((failure as GoogleOAuthNotConfiguredError).missing).toEqual(["GOOGLE_OAUTH_CLIENT_ID"]);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("GOOGLE_OAUTH_CLIENT_ID");
+    expect(calls).toHaveLength(0);
   });
 });
 

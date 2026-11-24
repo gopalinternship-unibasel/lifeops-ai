@@ -56,6 +56,9 @@ const EventId = z.string().min(1).max(1024);
 /** A Gmail message id, or a demo inbox id such as "e1". */
 const MessageId = z.string().min(1).max(200);
 
+/** Longest reply body MONDAY saves as a draft (the database allows a little more). */
+const MAX_REPLY_BODY = 10000;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ALREADY_HANDLED: Record<string, string> = {
@@ -93,7 +96,7 @@ function userErrorMessage(error: unknown, fallback: string, context: string): st
   return fallback;
 }
 
-/** `text` without surrounding space, at most `max` characters (for text put into a prompt). */
+/** `text` without surrounding space, at most `max` characters; a cut text ends in "…". */
 function clip(text: string | null | undefined, max: number): string {
   const value = (text ?? "").trim();
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
@@ -109,6 +112,10 @@ function assertDemoEventId(connected: boolean, eventId: string) {
  * (or ends) at the time the card shows as its original, the card's change is out of date. Two move
  * cards for one event would otherwise both apply, the second one moving the event again.
  * Requests without the original times (an older page) are not checked.
+ *
+ * An event that already sits at the card's new time is accepted too: that is this card's own
+ * change, for example a retry after the move went through but recording it failed, and moving it
+ * there again changes nothing.
  */
 async function assertEventUnchanged(opts: {
   supabase: SupabaseClient;
@@ -117,6 +124,8 @@ async function assertEventUnchanged(opts: {
   eventId: string;
   originalStartsAt?: string;
   originalEndsAt?: string;
+  /** The card's new start and end (a move card only). */
+  target?: { starts_at: string; ends_at: string };
 }) {
   if (!opts.originalStartsAt && !opts.originalEndsAt) return;
   let current: { starts_at: string; ends_at: string } | null;
@@ -135,9 +144,15 @@ async function assertEventUnchanged(opts: {
   if (!current) throw new Error(EVENT_GONE);
   const same = (original: string | undefined, now: string) =>
     original === undefined || !Number.isFinite(Date.parse(original)) || Date.parse(original) === Date.parse(now);
-  if (!same(opts.originalStartsAt, current.starts_at) || !same(opts.originalEndsAt, current.ends_at)) {
-    throw new Error(EVENT_CHANGED);
+  if (same(opts.originalStartsAt, current.starts_at) && same(opts.originalEndsAt, current.ends_at)) return;
+  if (
+    opts.target &&
+    Date.parse(opts.target.starts_at) === Date.parse(current.starts_at) &&
+    Date.parse(opts.target.ends_at) === Date.parse(current.ends_at)
+  ) {
+    return;
   }
+  throw new Error(EVENT_CHANGED);
 }
 
 const CalendarEventSchema = z.object({
@@ -187,12 +202,14 @@ const CalendarEventUpdateSchema = z.object({
 });
 
 /* -------------------- OAuth start -------------------- */
+/**
+ * Start a Google sign-in. It takes no input: every sign-in returns to the connectors page, which
+ * is the page that finishes it (see callback.server.ts). A page from before this change may still
+ * send { returnTo }; it is not read.
+ */
 export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((d) => parseInput(z.object({
-    returnTo: z.string().max(500).optional(),
-  }).optional(), d))
-  .handler(async ({ context, data }) => {
+  .handler(async ({ context }) => {
     // Fail with a clear message (not a broken Google page) when no OAuth client is configured.
     assertGoogleOAuthConfigured();
     const request = getRequest();
@@ -201,11 +218,7 @@ export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
     // The browser keeps this key and sends it back to completeGoogleOAuth; the state holds only
     // its hash, so the sign-in can only be finished in this browser (see callback.server.ts).
     const browserKey = newBrowserKey();
-    const state = await createSignedOAuthState({
-      userId: context.userId,
-      returnTo: data?.returnTo,
-      browserKey,
-    });
+    const state = await createSignedOAuthState({ userId: context.userId, browserKey });
     return { url: buildAuthUrl({ origin, state }), browserKey };
   });
 
@@ -395,6 +408,7 @@ export const updateCalendarEvent = createServerFn({ method: "POST" })
         eventId: data.eventId,
         originalStartsAt: data.originalStartsAt,
         originalEndsAt: data.originalEndsAt,
+        target: data.starts_at && data.ends_at ? { starts_at: data.starts_at, ends_at: data.ends_at } : undefined,
       });
       const patch = {
         title: data.title,
@@ -539,7 +553,9 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
         ],
       });
       const content: unknown = ai.choices?.[0]?.message?.content;
-      suggestion = typeof content === "string" ? content.trim() : "";
+      // Clipped to what a saved draft may hold, so saving it (here or later through
+      // saveGmailDraft) cannot fail on its length.
+      suggestion = typeof content === "string" ? clip(content, MAX_REPLY_BODY) : "";
     } catch (e: unknown) {
       return {
         ok: false,
@@ -582,7 +598,7 @@ export const saveGmailDraft = createServerFn({ method: "POST" })
   .validator((d) => parseInput(z.object({
     cardId: CardId,
     messageId: MessageId,
-    replyBody: z.string().trim().min(1).max(10000),
+    replyBody: z.string().trim().min(1).max(MAX_REPLY_BODY),
   }), d))
   .handler(async ({ context, data }) => {
     // One draft per reply card: saving the same card again does not add a second draft.

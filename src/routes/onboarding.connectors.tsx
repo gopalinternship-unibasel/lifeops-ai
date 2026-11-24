@@ -114,9 +114,7 @@ function ConnectorsOnboarding() {
     if (!user) return;
     setBusy(true);
     try {
-      const { url, browserKey } = await getGoogleOAuthUrl({
-        data: { returnTo: "/onboarding/connectors" },
-      });
+      const { url, browserKey } = await getGoogleOAuthUrl();
       if (!saveSignInKey(browserKey)) {
         throw new Error("This browser did not let the page store the sign-in details it needs. Please allow site data for this site and try again.");
       }
@@ -148,11 +146,57 @@ function ConnectorsOnboarding() {
     finally { setBusy(false); }
   }
 
-  const canEnter = canEnterWorkspace({ connected, demoMode, isAnonymous: !!user?.is_anonymous });
-
   if (loading || !hydrated) {
     return <div className="min-h-screen grid place-items-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>;
   }
+
+  return (
+    <ConnectorsView
+      connected={connected}
+      email={email}
+      demoMode={demoMode}
+      oauthConfigured={oauthConfigured}
+      oauthError={oauthError}
+      busy={busy}
+      isAnonymous={!!user?.is_anonymous}
+      onConnect={startOAuth}
+      onDisconnect={handleDisconnect}
+      onUseDemo={startDemo}
+      onEnter={() => navigate({ to: "/app" })}
+    />
+  );
+}
+
+/**
+ * The page as it looks once the connection status is known. Kept apart from the data loading so
+ * it can be rendered in tests with given states (tests/p3-ai-google-connectors-page.test.ts).
+ */
+export function ConnectorsView({
+  connected,
+  email,
+  demoMode,
+  oauthConfigured,
+  oauthError,
+  busy,
+  isAnonymous,
+  onConnect,
+  onDisconnect,
+  onUseDemo,
+  onEnter,
+}: {
+  connected: boolean;
+  email: string | null;
+  demoMode: boolean;
+  oauthConfigured: boolean;
+  oauthError: string | null;
+  busy: boolean;
+  isAnonymous: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onUseDemo: () => void;
+  onEnter: () => void;
+}) {
+  const canEnter = canEnterWorkspace({ connected, demoMode, isAnonymous });
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -187,7 +231,7 @@ function ConnectorsOnboarding() {
               <div className="flex items-center gap-2 text-sm text-emerald-900">
                 <Check className="h-4 w-4" /> Connected{email ? ` as ${email}` : ""}
               </div>
-              <button onClick={handleDisconnect} disabled={busy}
+              <button onClick={onDisconnect} disabled={busy}
                 className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-900 hover:bg-emerald-100 transition disabled:opacity-50">
                 {busy ? "…" : "Disconnect"}
               </button>
@@ -205,7 +249,7 @@ function ConnectorsOnboarding() {
                 </div>
               )}
               {/* Without an OAuth client the button could only fail; the notice above says why. */}
-              <button onClick={startOAuth} disabled={busy || !oauthConfigured}
+              <button onClick={onConnect} disabled={busy || !oauthConfigured}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60">
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <GoogleLogo />}
                 Connect Google
@@ -226,7 +270,7 @@ function ConnectorsOnboarding() {
                 </p>
               </div>
             </div>
-            <button onClick={startDemo} disabled={busy}
+            <button onClick={onUseDemo} disabled={busy}
               className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-md border border-border bg-background px-4 py-2.5 text-sm font-medium hover:bg-muted transition disabled:opacity-60">
               {demoMode ? "Continue with demo data" : "Use demo inbox & calendar"}
             </button>
@@ -235,7 +279,7 @@ function ConnectorsOnboarding() {
 
         <button
           disabled={!canEnter}
-          onClick={() => navigate({ to: "/app" })}
+          onClick={onEnter}
           className="mt-8 w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Enter AI Workspace <ArrowRight className="h-4 w-4" />
