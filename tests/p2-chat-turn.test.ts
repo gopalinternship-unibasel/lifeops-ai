@@ -2,7 +2,8 @@
  * The workspace chat turn (src/server/chat-turn.server.ts) run offline, end to end: an
  * in-memory stand-in for the database (the user's client and the service role share it), the
  * AI client, the limits and the Google connection are fakes. Findings of the review of
- * 24 Nov 2026: 2, 6, 10, 11, 16, 33, 47, 49, 50, 53, 80, 86, 88, 89, 99, 102, 111.
+ * 24 Nov 2026: 2, 6, 10, 11, 16, 33, 47, 49, 50, 53, 80, 86, 88, 89, 99, 102, 111, and the
+ * review of their fixes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -189,12 +190,16 @@ import { AiNotConfiguredError } from "@/server/ai/llm.server";
 import { CapReachedError } from "@/server/limits.server";
 import {
   AI_BRIEFING_HEADER,
+  asksForEmailReply,
   CHAT_FAILED,
   CHAT_PROMPT_LIMITS,
   DEMO_BRIEFING_HEADER,
+  draftRecipient,
+  emailReplyFromModel,
   ensureChatSessionFor,
   normalizeModelChanges,
   runChatTurn,
+  withSignOff,
 } from "@/server/chat-turn.server";
 import { reconcileCalendarChanges } from "@/server/calendar/change-request.server";
 import { NOTHING_SENT } from "@/server/ai/reply-guard.server";
@@ -311,7 +316,8 @@ describe("the first-visit briefing with a connected Google account (6, 99, 102)"
     expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
     expect(lastSystemPrompt()).toContain("AUTOMATIC FIRST BRIEFING");
     expect(result.reply.startsWith(AI_BRIEFING_HEADER)).toBe(true);
-    expect(result.reply).toContain("- **Ana <ana@example.com>** — *Budget review*");
+    // The sender's address is text, not a mail link (99: Markdown in senders and subjects is escaped).
+    expect(result.reply).toContain("- **Ana \\<ana@example.com\\>** — *Budget review*");
     expect(result.reply).toContain("A focused day: start with the budget review.");
     expect(result.reply).not.toContain("•");
     expect(result.panel.priorities?.[0].title).toBe("Reply to Ana about the budget");
@@ -353,6 +359,15 @@ describe("the first-visit briefing with a connected Google account (6, 99, 102)"
     expect(result.reply.split("\n")[0]).toContain("answer was cut off");
     expect(result.reply).not.toContain("did not match");
   });
+
+  it("a failed Gmail fetch is said, not 'inbox is clear', and the model is told the inbox is unknown (99)", async () => {
+    mocks.listUnreadMessages.mockRejectedValue(new Error("Gmail could not be reached (HTTP 503)."));
+    mocks.callAI.mockResolvedValue(answer({ reply: "Have a good day.", priorities: [{ rank: 1, title: "Team sync", reason: "Today" }] }));
+    const result = await brief();
+    expect(result.reply).toContain("**📬 Inbox**\nYour inbox could not be read right now.");
+    expect(result.reply).not.toMatch(/inbox is clear|\(0 unread\)/);
+    expect(lastSystemPrompt()).toContain("- Unread emails in inbox: unknown, the inbox could not be read right now");
+  });
 });
 
 describe("the AI allowance is recorded once, right before the model is asked (11)", () => {
@@ -365,6 +380,26 @@ describe("the AI allowance is recorded once, right before the model is asked (11
     mocks.enforceAiAllowance.mockClear();
     await runChatTurn(context, { sessionId: SESSION, message: "Plan my afternoon", timeZone: ZRH });
     expect(mocks.enforceAiAllowance).not.toHaveBeenCalled();
+  });
+
+  it("a hosted site without an AI provider records no use: no AI call is made (review of the fix)", async () => {
+    mocks.hosted.value = true;
+    vi.stubEnv("LLM_BASE_URL", "");
+    vi.stubEnv("HUGGINGFACE_API_KEY", "");
+    try {
+      mocks.callAI.mockRejectedValue(new AiNotConfiguredError());
+      await expect(runChatTurn(context, { sessionId: SESSION, message: "Hi there", timeZone: ZRH }, { recordAiUse: true })).rejects.toThrow(
+        "not set up on this site",
+      );
+      expect(mocks.enforceAiAllowance).not.toHaveBeenCalled();
+      // With a provider the use is recorded as before.
+      vi.stubEnv("LLM_BASE_URL", "https://ai.example.test/v1");
+      mocks.callAI.mockResolvedValue(answer({ reply: "Hello!" }));
+      await runChatTurn(context, { sessionId: SESSION, message: "Hi there", timeZone: ZRH }, { recordAiUse: true });
+      expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -399,6 +434,21 @@ describe("errors shown to the user and stored in the chat (6, 33, 50)", () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toBe("Could not save your message. Please try again in a moment.");
     expect(Object.keys(failure as object)).not.toContain("details");
+  });
+
+  it("a full demo account is told so, not to try again; a failed CHECK constraint stays a plain sentence (review of the fix)", async () => {
+    const full = "This demo account has reached its limit of 1000 stored chat messages. Clear the chat history to continue.";
+    db.failures.push({ table: "chat_messages", op: "insert", error: { code: "23514", message: full, details: "Row limit 1000 per user on public.chat_messages.", hint: null } });
+    await expect(runChatTurn(context, { sessionId: SESSION, message: "Hi", timeZone: ZRH })).rejects.toThrow(full);
+    db.failures.push({ table: "chat_messages", op: "insert", error: { code: "23514", message: 'new row for relation "chat_messages" violates check constraint "chat_messages_content_length"', details: "Failing row contains ...", hint: null } });
+    await expect(runChatTurn(context, { sessionId: SESSION, message: "Hi", timeZone: ZRH })).rejects.toThrow(
+      "Could not save your message. Please try again in a moment.",
+    );
+    // The same for a new chat session.
+    db.reset();
+    const sessions = "This demo account has reached its limit of 100 chat sessions. Clear the chat history to continue.";
+    db.failures.push({ table: "chat_sessions", op: "insert", error: { code: "23514", message: sessions, details: "", hint: null } });
+    await expect(ensureChatSessionFor(context.supabase, USER)).rejects.toThrow(sessions);
   });
 
   it("an unreadable answer is a failed turn with a plain sentence, not 'I'm not sure how to handle that.'", async () => {
@@ -514,6 +564,44 @@ describe("a question about one day is answered from that day's calendar (10, 111
     const result = await runChatTurn(context, { sessionId: SESSION, message: "What's on Thursday?", timeZone: ZRH });
     expect(result.reply).toBe("Your calendar for Thursday, Nov 26:\n- 2:00 PM – 3:30 PM Dentist appointment");
   });
+
+  it("a correct answer on a 12-hour clock stands, with a recurring title on another day (review of the fix)", async () => {
+    // A second lecture on Thursday: the title is Wednesday's too.
+    const lecture = EVENTS.find((event) => event.title.startsWith("Lecture"))!;
+    db.rows("calendar_events").push({
+      ...lecture,
+      id: "00000000-0000-4000-8000-000000000099",
+      starts_at: "2026-11-26T07:15:00.000Z",
+      ends_at: "2026-11-26T09:00:00.000Z",
+    });
+    const reply = `On Thursday you have:\n- ${lecture.title}, 8:15 AM – 10:00 AM\n- Dentist appointment, 2:00 PM – 3:30 PM\n\nLeave some time to get to the dentist.`;
+    mocks.callAI.mockResolvedValue(answer({ reply }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "What's on Thursday?", timeZone: ZRH });
+    expect(result.reply).toBe(reply);
+  });
+
+  it("a connected Google calendar cut off at 50 events is not used to say a later day is empty (review of the fix)", async () => {
+    mocks.isGoogleConnected.mockResolvedValue(true);
+    // 50 events, the last one on Wednesday: Thursday and later were not read.
+    const many = Array.from({ length: 50 }, (_, i) => ({
+      id: `g-${i}`,
+      // A weekly review today; Friday's one is beyond the 50 listed events.
+      title: i === 0 ? "Weekly review" : `Block ${i}`,
+      starts_at: new Date(Date.parse("2026-11-24T10:00:00Z") + i * 30 * 60_000).toISOString(),
+      ends_at: new Date(Date.parse("2026-11-24T10:20:00Z") + i * 30 * 60_000).toISOString(),
+      notes: null,
+      busy: true,
+    }));
+    mocks.listCalendarEvents.mockResolvedValue(many);
+    mocks.callAI.mockResolvedValue(answer({ reply: "On Friday you have the weekly review at 4:00 PM." }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "What's on my calendar on Friday?", timeZone: ZRH });
+    expect(result.reply).not.toContain("Nothing is scheduled");
+    expect(result.reply).toBe("On Friday you have the weekly review at 4:00 PM.");
+    // With fewer than 50 events the list is complete, and the same answer is checked as before.
+    mocks.listCalendarEvents.mockResolvedValue(many.slice(0, 10));
+    const complete = await runChatTurn(context, { sessionId: SESSION, message: "What's on my calendar on Friday?", timeZone: ZRH });
+    expect(complete.reply).toBe("Nothing is scheduled on Friday, Nov 27.");
+  });
 });
 
 describe("reply drafts only when asked for (88, 111)", () => {
@@ -531,12 +619,79 @@ describe("reply drafts only when asked for (88, 111)", () => {
   });
 
   it("a requested reply is a draft card signed with the user's first name; the chat does not repeat it", async () => {
+    db.tables.set("profiles", [{ id: USER, name: "Ana Keller", role: "Student", goals: "" }]);
     const body = "Hi Sam — yes, let's do lunch this Saturday around 1pm. Looking forward to it!";
     mocks.callAI.mockResolvedValue(answer({ reply: body, email_reply: { message_id: "e3", body } }));
     const result = await runChatTurn(context, { sessionId: SESSION, message: "Reply to Sam's email: yes to lunch", timeZone: ZRH });
     expect(result.panel.emailDraft?.messageId).toBe("e3");
-    expect(result.panel.emailDraft?.body).toBe(`${body}\n\nBest,\nDemo`);
+    expect(result.panel.emailDraft?.body).toBe(`${body}\n\nBest,\nAna`);
     expect(result.reply).toBe("The reply to Sam (friend) is under **Insights** as a draft suggestion. Edit it and click **Save as draft**; nothing is sent.");
+  });
+
+  it("the demo's 'Demo User' is not a name to sign with (review of the fix)", async () => {
+    const body = "Hi Sam — yes, let's do lunch this Saturday around 1pm.";
+    mocks.callAI.mockResolvedValue(answer({ reply: "Here is a draft.", email_reply: { message_id: "e3", body } }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Reply to Sam's email: yes to lunch", timeZone: ZRH });
+    expect(result.panel.emailDraft?.body).toBe(body);
+    expect(withSignOff(body, "Demo")).toBe(body);
+    expect(withSignOff(body, "User")).toBe(body);
+    expect(withSignOff(body, "Ana Keller")).toBe(`${body}\n\nBest,\nAna`);
+  });
+
+  it.each(["When is the final draft due?", "Did Sam reply?", "What is the response time of the planner?", "Has Sam replied to my email yet?", "Can you write a summary of my emails?"])(
+    "not a request for a reply: %s",
+    async (message) => {
+      expect(asksForEmailReply(message)).toBe(false);
+      mocks.callAI.mockResolvedValue(answer({ reply: "Here is what I found.", email_reply: { message_id: "e1", body: "Dear Prof. Marlow, ..." } }));
+      const result = await runChatTurn(context, { sessionId: SESSION, message, timeZone: ZRH });
+      expect(result.panel.emailDraft).toBeUndefined();
+      expect(result.reply).not.toContain("not in your inbox");
+    },
+  );
+
+  it.each([
+    "Draft a reply to the recruiter",
+    "Reply to Sam's email: yes to lunch",
+    "Can you please respond to Prof. Marlow?",
+    "Write Sam an email saying yes",
+    "Help me answer the email from Alicia",
+    "How do I reply to Sam?",
+    "Compose a short response to Acme",
+    "Write back to Ana",
+  ])("a request for a reply: %s", (message) => {
+    expect(asksForEmailReply(message)).toBe(true);
+  });
+
+  it("a long From header is cut to the recipient limit of the database (80)", () => {
+    const from = `${"A very long display name ".repeat(20)}<someone@example.com>`;
+    const draft = emailReplyFromModel({
+      raw: { message_id: "x1", body: "Thanks!" },
+      emails: [{ id: "x1", from, subject: "Hello" }],
+      message: "Reply to this email",
+    }).emailDraft;
+    expect(from.length).toBeGreaterThan(320);
+    expect(draft?.to).toBe("someone@example.com");
+    expect(draftRecipient("x".repeat(400))).toHaveLength(320);
+    expect(draftRecipient("Sam (friend)")).toBe("Sam (friend)");
+  });
+});
+
+describe("an inbox summary asked for by typing (83, review of the fix)", () => {
+  it("keeps every email line and its heading, also lines that report a finished action", async () => {
+    seed([
+      { role: "user", content: "Hi" },
+      { role: "assistant", content: "Hello! How can I help?" },
+    ]);
+    const summary = [
+      "**📬 Inbox (4 unread)**",
+      "- **Alicia (manager)** — *Team sync moved to 7 PM today* — The team sync has been moved to 7 PM today.",
+      "- **Stripe** — *Your monthly summary* — Your invoice has been sent.",
+      "- **Sam (friend)** — *Lunch Saturday?* — Free for lunch?",
+      "- **Prof. Marlow** — *Research paper* — Please send the final draft.",
+    ].join("\n");
+    mocks.callAI.mockResolvedValue(answer({ reply: summary }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Please check all my emails and messages.", timeZone: ZRH });
+    expect(result.reply).toBe(summary);
   });
 });
 

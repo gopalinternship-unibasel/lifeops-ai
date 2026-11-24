@@ -18,7 +18,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { dbError } from "@/server/public-error.server";
+import { dbError, publicError } from "@/server/public-error.server";
 import type { CardState, CardStatus, PanelPayload } from "@/types/panel";
 import { isRecord } from "@/lib/errors";
 import { replyStateOf, type ReplyState } from "@/lib/reply-state";
@@ -29,6 +29,59 @@ const UNIQUE_VIOLATION = "23505";
 
 /** Writes to chat_card_actions: the service role, always scoped to one user's row. */
 const store = supabaseAdmin;
+
+/**
+ * The sentence of the database's row-limit triggers (SQLSTATE 23514, migration 20261124110100):
+ * "This demo account has reached its limit of 1000 stored chat messages. Clear the chat history
+ * to continue." A CHECK constraint fails with 23514 too, with a message for developers; only the
+ * triggers' own sentences start like this.
+ */
+const ROW_LIMIT_SENTENCE = /^This demo account has reached its (?:limit of \d+ [^\n]{1,120}|storage limit for this kind of item)\./;
+
+/**
+ * dbError, except that a full demo account is told so. dbError says "Please try again in a
+ * moment", which can never succeed at the limit (review of 24 Nov 2026): the database's own
+ * sentence, written for the visitor, is passed on instead. Everything else stays dbError's
+ * plain sentence, with the detail logged.
+ */
+export function storageError(action: string, cause: unknown): Error {
+  if (isRecord(cause) && cause.code === "23514" && typeof cause.message === "string" && ROW_LIMIT_SENTENCE.test(cause.message)) {
+    return publicError(cause.message.slice(0, 300), cause, `database: ${action} (row limit)`);
+  }
+  return dbError(action, cause);
+}
+
+/**
+ * The database's limit on card records per user (migration 20261124110100), with its sentence.
+ * The database counts only writes made with the user's token; these writes use the service role.
+ */
+export const CARD_ACTIONS_LIMIT = 1000;
+export const CARD_ACTIONS_FULL = "This demo account has reached its limit of 1000 handled chat suggestions.";
+
+/**
+ * Refuse a new card record when the user already has CARD_ACTIONS_LIMIT of them. The row-limit
+ * trigger does not count the server's service-role writes, and the dismiss function takes any
+ * well-formed card id, so without this check one visitor could add records without bound (review
+ * of 24 Nov 2026). A card that already has a record needs no room: a repeated claim or dismissal
+ * goes on as before. Two requests at the same moment can each pass the count, so the limit can be
+ * passed by as many records as requests run at once, never without bound.
+ */
+async function ensureRoomForCard(userId: string, cardId: string): Promise<void> {
+  const { count, error } = await store
+    .from("chat_card_actions")
+    .select("card_id", { count: "exact", head: true })
+    .eq("user_id", userId);
+  if (error) throw dbError("save what you did with this card", error);
+  if ((count ?? 0) < CARD_ACTIONS_LIMIT) return;
+  const { data: existing, error: readError } = await store
+    .from("chat_card_actions")
+    .select("card_id")
+    .eq("user_id", userId)
+    .eq("card_id", cardId)
+    .maybeSingle();
+  if (readError) throw dbError("save what you did with this card", readError);
+  if (!existing) throw new Error(CARD_ACTIONS_FULL);
+}
 
 export type ClaimResult =
   | { claimed: true }
@@ -44,11 +97,12 @@ export async function claimCard(
   cardId: string,
   status: CardStatus,
 ): Promise<ClaimResult> {
+  await ensureRoomForCard(userId, cardId);
   const { error } = await store
     .from("chat_card_actions")
     .insert({ user_id: userId, card_id: cardId, status });
   if (!error) return { claimed: true };
-  if (error.code !== UNIQUE_VIOLATION) throw dbError("save what you did with this card", error);
+  if (error.code !== UNIQUE_VIOLATION) throw storageError("save what you did with this card", error);
   const { data, error: readError } = await supabase
     .from("chat_card_actions")
     .select("status, result_id")
@@ -91,13 +145,14 @@ export async function releaseCard(_supabase: UserClient, userId: string, cardId:
 
 /** The user dismissed a proposal card: remembered so a reload does not show it again. */
 export async function dismissCard(userId: string, cardId: string): Promise<void> {
+  await ensureRoomForCard(userId, cardId);
   const { error } = await store
     .from("chat_card_actions")
     .upsert(
       { user_id: userId, card_id: cardId, status: "dismissed" },
       { onConflict: "user_id,card_id", ignoreDuplicates: true },
     );
-  if (error) throw dbError("hide this card", error);
+  if (error) throw storageError("hide this card", error);
 }
 
 /** The card ids a stored panel carries (older drafts without an id get `draft-<message id>`). */

@@ -71,11 +71,16 @@ export const fetchSessionHistory = createServerFn({ method: "POST" })
 
 /**
  * A card id as the chat turn makes them: "pending-", "change-" or "draft-" and a UUID (an older
- * draft has "draft-" and its message's UUID).
+ * draft has "draft-" and its message's UUID). Panels stored before 9 Nov 2026 carry the first
+ * version's ids, "pending-<milliseconds>-<n>" and "change-<milliseconds>-<n>", and their cards
+ * can still be dismissed.
  */
 export const CardId = z
   .string()
-  .regex(/^(?:pending|change|draft)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "Unknown card");
+  .regex(
+    /^(?:(?:pending|change|draft)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:pending|change)-\d{10,16}-\d{1,4})$/i,
+    "Unknown card",
+  );
 
 /** The user dismissed a proposal card: remember it so a reload does not show it again. */
 export const dismissChatCard = createServerFn({ method: "POST" })

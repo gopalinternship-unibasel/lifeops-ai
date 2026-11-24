@@ -19,6 +19,7 @@ import { CapReachedError, checkAiAllowance, enforceAiAllowance } from "@/server/
 import { capToHostLimit } from "@/server/host-limit.server";
 import { dbError, describeCause, publicError } from "@/server/public-error.server";
 import { isHostedDeployment } from "@/server/deployment.server";
+import { storageError } from "@/server/chat-cards.server";
 import {
   buildRuleBasedBriefing,
   checkPriorityReasons,
@@ -124,7 +125,8 @@ export async function ensureChatSessionFor(
     .insert({ user_id: userId })
     .select("id")
     .single();
-  if (error) throw dbError("start your chat", error);
+  // A full demo account is told so (the database's own sentence), not to try again.
+  if (error) throw storageError("start your chat", error);
   const { data: first, error: firstError } = await supabase
     .from("chat_sessions")
     .select("id")
@@ -554,7 +556,9 @@ export async function runChatTurn(
     role: "user",
     content: message,
   });
-  if (insertMessageError) throw dbError("save your message", insertMessageError);
+  // At the demo's limit of stored messages the database's own sentence says what to do (clear
+  // the chat history); "Please try again in a moment" could never succeed.
+  if (insertMessageError) throw storageError("save your message", insertMessageError);
 
   // From here on the turn always ends with a stored assistant message, so a page that was
   // reloaded meanwhile sees either the answer or the error, never a request that seems to run on.
@@ -635,7 +639,11 @@ async function answerChatTurn(
 
   let realEmails: GmailMsg[] = [];
   let unreadCount = 0;
+  // The unread emails could not be fetched: the inbox is unknown, not empty (see below).
+  let inboxUnavailable = false;
   let calendarContextAvailable = true;
+  // A Google calendar list that stopped at its cap: from this date on the days may be incomplete.
+  let calendarCompleteBefore: string | undefined;
   let todayEvents: {
     id?: string;
     title: string;
@@ -655,8 +663,14 @@ async function answerChatTurn(
   if (googleConnected) {
     try {
       // Fetch unread (up to 50) AND recent (15) and merge — guarantees all unread are present.
+      // A failed unread fetch is remembered: the briefing said "No unread emails — inbox is
+      // clear." as a fact after a Gmail error (review of 24 Nov 2026).
       const [unread, recent] = await Promise.all([
-        listUnreadMessages(userId, 50).catch(() => [] as GmailMsg[]),
+        listUnreadMessages(userId, 50).catch((error: unknown) => {
+          inboxUnavailable = true;
+          console.error("Gmail: the unread emails could not be read", describeCause(error));
+          return [] as GmailMsg[];
+        }),
         listRecentMessages(userId, 15).catch(() => [] as GmailMsg[]),
       ]);
       const seen = new Set<string>();
@@ -671,6 +685,7 @@ async function answerChatTurn(
       // Unread first
       realEmails.sort((a, b) => Number(b.unread) - Number(a.unread));
     } catch (e) {
+      inboxUnavailable = true;
       console.error("Gmail fetch failed", e);
     }
     try {
@@ -690,6 +705,13 @@ async function answerChatTurn(
       }));
       const todayEndMs = toMs(endOfToday(timeZone));
       todayEvents = upcomingEvents.filter((e) => toMs(e.starts_at) <= todayEndMs);
+      // The Google list stops at GOOGLE_EVENTS_CAP events. The days from the last listed event's
+      // day on may then miss events, so a day question about them is not answered from the list
+      // ("Nothing is scheduled on ..." would be stated about a day that was not read in full).
+      if (evs.length >= GOOGLE_EVENTS_CAP) {
+        const lastStartMs = Math.max(...evs.map((e) => toMs(e.starts_at)).filter(Number.isFinite));
+        if (Number.isFinite(lastStartMs)) calendarCompleteBefore = localDateTime(lastStartMs, timeZone).date;
+      }
     } catch (e) {
       calendarContextAvailable = false;
       console.error("Calendar fetch failed", e);
@@ -844,7 +866,7 @@ CURRENT CONTEXT (all times local, 24-hour, time zone ${timeZone}):
 - Calendar dates (a day name means the next such date): ${upcomingDates(timeZone)}
 - Google account connected: ${googleConnected ? "YES (real Gmail + Calendar)" : "NO (using demo data)"}
 - Calendar context available: ${calendarContextAvailable ? "YES" : "NO — do not propose, edit, or delete calendar events"}
-- Unread emails in inbox: ${googleConnected ? unreadCount : demoUnreadCount}
+- Unread emails in inbox: ${inboxUnavailable ? "unknown, the inbox could not be read right now (say so; never say that it is clear)" : googleConnected ? unreadCount : demoUnreadCount}
 
 - Calendar, today and the next 7 days (id, start-end, title):
 ${calendarForPrompt}${laterForPrompt}
@@ -881,7 +903,7 @@ ${userContext.tasks}`;
     : mockEmails;
   const unreadTotal = googleConnected ? unreadCount : demoUnreadCount;
   const briefingByRules = (header?: string) =>
-    buildRuleBasedBriefing({ emails: briefingEmails, unreadCount: unreadTotal, todayEvents, timeZone, reason: "", header });
+    buildRuleBasedBriefing({ emails: briefingEmails, unreadCount: unreadTotal, todayEvents, timeZone, reason: "", header, inboxUnavailable });
 
   if (firstBriefing && !googleConnected) {
     // The demo's automatic first-visit briefing is put together by rules from the demo inbox and
@@ -901,7 +923,11 @@ ${userContext.tasks}`;
   } else {
     try {
       // One use of the demo's AI allowance, checked and recorded right before the model is asked.
-      if (options.recordAiUse) await enforceAiAllowance(supabaseAdmin, userId, "chat");
+      // A site without an AI provider asks no model (callAI refuses with AiNotConfiguredError),
+      // so nothing is recorded: the shared allowance counts only requests that reach the AI.
+      if (options.recordAiUse && resolveLLMConfig("chat").configured) {
+        await enforceAiAllowance(supabaseAdmin, userId, "chat");
+      }
       const aiResp = await callAI({
         role: "chat",
         messages: messagesPayload,
@@ -949,6 +975,7 @@ ${userContext.tasks}`;
         reason: "",
         header: AI_BRIEFING_HEADER,
         prioritiesNote: false,
+        inboxUnavailable,
       });
       const closing = briefingClosingLine(String(parsed.reply ?? ""), {
         refs: replyRefs,
@@ -1026,6 +1053,7 @@ ${userContext.tasks}`;
           timeZone,
           events: knownEvents,
           horizonDays: CALENDAR_DAYS,
+          completeBefore: calendarCompleteBefore,
         })
       : null;
   if (dayAnswer?.rebuilt) console.info(`Chat: the answer about ${dayAnswer.date} did not match the calendar; listed from the calendar`);
@@ -1330,20 +1358,52 @@ export function buildEmailsForPrompt(
 
 /** The database limits for a reply draft (migration 20261124110100). */
 const DRAFT_BODY_MAX = 12_000;
+const DRAFT_TO_MAX = 320;
+
+/**
+ * What may stand before a request verb: the start of the message or of a sentence, "please",
+ * "can you", "help me", "I'd like you to", "and", "how do I" ...
+ */
+const REQUEST_LEAD =
+  "(?:^|[.!?;:,]\\s*|\\b(?:please|pls|kindly|can you|could you|would you|will you|help me|(?:i'd|i would|i)\\s+(?:like|want|need)\\s+(?:you\\s+)?to|i have to|let's|lets|and|then|also|just|now|should i|do i|can i)\\s+)(?:please\\s+)?";
+/** Up to four words between a verb and its object, not across "of", "about", "for" ... */
+const OBJECT_WORDS = "(?:\\s+(?!(?:of|about|on|in|from|for|with|to)\\b)[\\w'’-]+){0,4}?";
+const REPLY_REQUESTS: RegExp[] = [
+  // "Reply to Sam's email", "respond to the recruiter", "write back to Ana", "reply yes".
+  new RegExp(`${REQUEST_LEAD}(?:reply|respond|write\\s+back|get\\s+back)\\b`),
+  // "Draft a reply to the recruiter", "write Sam an email", "compose a short response".
+  new RegExp(`${REQUEST_LEAD}(?:draft|write|compose|prepare)${OBJECT_WORDS}\\s+(?:repl(?:y|ies)|responses?|answers?|e-?mails?|mails?|messages?|notes?)\\b`),
+  // "Answer Sam's email", "answer the email from Ana".
+  new RegExp(`${REQUEST_LEAD}answer${OBJECT_WORDS}\\s+(?:e-?mails?|mails?|messages?|notes?)\\b`),
+];
 
 /**
  * Does the message ask for a reply to an email ("Draft a reply to the recruiter", "Reply to
- * Sam's email", "Answer Sam", "Send my reply to Sam now")? A model in tools_required mode filled
- * the optional email_reply on a plain calendar question, and the answer ended with "The AI model
- * referred to an email that is not in your inbox" (review of 24 Nov 2026).
+ * Sam's email", "Answer Sam's email", "Send my reply to Sam now")? A model in tools_required
+ * mode filled the optional email_reply on a plain calendar question, and the answer ended with
+ * "The AI model referred to an email that is not in your inbox" (review of 24 Nov 2026). The
+ * request must be one, with the verb as a request ("reply to ...", "can you draft a reply"):
+ * any "reply", "draft" or "response" was enough at first, so "When is the final draft due?",
+ * "Did Sam reply?" and "What is the response time of the planner?" counted too.
  */
 export function asksForEmailReply(message: string, previousAssistant?: string | null): boolean {
   const text = normalizeRequest(message);
-  if (/\b(?:repl(?:y|ies|ied|ying)|respond(?:ing)?|response|draft\w*|compose)\b/.test(text)) return true;
-  if (/\b(?:write|answer)\b/.test(text) && /\b(?:e-?mails?|mail|message|back)\b/.test(text)) return true;
+  if (REPLY_REQUESTS.some((re) => re.test(text))) return true;
   if (asksToSend(message)) return true;
   // A short answer to MONDAY's question about which email to answer.
   return Boolean(previousAssistant && /\bwhich email\b|\breply draft\b/i.test(previousAssistant) && text.split(" ").length <= 12);
+}
+
+/**
+ * The draft's recipient: the email's From header, or only its address when the header is longer
+ * than the database allows for a recipient (a long display name could exceed it, and saving the
+ * draft would then fail).
+ */
+export function draftRecipient(from: string): string {
+  const header = (from ?? "").trim();
+  if (header.length <= DRAFT_TO_MAX) return header;
+  const address = /<([^<>\s]+@[^<>\s]+)>/.exec(header)?.[1];
+  return address && address.length <= DRAFT_TO_MAX ? address : header.slice(0, DRAFT_TO_MAX);
 }
 
 /**
@@ -1383,7 +1443,7 @@ export function emailReplyFromModel(opts: {
     emailDraft: {
       id: `draft-${crypto.randomUUID()}`,
       messageId: orig.id,
-      to: orig.from,
+      to: draftRecipient(orig.from),
       subject: orig.subject.slice(0, 300),
       body: withSignOff(body, opts.userName).slice(0, DRAFT_BODY_MAX),
       saved: false,
@@ -1393,11 +1453,20 @@ export function emailReplyFromModel(opts: {
 }
 
 /**
+ * Profile names that are not a person's: the demo's "Demo User" (login.tsx) and the prompt's
+ * "User" for a profile without a name. A draft signed "Best, Demo" spoke for nobody.
+ */
+const PLACEHOLDER_NAMES = /^(?:demo(?:\s+user)?|user|guest|anonymous(?:\s+user)?)$/i;
+
+/**
  * A draft body that ends with the user's first name. The live draft had no sign-off at all
- * (review of 24 Nov 2026). A body whose last lines already name the user is left as it is.
+ * (review of 24 Nov 2026). A body whose last lines already name the user is left as it is, and
+ * so is every body when the profile has no real name (no name is made up).
  */
 export function withSignOff(body: string, userName?: string | null): string {
-  const first = (userName ?? "").trim().split(/\s+/)[0]?.replace(/[^\p{L}\p{N}'’-]/gu, "") ?? "";
+  const name = (userName ?? "").trim().replace(/\s+/g, " ");
+  if (!name || PLACEHOLDER_NAMES.test(name)) return body;
+  const first = name.split(" ")[0]?.replace(/[^\p{L}\p{N}'’-]/gu, "") ?? "";
   if (!first || /^user$/i.test(first)) return body;
   const lastLines = body.split("\n").slice(-3).join(" ").toLowerCase();
   if (lastLines.includes(first.toLowerCase())) return body;
@@ -1446,7 +1515,8 @@ export function dayQuestionDate(message: string, today: string): string | null {
  * The answer to a question about one day, checked against that day's events. The model's own
  * answer stands when it names every event of the day, no event of another day, and the right
  * times on each event's line; otherwise the answer is the day's list from the calendar. Null
- * when the message is not such a question, or the day is outside the calendar the chat knows.
+ * when the message is not such a question, or the day is outside the calendar the chat knows
+ * in full (`completeBefore`: the first date of a Google list that stopped at its cap).
  */
 export function checkDayAnswer(opts: {
   message: string;
@@ -1455,9 +1525,11 @@ export function checkDayAnswer(opts: {
   timeZone: string;
   events: KnownEvent[];
   horizonDays: number;
+  completeBefore?: string;
 }): { date: string; reply: string; rebuilt: boolean } | null {
   const date = dayQuestionDate(opts.message, opts.today);
   if (!date || date < opts.today || date > addDaysISO(opts.today, opts.horizonDays)) return null;
+  if (opts.completeBefore && date >= opts.completeBefore) return null;
   const local = (iso: string) => localDateTime(iso, opts.timeZone);
   const dayEvents = opts.events
     .filter((event) => local(event.starts_at).date === date)
@@ -1471,13 +1543,19 @@ export function checkDayAnswer(opts: {
   const reply = (opts.modelReply ?? "").trim();
   const text = plainText(reply);
   const dayKeys = new Set(dayEvents.map((event) => titleKey(event.title)));
+  const dayTitles = dayEvents.map((event) => plainText(event.title));
   const coversDay = dayEvents.every((event) => text.includes(titleKey(event.title)));
   const namesOther = otherEvents.some((event) => {
-    if (text.includes(plainText(event.title))) return true;
+    const title = plainText(event.title);
+    // A title the day has too (a "Lecture" on two days) names the day's own event: it does not
+    // put another day's event on this day.
+    if (dayTitles.some((dayTitle) => dayTitle.includes(title))) return false;
+    if (text.includes(title)) return true;
     const key = titleKey(event.title);
     return !dayKeys.has(key) && text.includes(key);
   });
-  // On a line about one of the day's events, every clock time is that event's start or end.
+  // On a line about one of the day's events, every clock time is that event's start or end
+  // ("2:00 PM" is read once, as 14:00; see mentionedClockTimes).
   const wrongTime = reply.split("\n").some((line) => {
     const plainLine = plainText(line);
     const about = dayEvents.filter((event) => plainLine.includes(titleKey(event.title)));
@@ -1600,6 +1678,8 @@ export function endOfToday(timeZone = "UTC") {
  * picked the reminder for it instead), and a move beyond a week was not checked for conflicts.
  */
 const CALENDAR_DAYS = 21;
+/** The most events one Google Calendar list returns (listCalendarEvents asks for maxResults=50, one page). */
+const GOOGLE_EVENTS_CAP = 50;
 
 function endOfDaysFromNow(days: number, timeZone = "UTC") {
   const date = addDaysISO(todayInTimeZone(timeZone), days);

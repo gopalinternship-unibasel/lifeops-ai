@@ -1,6 +1,6 @@
 /**
  * The reply guard (src/server/ai/reply-guard.server.ts), findings of the review of
- * 24 Nov 2026: 17, 18, 79, 83, 84, 86, 91, 102, 106, 111.
+ * 24 Nov 2026: 17, 18, 79, 83, 84, 86, 91, 102, 106, 111, and the review of their fixes.
  */
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -41,6 +41,15 @@ describe("an id next to its own title is not replaced by the title again (17)", 
 
   it("an id in running text still becomes the title", () => {
     expect(resolveRefs("You have E1 at 19:00.", refs).text).toBe("You have Team sync — demo walkthrough at 19:00.");
+  });
+
+  it("an id in running text is not dropped when the line also names the event: no sentence cut off (review of the fix)", () => {
+    const out = resolveRefs("Reminder: Team sync — demo walkthrough is E1.", refs).text;
+    expect(out).toBe("Reminder: Team sync — demo walkthrough is Team sync — demo walkthrough.");
+    expect(out).not.toMatch(/\bis\s*\.?$/);
+    // A row prefix in the middle of a line ("Today: E1 Team sync ...") is still dropped.
+    expect(resolveRefs("Today: E1 Team sync — demo walkthrough at 7 PM.", refs).text).toBe("Today: Team sync — demo walkthrough at 7 PM.");
+    expect(resolveRefs("- E1: Team sync — demo walkthrough", refs).text).toBe("- Team sync — demo walkthrough");
   });
 });
 
@@ -94,6 +103,37 @@ describe("answers to questions keep what an email says (83, 102)", () => {
 
   it("after a request to do something the same claim is still not shown", () => {
     expect(composeReply({ ...base, modelReply: "Alicia's email says the team sync has been moved to 7 PM today.", actionRequest: true, askedForAction: true })).toBe(NOTHING_PREPARED);
+  });
+
+  it("an inbox summary in the prompt's own bullet format keeps its lines and its heading (review of the fix)", () => {
+    // The reply to "Please check all my emails and messages." (a question: nothing asked to be done).
+    const summary = [
+      "**📬 Inbox (4 unread)**",
+      "- **Alicia** — *Team sync moved to 7 PM today* — The team sync has been moved to 7 PM today.",
+      "- **Stripe** — *Invoice* — Your invoice has been sent.",
+      "- **Sam (friend)**: *Lunch Saturday?* — I have booked a table for 1 pm.",
+      "- **Prof. Marlow** — *Research paper* — Please send the final draft.",
+      "",
+      "**📅 Today**",
+      "- 7:00 PM – 8:00 PM Team sync — demo walkthrough",
+    ].join("\n");
+    expect(answer(summary)).toBe(summary);
+  });
+
+  it.each([
+    "The team sync has been moved to 7 PM today, according to Alicia's email.",
+    "The team sync has been moved to 7 PM today, Alicia says.",
+    "Alicia's message: the team sync has been moved to 7 PM today.",
+    "**Alicia's email:** the team sync has been moved to 7 PM today.",
+    "Email from Stripe: your invoice email was sent.",
+  ])("kept, the attribution after the claim or with a colon: %s", (sentence) => {
+    expect(answer(sentence)).toBe(sentence);
+  });
+
+  it("the model's own claims stay removed in a question turn", () => {
+    expect(answer("I've moved the team sync to 7 PM, as you said.")).toBe(NOTHING_ANSWERED);
+    expect(answer("Done — the sync is at 7 PM now.")).toBe(NOTHING_ANSWERED);
+    expect(answer("- **Alicia** — *Sync* — Reminder set for 7 PM.")).toBe(NOTHING_ANSWERED);
   });
 });
 
@@ -178,11 +218,36 @@ describe("the card's closing sentence is its own paragraph (106)", () => {
 describe("times as the cards show them, and drafts not repeated (111)", () => {
   it("24-hour times become 12-hour ones; am/pm, ISO and quoted times stay", () => {
     expect(toTwelveHourClock("Your calendar for Friday:\n\n• Dentist appointment: 14:00–15:30")).toBe("Your calendar for Friday:\n\n• Dentist appointment: 2:00 PM – 3:30 PM");
+    // Only numbers that stand as a time ("at 12:00", "at 08:15"); "so 12:30" and "is 00:00" do not say so.
     expect(toTwelveHourClock("The lecture ends at 12:00, so 12:30 works. Breakfast at 08:15, midnight is 00:00.")).toBe(
-      "The lecture ends at 12:00 PM, so 12:30 PM works. Breakfast at 8:15 AM, midnight is 12:00 AM.",
+      "The lecture ends at 12:00 PM, so 12:30 works. Breakfast at 8:15 AM, midnight is 00:00.",
     );
-    expect(toTwelveHourClock("From 11:00 to 13:00 and 11:00–13:00.")).toBe("From 11:00 to 1:00 PM and 11:00 AM – 1:00 PM.");
+    // One clock per sentence: the ambiguous "11:00" next to "13:00" is converted as well.
+    expect(toTwelveHourClock("From 11:00 to 13:00 and 11:00–13:00.")).toBe("From 11:00 AM to 1:00 PM and 11:00 AM – 1:00 PM.");
     expect(toTwelveHourClock("At 9:30 or 2:00 PM; 2026-11-24T14:00:00; Sam wrote \"see you at 14:00\".")).toBe("At 9:30 or 2:00 PM; 2026-11-24T14:00:00; Sam wrote \"see you at 14:00\".");
+  });
+
+  it("a price, a ratio, a score or a name next to a number stays; a mixed sentence is converted whole (review of the fix)", () => {
+    for (const text of [
+      "Price 12:50 CHF.",
+      "The screen has a 16:10 ratio.",
+      "John 13:45",
+      "The match ended 12:10.",
+      "The ratio is 16:10 at most.",
+    ]) {
+      expect(toTwelveHourClock(text), text).toBe(text);
+    }
+    expect(toTwelveHourClock("From 9:00 to 17:00 you are free.")).toBe("From 9:00 AM to 5:00 PM you are free.");
+    expect(toTwelveHourClock("You are free between 9:00 and 17:00.")).toBe("You are free between 9:00 AM and 5:00 PM.");
+    expect(toTwelveHourClock("Lunch at 12:30 costs 12:50 CHF.")).toBe("Lunch at 12:30 PM costs 12:50 CHF.");
+    // Next to a day word, and at the start of a list item.
+    expect(toTwelveHourClock("Friday 14:00 works, or 16:00 on Monday.")).toBe("Friday 2:00 PM works, or 4:00 PM on Monday.");
+    expect(toTwelveHourClock("Plan:\n- 14:00 review the notes\n- 9:00 gym")).toBe("Plan:\n- 2:00 PM review the notes\n- 9:00 gym");
+    // An event's time in a list item, after its title.
+    expect(toTwelveHourClock("- Dentist appointment: 14:00\n- **Team sync** (19:00)")).toBe("- Dentist appointment: 2:00 PM\n- **Team sync** (7:00 PM)");
+    expect(toTwelveHourClock("Score: 12:10 after the break.")).toBe("Score: 12:10 after the break.");
+    // Two sentences: the second one's ambiguous time is not on the first one's clock.
+    expect(toTwelveHourClock("The sync is at 19:00. The bus leaves at 7:15.")).toBe("The sync is at 7:00 PM. The bus leaves at 7:15.");
   });
 
   it("a reply that repeats the draft points to the draft card instead", () => {

@@ -261,14 +261,35 @@ export function unquoted(sentence: string): string {
  */
 const ATTRIBUTION =
   /\b(?:says?|said|wrote|writes|mentions?|mentioned|according\s+to|per\s+(?:the|his|her|their|your)\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
+/** "Alicia's email: the team sync has been moved ...", "Email from Sam: ...". */
+const ATTRIBUTION_COLON =
+  /\b[\p{L}\p{N}.-]+(?:'s|’s)\s+(?:(?:latest|last|new|recent|earlier)\s+)?(?:e-?mail|message|note|reply|invitation|invite)\s*(?:\*\*|__)?\s*:|\b(?:e-?mail|message|note)\s+from\s+[^:.!?\n]{1,60}:/iu;
+/** The user's own words ("as you said") are not an email's: they do not make a claim reported speech. */
+const USER_SPEECH = /\b(?:you|i|we)\s+(?:just\s+|already\s+)?(?:say|says|said|wrote|write|mention|mentioned)\b/gi;
+/**
+ * A line of an inbox summary in the prompt's own format: a bullet, the sender in bold, then a
+ * dash or the subject in italics ("- **Alicia** — *Team sync moved to 7 PM today* — The team
+ * sync has been moved ..."). The whole line reports the email.
+ */
+const INBOX_BULLET = /^\s*(?:[-*•]|\d+[.)])\s+(?:\*\*[^*\n]+\*\*|__[^_\n]+__)\s*(?:[—–:-]|[*_](?=\S))/u;
+
+/** Does the sentence report what an email or a person said, wherever the attribution stands? */
+function reportsSpeech(sentence: string): boolean {
+  if (INBOX_BULLET.test(sentence) || ATTRIBUTION_COLON.test(sentence)) return true;
+  return ATTRIBUTION.test(sentence.replace(USER_SPEECH, " "));
+}
 
 /**
  * `actionRequest`: the user asked for something new or for a change (see ACTION_REQUEST_CLAIMS).
  * `question`: the user asked a question and asked for nothing to be done (neither actionRequest
- * nor askedForAction). Then a sentence that reports what an email or a person said ("Alicia's
- * email says the team sync has been moved to 7 PM today") is an answer, not the model's claim:
- * the review of 24 Nov 2026 saw such sentences removed, and with them the most urgent email of
- * an inbox summary. Quoted words never count as a claim.
+ * nor askedForAction). Then a sentence that reports what an email or a person said is an
+ * answer, not the model's claim: "Alicia's email says the team sync has been moved to 7 PM
+ * today", "... has been moved to 7 PM, according to Alicia's email", "Alicia's message: ..."
+ * and a line of an inbox summary ("- **Stripe** — *Invoice* — Your invoice has been sent.").
+ * The review of 24 Nov 2026 saw such sentences removed, and with them the most urgent email of
+ * an inbox summary, or the whole summary. Quoted words never count as a claim. The claims that
+ * are never reported speech (a sentence that starts "Done", a reminder that "is set", "is all
+ * set") are removed in every turn.
  */
 export function removeActionClaims(
   text: string,
@@ -276,16 +297,13 @@ export function removeActionClaims(
   opts: { question?: boolean } = {},
 ): { text: string; removed: number } {
   const patterns = actionRequest ? [...CLAIMS, ...ACTION_REQUEST_CLAIMS] : CLAIMS;
-  // The two claim patterns that also read reported speech ("has been moved", "I sent").
-  const reportable = new Set([CLAIMS[0], CLAIMS[1]]);
+  // The claim patterns that also read reported speech: "has been moved", "I sent", "is now
+  // confirmed", "is added to your calendar", "the email was sent".
+  const reportable = new Set(CLAIMS.slice(0, 5));
   return removeSentences(text, (sentence) => {
     const own = unquoted(sentence);
-    return patterns.some((re) => {
-      const m = re.exec(own);
-      if (!m) return false;
-      if (opts.question && reportable.has(re) && ATTRIBUTION.test(own.slice(0, m.index))) return false;
-      return true;
-    });
+    const reported = Boolean(opts.question) && reportsSpeech(own);
+    return patterns.some((re) => re.test(own) && !(reported && reportable.has(re)));
   });
 }
 
@@ -343,15 +361,23 @@ export function resolveRefs(text: string, refs: ReplyRefs): { text: string; remo
   // Only the kinds of id the prompt used: Gmail message ids are long, not "e3".
   const idPattern = new RegExp(`\\b(${[refs.events ? "E\\d{1,3}" : "", refs.emails ? "e\\d{1,2}" : ""].filter(Boolean).join("|") || "(?!)"})\\b`, "g");
   const result = removeSentences(text ?? "", (sentence) => [...sentence.matchAll(idPattern)].some((m) => !known(m[1])));
-  // An id on a line that already names its event ("E1: 19:00–20:00 Team sync — demo
-  // walkthrough") is dropped with the separator after it; replacing it would show the title
-  // twice (review of 24 Nov 2026). In running text the id becomes the name ("You have E1 at 7").
+  // An id that starts a row of a line that already names its event ("E1: 19:00–20:00 Team sync
+  // — demo walkthrough", "Today: E1 Team sync ...") is dropped with the separator after it;
+  // replacing it would show the title twice (review of 24 Nov 2026). Anywhere else the id
+  // becomes the name ("You have E1 at 7", "... is E1."): dropping it there left a sentence cut
+  // off in the middle ("Reminder: Team sync — demo walkthrough is ").
   const withSeparator = new RegExp(`${idPattern.source}(\\s*[:.)\\-–—]?\\s*)`, "g");
   const lines = result.text.split("\n").map((line) =>
-    line.replace(withSeparator, (whole, id: string, separator: string) => {
+    line.replace(withSeparator, (whole, id: string, separator: string, offset: number) => {
       const name = known(id);
       if (!name) return whole;
-      return line.toLowerCase().includes(name.toLowerCase()) ? "" : `${name}${separator}`;
+      const before = line.slice(0, offset);
+      const after = line.slice(offset + whole.length);
+      const rowPrefix =
+        /^\s*(?:(?:[-*•]|\d+[.)])\s+)?(?:\*\*|__)?\s*$/.test(before) ||
+        /^\s*\d{1,2}[:.]\d{2}/.test(after) ||
+        after.toLowerCase().startsWith(name.toLowerCase());
+      return rowPrefix && line.toLowerCase().includes(name.toLowerCase()) ? "" : `${name}${separator}`;
     }),
   );
   return { text: lines.join("\n"), removed: result.removed };
@@ -553,31 +579,107 @@ function isClearly24h(hourText: string): boolean {
   return hour >= 12 || hour === 0 || (hourText.length === 2 && hourText.startsWith("0"));
 }
 
+/** "H:MM" without am/pm, not part of an ISO date-time ("2026-11-24T14:00") or a longer number. */
+const CLOCK = /(?<![\dT:.])([01]?\d|2[0-3]):([0-5]\d)(?![\d:]|\s*[ap]\.?\s?m\b)/gi;
+/** Stands in for each character of quoted text while the times are read (not a digit, a letter or punctuation). */
+const QUOTE_MASK = "░";
+const DAY_WORD =
+  "(?:today|tonight|tomorrow|mon(?:day)?|tues?(?:day)?|wed(?:nesday)?|thu(?:rs?)?(?:day)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)";
+const MONTH_NAME = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?";
+/** Text right before a clock time that makes it one: "at", "from", "until", a day or a date. */
+const TIME_BEFORE = new RegExp(
+  `(?:(?:\\b(?:at|from|to|until|till|til|between|by|before|after|around|starts?|starting|begins?|ends?|ending)|@)\\s*|\\b(?:${DAY_WORD}|\\d{4}-\\d{2}-\\d{2}|${MONTH_NAME}\\s+\\d{1,2}|\\d{1,2}\\s+${MONTH_NAME}),?\\s*)$`,
+  "i",
+);
+/** Text right after a clock time that makes it one: "14:00 on Friday", "14:00 tomorrow". */
+const TIME_AFTER = new RegExp(`^\\s*,?\\s*(?:on\\s+|this\\s+|next\\s+)?${DAY_WORD}\\b`, "i");
+/** A line or a list item that starts with the time: "- 14:00 review the notes". */
+const ROW_START = /^\s*(?:(?:[-*•]|\d+[.)])\s+)?(?:\*\*|__)?\s*$/;
+/** A list item, where "Dentist appointment: 14:00" and "Team sync (19:00)" give an event's time. */
+const LIST_ITEM = /^\s*(?:[-*•]|\d+[.)])\s/;
+
 /**
  * The reply's 24-hour clock times ("14:00", "14:00–15:30") written the way the cards and pages
  * show them ("2:00 PM", "2:00 PM – 3:30 PM"). The prompt gives the model every time on a 24-hour
  * clock (the fields it returns need that form), and it wrote them into the chat as well, next
- * to cards with 12-hour times (review of 24 Nov 2026). Only times that can only be 24-hour are
- * changed ("9:30" alone could be either), a range when either end is one; times with am/pm,
- * ISO date-times and quoted text stay as they are.
+ * to cards with 12-hour times (review of 24 Nov 2026).
+ *
+ * Only numbers that stand as a time are changed: after "at", "from", "to", "until", "between"
+ * and the like, in a range ("14:00–15:30", "between 9:00 and 17:00"), next to a day or a date,
+ * at the start of a line or list item, or after "title:" or "title (" in a list item ("- Dentist
+ * appointment: 14:00"). A price ("12:50 CHF"), a ratio ("16:10") or a score
+ * stays as it is. A time that can only be 24-hour (13-23, 0, 12, or a leading zero) is changed;
+ * one that could be either ("9:00") is changed when its sentence or range also has a clearly
+ * 24-hour time, so "From 9:00 to 17:00" becomes "From 9:00 AM to 5:00 PM", not half of it.
+ * Times with am/pm, ISO date-times and quoted text (an email's own words) stay as they are.
  */
 export function toTwelveHourClock(text: string): string {
-  const clock = "(?<![\\dT:.])([01]?\\d|2[0-3]):([0-5]\\d)(?![\\d:]|\\s*(?:[ap]\\.?\\s?m\\b))";
-  const range = new RegExp(`${clock}(\\s*[–—-]\\s*)${clock}`, "gi");
-  const single = new RegExp(clock, "gi");
-  // Quoted text (an email's own words) is left alone.
-  return (text ?? "")
-    .split(/("[^"\n]*"|“[^”\n]*”)/)
-    .map((part, index) => {
-      if (index % 2 === 1) return part;
-      const ranged = part.replace(range, (whole, h1: string, m1: string, _sep: string, h2: string, m2: string) =>
-        isClearly24h(h1) || isClearly24h(h2) ? `${twelveHour(Number(h1), m1)} – ${twelveHour(Number(h2), m2)}` : whole,
-      );
-      return ranged.replace(single, (whole, h: string, m: string, offset: number, all: string) => {
-        // Already converted as part of a range above ("2:00 PM").
-        if (/^\s*[AP]M\b/.test(all.slice(offset + whole.length))) return whole;
-        return isClearly24h(h) ? twelveHour(Number(h), m) : whole;
-      });
-    })
-    .join("");
+  return (text ?? "").split("\n").map(lineToTwelveHourClock).join("\n");
+}
+
+function lineToTwelveHourClock(line: string): string {
+  // Quoted text is masked (same length, so the offsets hold): its times are neither changed nor
+  // counted.
+  const masked = line.replace(/"[^"\n]*"|“[^”\n]*”/g, (quote) => QUOTE_MASK.repeat(quote.length));
+  const found = [...masked.matchAll(CLOCK)].map((m) => ({
+    start: m.index ?? 0,
+    end: (m.index ?? 0) + m[0].length,
+    hour: m[1],
+    minute: m[2],
+    range: -1,
+    inContext: false,
+    sentence: 0,
+  }));
+  if (found.length === 0) return line;
+  // Ranges: "14:00–15:30", "14:00 - 15:30", "between 9:00 and 17:00".
+  for (let i = 0; i + 1 < found.length; i++) {
+    if (found[i].range >= 0) continue;
+    const between = masked.slice(found[i].end, found[i + 1].start);
+    const dashed = /^\s*[–—-]\s*$/.test(between);
+    const betweenAnd = /^\s+and\s+$/i.test(between) && /\bbetween\s*$/i.test(masked.slice(0, found[i].start));
+    if (dashed || betweenAnd) {
+      found[i].range = i;
+      found[i + 1].range = i;
+    }
+  }
+  // Sentences, to know which times share one clock.
+  const boundaries = [...masked.matchAll(/[.!?;](?=\s)/g)].map((m) => m.index ?? 0);
+  const listItem = LIST_ITEM.test(masked);
+  for (const time of found) {
+    time.sentence = boundaries.filter((at) => at < time.start).length;
+    const before = masked.slice(0, time.start);
+    time.inContext =
+      time.range >= 0 ||
+      TIME_BEFORE.test(before) ||
+      TIME_AFTER.test(masked.slice(time.end)) ||
+      ROW_START.test(before) ||
+      (listItem && /[:(]\s*$/.test(before));
+  }
+  const clear = (time: (typeof found)[number]) => time.inContext && isClearly24h(time.hour);
+  const sentenceIs24h = new Set(found.filter(clear).map((time) => time.sentence));
+  const rangeIs24h = new Set(found.filter((time) => time.range >= 0 && clear(time)).map((time) => time.range));
+  const converts = found.map(
+    (time) => time.inContext && (isClearly24h(time.hour) || sentenceIs24h.has(time.sentence) || rangeIs24h.has(time.range)),
+  );
+
+  let out = "";
+  let at = 0;
+  for (let i = 0; i < found.length; i++) {
+    const time = found[i];
+    if (!converts[i]) continue;
+    const pair = time.range === i && i + 1 < found.length && found[i + 1].range === i ? found[i + 1] : null;
+    if (pair) {
+      // A dashed range is written as the cards write one ("2:00 PM – 3:30 PM"); "between ...
+      // and ..." keeps its words.
+      const between = line.slice(time.end, pair.start);
+      const separator = /^\s*[–—-]\s*$/.test(between) ? " – " : between;
+      out += `${line.slice(at, time.start)}${twelveHour(Number(time.hour), time.minute)}${separator}${twelveHour(Number(pair.hour), pair.minute)}`;
+      at = pair.end;
+      i++;
+      continue;
+    }
+    out += `${line.slice(at, time.start)}${twelveHour(Number(time.hour), time.minute)}`;
+    at = time.end;
+  }
+  return out + line.slice(at);
 }

@@ -26,8 +26,9 @@ const harness = vi.hoisted(() => {
     return builder;
   }
 
+  type Answer = { data: unknown; error: unknown; count?: number | null };
   /** A query recorder: every call is logged, and the answer comes from `answer`. */
-  function recorder(name: string, answer: (table: string, calls: [string, unknown[]][]) => { data: unknown; error: unknown }) {
+  function recorder(name: string, answer: (table: string, calls: [string, unknown[]][]) => Answer) {
     const log: { client: string; table: string; calls: [string, unknown[]][] }[] = [];
     return {
       log,
@@ -52,11 +53,12 @@ const harness = vi.hoisted(() => {
     };
   }
 
-  const answers: { user: (table: string, calls: [string, unknown[]][]) => { data: unknown; error: unknown } } = {
+  const answers: { user: (table: string, calls: [string, unknown[]][]) => Answer; admin: (table: string, calls: [string, unknown[]][]) => Answer } = {
     user: () => ({ data: [], error: null }),
+    admin: () => ({ data: null, error: null }),
   };
   const user = recorder("user", (table, calls) => answers.user(table, calls));
-  const admin = recorder("admin", () => ({ data: null, error: null }));
+  const admin = recorder("admin", (table, calls) => answers.admin(table, calls));
   return { state, createServerFn, user, admin, answers };
 });
 
@@ -80,7 +82,7 @@ vi.mock("@/server/connectors/calendar.mock", async () => {
 vi.mock("@/server/deployment.server", () => ({ isHostedDeployment: () => true }));
 
 import { dismissChatCard, fetchCalendar, fetchSessionHistory } from "@/functions/chat.functions";
-import { HISTORY_LIMIT, recordCardResult, releaseCard } from "@/server/chat-cards.server";
+import { CARD_ACTIONS_FULL, CARD_ACTIONS_LIMIT, HISTORY_LIMIT, recordCardResult, releaseCard } from "@/server/chat-cards.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -93,6 +95,7 @@ beforeEach(() => {
   harness.user.log.length = 0;
   harness.admin.log.length = 0;
   harness.answers.user = () => ({ data: [], error: null });
+  harness.answers.admin = () => ({ data: null, error: null });
   mocks.isGoogleConnected.mockReset().mockResolvedValue(false);
   mocks.listCalendarEvents.mockReset().mockResolvedValue([]);
   mocks.listEventsForRange.mockReset().mockResolvedValue([]);
@@ -162,9 +165,35 @@ describe("card records are written by the server (49)", () => {
   it("a dismissal goes through the service role, for this user's card only", async () => {
     await expect(dismissChatCard({ data: { cardId: CARD } })).resolves.toEqual({ ok: true });
     expect(harness.user.log).toHaveLength(0);
-    expect(harness.admin.log).toHaveLength(1);
-    const upsert = harness.admin.log[0].calls.find(([method]) => method === "upsert")!;
+    // The count of the user's records (the limit), then the dismissal.
+    expect(harness.admin.log).toHaveLength(2);
+    expect(harness.admin.log[0].calls).toContainEqual(["eq", ["user_id", USER]]);
+    const upsert = harness.admin.log[1].calls.find(([method]) => method === "upsert")!;
     expect(upsert[1][0]).toEqual({ user_id: USER, card_id: CARD, status: "dismissed" });
+  });
+
+  it("at the limit of 1000 records a new dismissal is refused with the limit's sentence and nothing is written (review of the fix)", async () => {
+    harness.answers.admin = (_table, calls) =>
+      calls.some(([method, args]) => method === "select" && (args[1] as { head?: boolean } | undefined)?.head)
+        ? { data: null, error: null, count: CARD_ACTIONS_LIMIT }
+        : { data: null, error: null };
+    await expect(dismissChatCard({ data: { cardId: CARD } })).rejects.toThrow(CARD_ACTIONS_FULL);
+    expect(harness.admin.log.some((entry) => entry.calls.some(([method]) => method === "upsert" || method === "insert"))).toBe(false);
+  });
+
+  it("at the limit a card that already has a record goes on as before", async () => {
+    harness.answers.admin = (_table, calls) =>
+      calls.some(([method, args]) => method === "select" && (args[1] as { head?: boolean } | undefined)?.head)
+        ? { data: null, error: null, count: CARD_ACTIONS_LIMIT }
+        : calls.some(([method]) => method === "upsert")
+          ? { data: null, error: null }
+          : { data: { card_id: CARD }, error: null };
+    await expect(dismissChatCard({ data: { cardId: CARD } })).resolves.toEqual({ ok: true });
+  });
+
+  it("cards of panels stored before 9 Nov 2026 (ids 'pending-<ms>-<n>') can still be dismissed", async () => {
+    await expect(dismissChatCard({ data: { cardId: "pending-1762300000000-0" } })).resolves.toEqual({ ok: true });
+    await expect(dismissChatCard({ data: { cardId: "change-1762300000000-12" } })).resolves.toEqual({ ok: true });
   });
 
   it("a result is recorded, and a claim released, only while the card has no result", async () => {
