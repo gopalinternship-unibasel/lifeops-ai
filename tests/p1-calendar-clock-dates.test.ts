@@ -189,9 +189,68 @@ describe("numeric and impossible dates (finding 3)", () => {
   it("asks which date when a slash date reads both ways", () => {
     const result = reconcile("Move the dentist appointment to 1/12 at 4 pm");
     expect(result.changes).toEqual([]);
+    // The options carry their year, as one of them is next year.
     expect(result.note).toMatch(
-      /Which day did you mean for \*\*Dentist appointment\*\*: Tue, Dec 1 or Tue, Jan 12\?/,
+      /Which day did you mean for \*\*Dentist appointment\*\*: Tue, Dec 1, 2026 or Tue, Jan 12, 2027\?/,
     );
+  });
+
+  // Reviewer of 24 Nov 2026: "3.12 at 4 pm" was moved on the event's own day by rule; only the
+  // time was read.
+  it("reads a day.month pair as the date when a time follows it or 'on' comes before it", () => {
+    const dec3 = { starts_at: "2026-12-03T15:00:00.000Z", ends_at: "2026-12-03T16:30:00.000Z" };
+    const withModel = reconcile("Move the dentist appointment to 3.12 at 4 pm", [
+      update("dentist", "2026-12-03", [16, 0], [17, 30]),
+    ]);
+    expect(withModel.changes).toHaveLength(1);
+    expect(withModel.changes[0].next).toEqual(dec3);
+    expect(withModel.log.join(" ")).not.toMatch(/corrected the model's time/);
+    // Without the model: Dec 3, not Thursday Nov 26.
+    expect(reconcile("Move the dentist appointment to 3.12 at 4 pm").changes[0].next).toEqual(dec3);
+    for (const message of [
+      "Move the dentist appointment to 1.12 at 4 pm",
+      "Move the dentist appointment to 1.12 4 pm",
+      "Move the dentist appointment to 1.12 at 16:00",
+      "Move the dentist appointment to 1.12, 4 pm",
+    ]) {
+      expect(reconcile(message).changes[0]?.next?.starts_at, message).toBe(
+        "2026-12-01T15:00:00.000Z",
+      );
+    }
+    expect(
+      reconcile("Move the dentist appointment to 4 pm on 3.12").changes[0].next?.starts_at,
+    ).toBe("2026-12-03T15:00:00.000Z");
+    // "1.12 at 4": Dec 1, and 4 AM or 4 PM is asked.
+    expect(reconcile("Move the dentist appointment to 1.12 at 4").note).toMatch(
+      /Did you mean 4:00 AM or 4:00 PM/,
+    );
+  });
+
+  it("asks which date when a day.month pair is left next to the time", () => {
+    for (const message of [
+      "Move the dentist appointment to 4 pm, 3.12",
+      "Move the dentist appointment to 4 pm 3.12",
+      "Move the dentist appointment to 4 pm, 3/12",
+    ]) {
+      const result = reconcile(message);
+      expect(result.changes, message).toEqual([]);
+      expect(result.note, message).toMatch(
+        /Which date should \*\*Dentist appointment\*\* move to\?/,
+      );
+    }
+  });
+
+  it("does not read a dotted number in a name or an amount as a leftover date", () => {
+    expect(
+      reconcile("Move the team sync to 8 pm for the 2.5 release").changes[0].next?.starts_at,
+    ).toBe(zrh("2026-11-24", 20));
+    expect(parse("Move the team sync to 8 pm for 1.5 hours")).toMatchObject({
+      start: { minutes: [1200] },
+      durationMin: 90,
+      dayUnclear: false,
+    });
+    // "at 9.10" is still a time.
+    expect(parse("Move the team sync to tomorrow at 9.10")?.start?.minutes).toEqual([550, 1270]);
   });
 
   it.each([
@@ -452,7 +511,7 @@ describe("tonight, dates in the past months, '13 am' (finding 27)", () => {
     ]);
   });
 
-  it("reads a month and day that are more than two weeks back as next year", () => {
+  it("reads a month and day that are more than two months back as next year", () => {
     expect(parse("Move the dentist appointment to May 30 at 2 pm")?.day).toMatchObject({
       dates: ["2027-05-30"],
     });
@@ -462,9 +521,11 @@ describe("tonight, dates in the past months, '13 am' (finding 27)", () => {
     expect(parse("Move the dentist appointment to Jan 5 at 2 pm")?.day).toMatchObject({
       dates: ["2027-01-05"],
     });
-    expect(
-      reconcile("Move the dentist appointment to May 30 at 2 pm").changes[0].next?.starts_at,
-    ).toBe("2027-05-30T12:00:00.000Z");
+    // Next year's date six weeks ahead is moved to by rule.
+    expect(reconcile("Move the dentist appointment to Jan 5 at 2 pm").changes[0]).toMatchObject({
+      byRule: true,
+      next: { starts_at: "2027-01-05T13:00:00.000Z" },
+    });
     // A recent date is this year's, and is over.
     expect(parse("Move the dentist appointment to Nov 20 at 2 pm")?.day).toMatchObject({
       dates: ["2026-11-20"],
@@ -475,6 +536,57 @@ describe("tonight, dates in the past months, '13 am' (finding 27)", () => {
     expect(parse("Move the dentist appointment to Dec 3 at 2 pm")?.day).toMatchObject({
       dates: ["2026-12-03"],
     });
+  });
+
+  // Reviewer of 24 Nov 2026: with a 14-day window, "Nov 1" asked on Nov 24 became a by-rule card
+  // for 2027-11-01, and the text showed no year.
+  it("keeps a date up to two months back in this year, so it is refused as over", () => {
+    for (const message of [
+      "Move the dentist appointment to Nov 1 at 2 pm",
+      "Move the dentist appointment to Sep 30 at 2 pm",
+      "Move the dentist appointment to 1.11. at 2 pm",
+    ]) {
+      const result = reconcile(message);
+      expect(result.changes, message).toEqual([]);
+      expect(result.note, message).toMatch(/has already passed/);
+    }
+    const withModel = reconcile("Move the dentist appointment to Oct 30 at 2 pm", [
+      update("dentist", "2026-10-30", [14, 0], [15, 30]),
+    ]);
+    expect(withModel.changes).toEqual([]);
+    expect(withModel.note).toBe(
+      "The new time for **Dentist appointment** (Fri, Oct 30, 2:00 PM) has already passed.",
+    );
+  });
+
+  it("asks before moving to next year's date more than half a year ahead, with the year shown", () => {
+    for (const [message, asked] of [
+      ["Move the dentist appointment to May 30 at 2 pm", "Sun, May 30, 2027"],
+      ["Move the dentist appointment to Aug 15 at 2 pm", "Sun, Aug 15, 2027"],
+      ["Move the dentist appointment to 1.6. at 2 pm", "Tue, Jun 1, 2027"],
+    ]) {
+      const result = reconcile(message);
+      expect(result.changes, message).toEqual([]);
+      expect(result.note, message).toBe(`Did you mean ${asked} for **Dentist appointment**?`);
+      // The model's agreement does not replace the question: the card would not show the year.
+      expect(
+        reconcile(message, [update("dentist", "2027-05-30", [14, 0], [15, 30])]).changes,
+        message,
+      ).toEqual([]);
+    }
+    // With the year written out, the move is made by rule.
+    expect(
+      reconcile("Move the dentist appointment to May 30, 2027 at 2 pm").changes[0],
+    ).toMatchObject({
+      byRule: true,
+      next: { starts_at: "2027-05-30T12:00:00.000Z" },
+    });
+    expect(parse("Move the dentist appointment to 30 May 2027 at 2 pm")?.day).toMatchObject({
+      dates: ["2027-05-30"],
+    });
+    expect(parse("Move the dentist appointment to 30 May 2027 at 2 pm")?.day).not.toHaveProperty(
+      "confirmYear",
+    );
   });
 
   it("does not read '13 am' as 01:00", () => {

@@ -322,11 +322,18 @@ describe("demo events that are over follow the demo inbox (finding 42)", () => {
         expect(named, label).toBe(weekday(paper.extractedTask!.deadline!));
         expect(paper.snippet, label).toContain(`due on ${named}`);
 
-        // (b) Lunch "this Saturday" is due on a Saturday, today or later.
+        // (b) Lunch is due on a Saturday that is still ahead: on a Saturday after 1 PM the next
+        // one, called "next Saturday" (reviewer of 24 Nov 2026: the deadline was already over).
         const lunch = email("e3").extractedTask!.deadline!;
         expect(weekday(lunch), label).toBe("Saturday");
-        expect(localDateTime(lunch, ZRH).date >= today, label).toBe(true);
-        expect(email("e3").subject).toBe("Lunch this Saturday?");
+        expect(Date.parse(lunch), label).toBeGreaterThan(nowMs);
+        const weekAway = localDateTime(lunch, ZRH).date >= addDaysISO(today, 7);
+        const lunchDay = weekAway ? "next Saturday" : "this Saturday";
+        expect(email("e3").subject, label).toBe(`Lunch ${lunchDay}?`);
+        expect(email("e3").snippet, label).toContain(`lunch ${lunchDay} around 1pm`);
+        expect(weekAway, label).toBe(
+          weekday(new Date(nowMs).toISOString()) === "Saturday" && hour >= 12,
+        );
 
         // (c) The interview is the demo calendar's, and the prep is due before it and not yet over.
         const interview = zonedDateTimeToISO(

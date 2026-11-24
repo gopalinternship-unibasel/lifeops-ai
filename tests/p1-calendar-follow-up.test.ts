@@ -230,6 +230,88 @@ describe("answers to MONDAY's own questions", () => {
       { kind: "delete", event: event("dentist"), byRule: true },
     ]);
   });
+
+  it("'yes' to 'Did you mean <date next year> ...?' moves to that date", () => {
+    const previous = asked("Move the dentist appointment to May 30 at 2 pm");
+    expect(previous.assistant).toMatch(
+      /Did you mean Sun, May 30, 2027 for \*\*Dentist appointment\*\*\?/,
+    );
+    for (const answer of ["Yes", "yes please", "May 30, 2027"]) {
+      const result = reconcile(answer, [], previous);
+      expect(result.changes, answer).toEqual([
+        {
+          kind: "update",
+          event: event("dentist"),
+          next: { starts_at: "2027-05-30T12:00:00.000Z", ends_at: "2027-05-30T13:30:00.000Z" },
+          byRule: true,
+        },
+      ]);
+    }
+  });
+
+  it("an answer to MONDAY's note that the model's time was not offered", () => {
+    const previous: PreviousTurn = {
+      assistant:
+        "The AI model proposed Thu, Nov 26, 3:00 AM for **Dentist appointment**, which does not look like what you asked for, so I did not offer it. Please say the day and time you want.",
+    };
+    expect(reconcile("Friday at 3 pm", [], previous).changes[0]).toMatchObject({
+      event: { id: "dentist" },
+      byRule: true,
+      next: { starts_at: zrh("2026-11-27", 15) },
+    });
+  });
+});
+
+// Reviewer of 24 Nov 2026: any bold event name in a reply that asked something else made the
+// answer a by-rule change of that event.
+describe("a bold event name in a reply that did not ask about it", () => {
+  const generic: PreviousTurn = {
+    user: "Plan a gym session this week",
+    assistant:
+      "Your **Dentist appointment** is on Thursday. Which day works best for the gym session?",
+  };
+  const nothingAdded: PreviousTurn = {
+    assistant:
+      "**Team sync — demo walkthrough** is at 7 pm.\n\nNothing was added to your calendar in this turn. If you expected a change, please try again, naming the day and the time.",
+  };
+
+  it("'Cancel it' or 'Move it to Friday at 6 pm' make no card of their own", () => {
+    for (const previous of [generic, nothingAdded]) {
+      for (const message of ["Cancel it", "Move it to Friday at 6 pm"]) {
+        const result = reconcile(message, [], previous);
+        expect(result.changes, message).toEqual([]);
+      }
+    }
+  });
+
+  it("an answer that names something else keeps no model change", () => {
+    const result = reconcile(
+      "Gym Friday at 6 pm",
+      [update("sync", "2026-11-27", [18, 0], [19, 0])],
+      nothingAdded,
+    );
+    expect(result.changes).toEqual([]);
+    expect(result.unasked).toBe(true);
+    // Not after MONDAY's own question about another event either.
+    const ownQuestion: PreviousTurn = {
+      assistant: "Which day and time should **Dentist appointment** move to?",
+    };
+    expect(reconcile("Gym Friday at 6 pm", [], ownQuestion).changes).toEqual([]);
+    expect(reconcile("8 pm, after the lecture", [], ownQuestion).changes).toEqual([]);
+  });
+
+  it("'Cancel it' with the model's own cancel is read as before: the model's change, not a rule's", () => {
+    const result = reconcile("Cancel it", [{ kind: "delete", event: event("dentist") }], generic);
+    expect(result.changes).toEqual([{ kind: "delete", event: event("dentist"), byRule: false }]);
+  });
+
+  it("'yes' or a cancel after free text keeps no model change of the bold event", () => {
+    const result = reconcile("Yes", [{ kind: "delete", event: event("dentist") }], generic);
+    expect(result.changes).toEqual([]);
+    expect(
+      reconcile("Friday at 6 pm", [{ kind: "delete", event: event("dentist") }], generic).changes,
+    ).toEqual([]);
+  });
 });
 
 describe("what is still not read as an answer", () => {

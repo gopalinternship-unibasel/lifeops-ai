@@ -91,6 +91,9 @@ describe("other ways to cancel or rebook (finding 19)", () => {
     "Remind me to get rid of the team sync.",
     "Don't take the team sync off my calendar.",
     "I'll take the day off tomorrow, so the team sync is fine",
+    // "from scratch" is an idiom, not "scratch the team sync" (reviewer of 24 Nov 2026).
+    "Redo the team sync slides from scratch",
+    "Let's start the team sync prep from scratch",
   ])("still leaves the cancel out for: %s", (message) => {
     const result = reconcile(message, [cancelSync]);
     expect(result.changes).toEqual([]);
@@ -140,6 +143,38 @@ describe("questions, thoughts and messages to others (finding 23)", () => {
   ])("still keeps exactly one change for the request: %s", (message, change) => {
     expect(reconcile(message, [change]).changes).toHaveLength(1);
   });
+
+  const syncTo8: ModelChange = {
+    kind: "update",
+    event: event("sync"),
+    starts_at: zrh("2026-11-24", 20),
+    ends_at: zrh("2026-11-24", 21),
+  };
+  it.each([
+    "I'm thinking the team sync should move to 8 pm, please do it",
+    "Should the team sync be moved to 8 pm? Yes please do it",
+    "Should the team sync move to 8 pm? Go ahead.",
+    "I might move the team sync to 8 pm. Yes, do it.",
+    // "thinking" without about, of, if or whether is not a thought about whether to do it.
+    "I'm thinking the team sync should move to 8 pm",
+  ])("keeps the change when the message also says to go ahead: %s", (message) => {
+    const result = reconcile(message, [syncTo8]);
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0].next?.starts_at).toBe(zrh("2026-11-24", 20));
+    expect(result.unasked).toBeFalsy();
+  });
+
+  it.each([
+    ["Should I cancel the team sync? Yes or no?", cancelSync],
+    ["Should I cancel the team sync, or should I do it later?", cancelSync],
+    ["I can't cancel the team sync, yes?", cancelSync],
+    ["Not sure if I should cancel the team sync, don't do it yet", cancelSync],
+    ["I'm wondering whether to move the team sync to 8 pm", syncTo8],
+  ])("a go-ahead word that is not one does not keep the change: %s", (message, change) => {
+    const result = reconcile(message, [change]);
+    expect(result.changes).toHaveLength(0);
+    expect(result.unasked).toBe(true);
+  });
 });
 
 describe("a request to send something (finding 86, calendar part)", () => {
@@ -149,6 +184,10 @@ describe("a request to send something (finding 86, calendar part)", () => {
     "Please send it",
     "Reply to Sam and say yes",
     "Text Sam that I'm in",
+    // Forwarding is sending (reviewer of 24 Nov 2026).
+    "Forward the email to Sam",
+    "Fwd the recruiter's email to Ana",
+    "Send the meeting notes to Sam tomorrow",
   ])("asksToSend: %s", (message) => {
     expect(asksToSend(message)).toBe(true);
     expect(asksForAction(message)).toBe(true);
@@ -162,6 +201,12 @@ describe("a request to send something (finding 86, calendar part)", () => {
     "What did Sam send me?",
     "Tell me what is on tomorrow",
     "Add a yoga session tomorrow at 6 pm",
+    // To a day or a time, or with a move: a calendar request (reviewer of 24 Nov 2026).
+    "Send the dentist appointment to Friday",
+    "Send the team sync to next week",
+    "Send the team sync to 8 pm",
+    "Email Sam the agenda and move the team sync to 8 pm",
+    "Forward me the recruiter's email",
   ])("not a send request: %s", (message) => {
     expect(asksToSend(message)).toBe(false);
   });

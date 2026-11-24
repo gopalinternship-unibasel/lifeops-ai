@@ -48,6 +48,12 @@ export interface DayRef {
   exact?: boolean;
   /** The words name a date the rules do not work out ("the last Friday of the month"). */
   unclear?: boolean;
+  /**
+   * A day and month without a year that is over this year, read as next year's date, more than
+   * half a year ahead ("May 30" asked in November). The user is asked first ("Did you mean Sun,
+   * May 30, 2027 ...?"), as a card would not show the year.
+   */
+  confirmYear?: boolean;
 }
 
 /** One or more possible clock times (minutes after local midnight); two means am/pm unknown. */
@@ -190,7 +196,7 @@ const CREATE_RE = new RegExp(
   `${CLAUSE_START}(?:(?:set|put)\\b(?!\\s+(?:off\\b|${DEFINITE}\\b))|(?:pencil in|add|book|schedule|create|block|plan|make time|make an?|remind|reserve|arrange|organi[sz]e|find (?:time|a slot))\\b)`,
 );
 /** "Confirm lunch with Sam for me", "Let Sam know I am late", "Forward it to Ana": something to send. */
-const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|let\\s+(?!me\\b)\\w+\\s+know)\\b`);
+const OTHER_ACTION_RE = new RegExp(`${CLAUSE_START}(?:confirm|decline|accept|rsvp|invite|forward|fwd|let\\s+(?!me\\b)\\w+\\s+know)\\b`);
 const MESSAGE_START = `^(?:${FILLER},?\\s+){0,3}(?:${ASK}\\s+)?(?:${FILLER}\\s+){0,2}`;
 /** A verb that sends something to someone, not followed by "me" ("Tell me ..." asks for an answer). */
 const OUTBOUND_RE = new RegExp(`${MESSAGE_START}(?:email|e-mail|mail|reply|respond|message|text|send|notify|tell|ask|answer|follow up with|get back to)\\b(?!\\s+me\\b)`);
@@ -237,9 +243,14 @@ const NEXT_CLAUSE_RE =
 // subject ("... to Friday (I have a lecture at 3 pm)", "... to Friday: the lecture is at 3 pm").
 // Until the review of 24 Nov 2026 those times were read as the new time.
 // A new sentence about something else: "the lecture is ...", "my lecture ends ..." (not "the one
-// that is on Friday", which names the event, nor "the 27th", which is a date).
+// that is on Friday", which names the event, nor "the 27th", which is a date). Nor a relative
+// clause that names the event between commas or brackets before the new time ("Move the team
+// sync, the meeting that is at 7 pm, to 8 pm"): cut as a reason, it took the destination with it
+// and the request got no card and no note (reviewer of 24 Nov 2026).
+const APPOSITIVE =
+  "(?:the|my|our|his|her|their|your)\\s+(?:[a-z'-]+\\s+){0,3}?(?:that|which|who)\\b[^,;()]*(?:,|\\)|\\s-)\\s*(?:to|for|until|till|on|at)\\s";
 const REASON_SENTENCE =
-  "(?:the|my|our|his|her|their|your)\\s+(?!ones?\\b)(?:[a-z'-]+\\s+){0,3}?(?:is|are|was|were|ends?|starts?|begins?|finish(?:es)?|runs?|has|have|clash(?:es)?|overlaps?)\\b";
+  `(?!${APPOSITIVE})(?:the|my|our|his|her|their|your)\\s+(?!ones?\\b)(?:[a-z'-]+\\s+){0,3}?(?:is|are|was|were|ends?|starts?|begins?|finish(?:es)?|runs?|has|have|clash(?:es)?|overlaps?)\\b`;
 // After a colon, a bracket or a dash: a pronoun or such a sentence ("(I have a lecture at 3 pm)",
 // ": the lecture is at 3 pm"); "(the 27th)" and ": this Friday at 3 pm" are part of the request.
 const REASON_SUBJECT = `(?:(?:i|i'm|im|we|we're|it|it's|there|he|she|they|since|because|as|due)\\b|${REASON_SENTENCE})`;
@@ -331,6 +342,8 @@ const STOP_WORDS = new Set([
   "reschedule", "push", "shift", "postpone", "delay", "bring", "pull", "change", "put", "set",
   "cancel", "delete", "remove", "call off", "scrap", "drop", "back", "forward", "later", "earlier",
   "one", "next", "coming", "s", "o'clock", "oclock", "up", "off", "is", "be", "so", "that's",
+  // "the team sync, the meeting which is at 7 pm, ...": a relative clause that names the event.
+  "which", "who",
 ]);
 
 /** Lowercase, plain dashes and apostrophes, "p.m." -> "pm", single spaces, no final punctuation. */
@@ -458,8 +471,12 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
   if (m) return { day: { dates: [addDaysISO(today, -(WEEK_COUNT[m[1]] ?? Number(m[1])))], text: m[0].trim(), past: true }, rest };
   // A date, maybe with its weekday ("Tuesday the 17th", "Fri, Nov 13"). A weekday that is not
   // the date's leaves two readings, so the user is asked which one is meant.
+  // Next year's dates that upcoming() chose more than half a year ahead (see DayRef.confirmYear).
+  const askYear = new Set<string>();
   const dated = (date: string, weekday: string | undefined, text: string): DayRef => {
-    if (!weekday || new Date(`${date}T12:00:00Z`).getUTCDay() === WEEKDAYS[weekday]) return { dates: [date], text, exact: true };
+    if (!weekday || new Date(`${date}T12:00:00Z`).getUTCDay() === WEEKDAYS[weekday]) {
+      return { dates: [date], text, exact: true, ...(askYear.has(date) ? { confirmYear: true } : {}) };
+    }
     return { dates: [...new Set([date, addDaysISO(today, (WEEKDAYS[weekday] - todayWeekday + 7) % 7)])], text, exact: true };
   };
   const validDate = (date: string) => {
@@ -469,15 +486,24 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
   const isoDate = (year: number, month: number, dayNumber: number) =>
     `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
   // A day and month without a year: this year, or next year when this year's date is more than
-  // two weeks back. "May 30" asked in November is next May; it was this May until the review of
-  // 24 Nov 2026 (only dates more than half a year back moved on), so it was refused as over.
+  // two months back. "May 30" asked in November is next May; it was this May until the review of
+  // 24 Nov 2026 (only dates more than half a year back moved on), so it was refused as over. A
+  // date up to two months back stays this year's and is refused as over: "Nov 1" asked on 24 Nov
+  // is more likely a slip than a move to next November (a 14-day window made it a card for
+  // 2027-11-01). Next year's date more than half a year ahead is asked about (confirmYear).
   const upcoming = (month: number, dayNumber: number): string => {
     if (month < 1 || month > 12 || dayNumber < 1 || dayNumber > 31) return "";
     const year = Number(today.slice(0, 4));
     const thisYear = isoDate(year, month, dayNumber);
-    const longAgo = Date.parse(`${thisYear}T12:00:00Z`) < Date.parse(`${today}T12:00:00Z`) - 14 * 86_400_000;
-    return validDate(thisYear) && !longAgo ? thisYear : isoDate(year + 1, month, dayNumber);
+    const todayMs = Date.parse(`${today}T12:00:00Z`);
+    const longAgo = Date.parse(`${thisYear}T12:00:00Z`) < todayMs - 61 * 86_400_000;
+    if (validDate(thisYear) && !longAgo) return thisYear;
+    const nextYear = isoDate(year + 1, month, dayNumber);
+    if (validDate(nextYear) && Date.parse(`${nextYear}T12:00:00Z`) > todayMs + 183 * 86_400_000) askYear.add(nextYear);
+    return nextYear;
   };
+  /** A year written after a day and month ("May 30, 2027", "30 May 2027"). */
+  const YEAR = "(?:,? (20\\d{2})\\b)?";
   // Date words that name no real date ("Nov 31", "the 31st" in November, "2026-11-31", "31.11."):
   // the user is asked which date is meant. Until the review of 24 Nov 2026 such words were
   // dropped without a trace and the event was moved on its own day.
@@ -487,11 +513,13 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     const date = `${m[2]}-${m[3]}-${m[4]}`;
     return validDate(date) ? { day: dated(date, m[1], m[0].trim()), rest } : notADate(m[0]);
   }
-  const dayMonth = take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?(?:the )?(\\d{1,2})(?:st|nd|rd|th)?(?: of)? ${MONTH_RE}\\b`));
-  const monthDay = dayMonth ? null : take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?${MONTH_RE}\\.? (\\d{1,2})(?:st|nd|rd|th)?\\b`));
+  const dayMonth = take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?(?:the )?(\\d{1,2})(?:st|nd|rd|th)?(?: of)? ${MONTH_RE}\\b${YEAR}`));
+  const monthDay = dayMonth ? null : take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?${MONTH_RE}\\.? (\\d{1,2})(?:st|nd|rd|th)?\\b${YEAR}`));
   m = dayMonth ?? monthDay;
   if (m) {
-    const date = upcoming(MONTHS[(dayMonth ? m[3] : m[2]).slice(0, 3)] ?? 0, Number(dayMonth ? m[2] : m[3]));
+    const month = MONTHS[(dayMonth ? m[3] : m[2]).slice(0, 3)] ?? 0;
+    const dayNumber = Number(dayMonth ? m[2] : m[3]);
+    const date = m[4] ? isoDate(Number(m[4]), month, dayNumber) : upcoming(month, dayNumber);
     return date && validDate(date) ? { day: dated(date, m[1], m[0].trim()), rest } : notADate(m[0]);
   }
   // Numeric dates, day first as in Switzerland: "01.12.2026", "1.12.26", and "1.12." with its
@@ -522,7 +550,15 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     return numericDate(m, Number(m[2]), Number(m[3]));
   }
   m = new RegExp(`${weakNumericLead}(\\d{1,2})\\.(\\d{1,2})(?![\\d.])(?!\\s?(?:am|pm|hours?|hrs?|h|minutes?|mins?|m)\\b)`).exec(rest);
-  if (m && Number(m[3]) >= 1 && Number(m[3]) <= 12 && (Number(m[2]) > 24 || m[3].length === 1)) {
+  // "1.12" and "3.12" can be a time too, but not after "on" ("on 3.12"), and not when another time
+  // follows ("3.12 at 4 pm", "1.12 4 pm", "1.12 at 16:00"). The reviewer of 24 Nov 2026 saw "3.12
+  // at 4 pm" moved on the event's own day by rule: the time was read, the date dropped.
+  if (
+    m &&
+    Number(m[3]) >= 1 &&
+    Number(m[3]) <= 12 &&
+    (Number(m[2]) > 24 || m[3].length === 1 || /^\s*on\b/.test(m[0]) || TIME_AFTER_DATE_RE.test(rest.slice(m.index + m[0].length)))
+  ) {
     cut(m);
     return numericDate(m, Number(m[2]), Number(m[3]));
   }
@@ -636,6 +672,12 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
   return { rest };
 }
 
+/**
+ * A clock time right after a numeric date: "3.12 at 4 pm", "1.12 4 pm", "1.12, 16:00", "1.12 at
+ * 9", "1.12 at 14.30". Then the number before it is the date, not a second time.
+ */
+const TIME_AFTER_DATE_RE =
+  /^\s*,?\s*(?:(?:at|@|from|between|around)\s*)?(?:\d{1,2}(?:[:.h]\d{2})?\s?(?:am|pm)\b|\d{1,2}(?:[:h]\d{2}|\.(?:1[3-9]|[2-5]\d))\b|noon\b|midday\b|midnight\b)|^\s*,?\s*(?:at|@)\s*\d{1,2}\b/;
 /** Where an hour may start: not inside another number ("8.15 pm" is not "15 pm", "1.12.2026" holds no time). */
 const HOUR_START = "(?<![\\d.:/])";
 /** Minutes after the hour: "16:00", "8.15" (British and Swiss), "14h30" (French and Swiss). */
@@ -654,6 +696,11 @@ export function parseClock(text: string): {
    * "1.12"), or am/pm with an hour that cannot have it ("13 am", "15 pm").
    */
   unreadTime?: boolean;
+  /**
+   * A day.month or day/month pair left next to the time ("4 pm, 3.12"): it may be the new date,
+   * which the day reader did not take, so the day is not known.
+   */
+  unreadDate?: boolean;
   /** "two hours from now": a time counted from the current time, which the rules do not work out. */
   fromNow?: boolean;
   rest: string;
@@ -817,6 +864,16 @@ export function parseClock(text: string): {
       out.unreadTime = true;
     }
   }
+  // Whatever time was read, a day.month pair left over may be the new date ("4 pm, 3.12"); until
+  // the review of 24 Nov 2026 it was dropped and the event moved on its own day by rule. A number
+  // in a name or an amount has a word in front of it ("Python 3.12", "the 2.5 km run").
+  for (const pair of rest.matchAll(/(?<![\d.:/])(\d{1,2})[./](\d{1,2})(?![\d./])(?!\s?(?:%|am|pm|hours?|hrs?|h|minutes?|mins?|m|km|kg|mi|miles?|days?|weeks?)\b)/g)) {
+    const [dayNumber, month] = [Number(pair[1]), Number(pair[2])];
+    if (dayNumber < 1 || dayNumber > 31 || month < 1 || month > 12) continue;
+    const word = /([a-z']+)\s*$/.exec(rest.slice(0, pair.index))?.[1];
+    if (word && !new RegExp(`^(?:on|to|for|from|or|and|until|till|by|at|am|pm|noon|midday|midnight|${WEEKDAY_RE.slice(1, -1)})$`).test(word)) continue;
+    out.unreadDate = true;
+  }
   out.rest = rest.replace(/\s+/g, " ").trim();
   return out;
 }
@@ -965,6 +1022,11 @@ function readDestination(destination: string, today: string): Destination {
     day !== undefined && day !== "same" && !day.exact &&
     (Boolean(day.unclear) ||
       /\b(?:next|last|previous|following|coming)\s+(?:weeks?|months?|year)\b|\b(?:in|after)\s+(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\b(?:weeks?|months?)\s+(?:from|later|after|ago)\b|\b(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\bfortnight\b|\bafter next\b/.test(leftover));
+  if (clock.unreadDate) {
+    // "4 pm, 3.12": a date may be named that was not read, so MONDAY asks which date.
+    if (day === undefined || day === "same") out.day = { dates: [today], text: "", unclear: true };
+    out.dayUnclear = true;
+  }
   return out;
 }
 
@@ -1249,8 +1311,25 @@ function hhmm(minutes: number): string {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${meridiem}`;
 }
 
-function dayName(date: string): string {
-  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+/**
+ * "Fri, Nov 27"; with the year ("Sun, May 30, 2027") when the date is not in `refYear`, the
+ * current year, so a date almost a year away is not mistaken for a near one (review of 24 Nov 2026).
+ */
+function dayName(date: string, refYear?: string): string {
+  const withYear = refYear !== undefined && date.slice(0, 4) !== refYear;
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(withYear ? { year: "numeric" } : {}),
+  });
+}
+
+/** Dates for a question ("Tue, Dec 1 or Tue, Jan 12"): all with their year when one is not in `refYear`. */
+function dayNames(dates: string[], refYear?: string): string {
+  const otherYear = dates.find((date) => refYear !== undefined && date.slice(0, 4) !== refYear);
+  return dates.map((date) => dayName(date, otherYear ? "" : refYear)).join(" or ");
 }
 
 /**
@@ -1263,11 +1342,14 @@ export function resolveMove(
   event: KnownEvent,
   timeZone: string,
   suggestion?: { starts_at: string; ends_at: string },
+  /** Today's local date; questions show the year of a date in another year. */
+  today?: string,
 ): ResolvedMove {
   const startMs = Date.parse(event.starts_at);
   const endMs = Date.parse(event.ends_at);
   const durationMs = endMs - startMs;
   const original = localDateTime(event.starts_at, timeZone);
+  const refYear = (today ?? original.date).slice(0, 4);
 
   if (request.shiftMin !== undefined) {
     const shift = request.shiftMin * 60_000;
@@ -1277,12 +1359,17 @@ export function resolveMove(
   if (request.day !== undefined && request.day !== "same") {
     // "to yesterday", "to last Friday": not a day anything can move to.
     if (request.day.past) {
-      const days = request.day.dates.map(dayName).join(" or ");
+      const days = dayNames(request.day.dates, refYear);
       return { status: "unclear", question: `${days} is already over. Which day should **${event.title}** move to?` };
     }
     // "Friday next month": the week or month next to the day was not read, so the date is unknown.
     if (request.dayUnclear) {
       return { status: "unclear", question: `I could not tell which date you mean. Which date should **${event.title}** move to?` };
+    }
+    // "May 30" asked in November: next year's May 30, more than half a year ahead. The year is
+    // asked about, with or without a model answer, because the card would not show it.
+    if (request.day.confirmYear) {
+      return { status: "unclear", question: `Did you mean ${dayNames(request.day.dates, "")} for **${event.title}**?` };
     }
   }
 
@@ -1317,7 +1404,7 @@ export function resolveMove(
           return { status: "resolved", ...suggestion, byRule: false };
         }
       }
-      return { status: "unclear", question: `Which day in the week of ${dayName(request.weekStart)} should **${event.title}** move to?` };
+      return { status: "unclear", question: `Which day in the week of ${dayName(request.weekStart, refYear)} should **${event.title}** move to?` };
     }
   }
   const at = (date: string, minutes: number) =>
@@ -1377,7 +1464,7 @@ export function resolveMove(
     }
   }
   if (readings.length === 0) {
-    return { status: "unclear", question: `What time on ${dates.map(dayName).join(" or ")} should **${event.title}** move to?` };
+    return { status: "unclear", question: `What time on ${dayNames(dates, refYear)} should **${event.title}** move to?` };
   }
   const startsDiffer = new Set(readings.map((r) => localDateTime(r.starts_at, timeZone).minutes)).size > 1;
   const datesDiffer = new Set(readings.map((r) => localDateTime(r.starts_at, timeZone).date)).size > 1;
@@ -1385,8 +1472,8 @@ export function resolveMove(
     const options = [...new Set(readings.map((r) => localDateTime(r.starts_at, timeZone).minutes))].map(hhmm);
     return { status: "unclear", question: `Did you mean ${options.join(" or ")} for **${event.title}**?` };
   }
-  const options = [...new Set(readings.map((r) => localDateTime(r.starts_at, timeZone).date))].map(dayName);
-  return { status: "unclear", question: `Which day did you mean for **${event.title}**: ${options.join(" or ")}?` };
+  const options = dayNames([...new Set(readings.map((r) => localDateTime(r.starts_at, timeZone).date))], refYear);
+  return { status: "unclear", question: `Which day did you mean for **${event.title}**: ${options}?` };
 }
 
 /** Same title, ignoring case, emoji and punctuation. */
@@ -1454,10 +1541,10 @@ const MOVE_WORD_ANYWHERE = /\b(move|moved|reschedule|postpone|shift|push (?:it )
  * Words that ask to change something that exists. "Get rid of", "take ... off my calendar",
  * "rebook", "scratch", "nix", "erase", "unschedule" and an arrow ("team sync -> Friday") were
  * missing until the review of 24 Nov 2026, so the model's correct cancel or move was left out.
- * "Take the day off" is not about an event.
+ * "Take the day off" is not about an event, nor "from scratch" ("Redo the slides from scratch").
  */
 const CHANGE_WORD_ANYWHERE =
-  /\b(move[sd]?|moving|reschedul\w*|postpon\w*|shift\w*|push\w*|delay\w*|prepone|cancel\w*|delet\w*|remov\w*|call off|scrap|drop\w*|chang\w*|updat\w*|edit|modif\w*|adjust\w*|switch|replace|rearrang\w*|bump|rename|swap|skip|free up|clear|later|earlier|instead|longer|shorter|extend|lengthen|shorten|(?:start|begin|end|finish)(?:s|es|ing)? at|can't make|cannot make|won't make|get(?:ting)? rid of|re-?book\w*|scratch|nix|erase|unschedul\w*|tak(?:e|es|ing) (?:the|my|our|this|that|it)\b(?:\s+[\w'-]+){0,4}?(?<!\b(?:day|days|time|week|weekend|morning|afternoon|evening|night))\s+(?:off|out of)(?!\s+(?:work|school|sick)\b))\b|->|=>|→/;
+  /\b(move[sd]?|moving|reschedul\w*|postpon\w*|shift\w*|push\w*|delay\w*|prepone|cancel\w*|delet\w*|remov\w*|call off|scrap|drop\w*|chang\w*|updat\w*|edit|modif\w*|adjust\w*|switch|replace|rearrang\w*|bump|rename|swap|skip|free up|clear|later|earlier|instead|longer|shorter|extend|lengthen|shorten|(?:start|begin|end|finish)(?:s|es|ing)? at|can't make|cannot make|won't make|get(?:ting)? rid of|re-?book\w*|(?<!\bfrom )scratch|nix|erase|unschedul\w*|tak(?:e|es|ing) (?:the|my|our|this|that|it)\b(?:\s+[\w'-]+){0,4}?(?<!\b(?:day|days|time|week|weekend|morning|afternoon|evening|night))\s+(?:off|out of)(?!\s+(?:work|school|sick)\b))\b|->|=>|→/;
 /** "Don't cancel the team sync", "I do not want to move the lecture", "never reschedule ...". */
 const NEGATED_CHANGE_RE =
   /\b(?:don't|dont|do not|never|not|no need to|without)\s+(?:\w+\s+){0,3}?(?:mov\w*|reschedul\w*|cancel\w*|delet\w*|remov\w*|postpon\w*|shift\w*|push\w*|chang\w*|drop\w*|touch\w*|get(?:ting)? rid|tak(?:e|es|ing)|re-?book\w*|scratch\w*|nix\w*|eras\w*|unschedul\w*)\b/;
@@ -1474,19 +1561,30 @@ const ADVICE_QUESTION_RE = new RegExp(
 const IF_QUESTION_RE = new RegExp(`^(?:${FILLER},?\\s+){0,3}if\\s+(?:i|we)\\b`);
 /** "I can't cancel the team sync, right?": a tag question (read on the message with its question mark). */
 const TAG_QUESTION_RE = /,\s*(?:right|correct|yes|no|isn't it|is it|don't i|do i|can i|can't i|won't it|will it|okay|ok)\s*\?\s*$/;
-/** "Not sure if I should cancel ...", "I'm thinking about moving ...", "... would be bad": a thought, not a request. */
+/**
+ * "Not sure if I should cancel ...", "I'm thinking about moving ...", "... would be bad": a thought,
+ * not a request. "I'm thinking the team sync should move to 8 pm" is not one by itself: "thinking"
+ * counts only with about, of, if or whether.
+ */
 const TENTATIVE_RE =
-  /\b(?:i|we)\s+(?:might|may|could)\s+(?:\w+\s+){0,2}?(?:mov|cancel|reschedul|postpon|shift|push|drop|delet|remov)\w*|\bnot sure (?:if|whether|about)\b|\b(?:i'm|i am|we're|we are|been)\s+(?:thinking|wondering)\b|\b(?:thinking|wondering) (?:about|of|if|whether)\b|\bwould be (?:bad|a problem|annoying|a shame|a pity|terrible)\b/;
+  /\b(?:i|we)\s+(?:might|may|could)\s+(?:\w+\s+){0,2}?(?:mov|cancel|reschedul|postpon|shift|push|drop|delet|remov)\w*|\bnot sure (?:if|whether|about)\b|\b(?:thinking|wondering) (?:about|of|if|whether)\b|\bwould be (?:bad|a problem|annoying|a shame|a pity|terrible)\b/;
+/**
+ * An explicit go-ahead next to a question or a thought ("Should the team sync be moved to 8 pm? Yes
+ * please do it", "I'm thinking it should move to 8 pm, go ahead"): the message asks for the change
+ * after all (reviewer of 24 Nov 2026). "Should I do it?", "don't do it" and "Yes or no?" are not one.
+ */
+const GO_AHEAD_RE =
+  /(?<!\b(?:i|we|you|to|should|shall|could|can|would|will|might|must|not|never|don't|dont|do not|didn't|won't|can't)\s)\b(?:do (?:it|that|this)|go ahead|go for it|make it so|make that change)\b|[?.!]\s*(?:yes|yeah|yep|sure)\b(?!\s+or\b)(?!\s*\?)/;
 /** Words that allow a time between 00:00 and 05:59. */
 const EARLY_OK = /\b(\d{1,2}(?::\d{2})? ?am|morning|early|night|midnight|0[0-5]:\d{2}|[0-5]:\d{2})\b/;
 
-function describe(event: KnownEvent, timeZone: string): string {
-  return `**${event.title}** (${describeLocal(event.starts_at, timeZone)})`;
+function describe(event: KnownEvent, timeZone: string, refYear?: string): string {
+  return `**${event.title}** (${describeLocal(event.starts_at, timeZone, refYear)})`;
 }
 
-function describeLocal(iso: string, timeZone: string): string {
+function describeLocal(iso: string, timeZone: string, refYear?: string): string {
   const local = localDateTime(iso, timeZone);
-  return `${dayName(local.date)}, ${hhmm(local.minutes)}`;
+  return `${dayName(local.date, refYear)}, ${hhmm(local.minutes)}`;
 }
 
 /** MONDAY's last reply in the chat and the user message it answered (see reconcileCalendarChanges). */
@@ -1509,6 +1607,34 @@ export function previousTurnOf(history: readonly { role: string; content?: unkno
     return { assistant: String(list[i].content ?? "") };
   }
   return {};
+}
+
+/**
+ * MONDAY's own questions about one event, as resolveMove and reconcileCalendarChanges word them:
+ * "... should **X** move to?", "Did you mean 8:00 AM or 8:00 PM for **X**?", "Which day did you
+ * mean for **X**: ...?", "The AI model proposed ... for **X**, which is not the time you gave".
+ */
+const ASKED_EVENT_RE =
+  /\bshould \*\*([^*\n]+)\*\* move to\?|\bdid you mean(?: [^?\n]*?)? for \*\*([^*\n]+)\*\*(?::[^?\n]*)?\?|\bproposed [^\n]*? for \*\*([^*\n]+)\*\*, which (?:does not look like what you asked for|is not a day your message names|is not the time you gave)\b/i;
+/** MONDAY's own list of the events a request matched (group 1 holds the list). */
+const WHICH_EVENT_LIST_RE = /(?:\bmore than one event matches "[^\n]*?"|\bi am not sure which event you mean):([^\n]*?)(?:which one do you mean\?|please name it\.)/i;
+/** Words of an answer that give a day, a time or a position in a list, not an event. */
+const ANSWER_WORD_RE = new RegExp(
+  `^(?:${WEEKDAY_RE.slice(1, -1)}|${MONTH_RE.slice(1, -1)}|\\d+(?:st|nd|rd|th)?|morning|afternoon|evening|night|tonight|noon|midday|midnight|week|weekend|hour|hr|minute|min|half|quarter|past|first|second|third|former|latter|last)$`,
+);
+/** Things people do that name an event of their own ("gym", "lunch"), from CALENDAR_WORDS_RE. */
+const ACTIVITY_WORDS = new Set(["sync", "lecture", "interview", "lunch", "dinner", "breakfast", "workout", "gym", "standup", "dentist", "doctor"]);
+
+/**
+ * Does an answer name something other than the events MONDAY asked about ("Gym Friday at 6 pm",
+ * "8 pm, after the lecture")? Then it is a new request, not an answer.
+ */
+function namesSomethingElse(answer: string, asked: KnownEvent[], events: KnownEvent[]): boolean {
+  const own = new Set(asked.flatMap((event) => titleWords(event.title)));
+  const others = new Set(events.filter((event) => !asked.includes(event)).flatMap((event) => titleWords(event.title)));
+  return titleWords(answer).some(
+    (word) => !own.has(word) && !GENERIC_NOUNS.has(word) && !ANSWER_WORD_RE.test(word) && (others.has(word) || ACTIVITY_WORDS.has(word)),
+  );
 }
 
 /** An answer to MONDAY's own question back, read together with the request it answers. */
@@ -1559,10 +1685,13 @@ function pickCandidate(answer: string, candidates: KnownEvent[], today: string, 
 /** "the second one" after "Did you mean 8:00 AM or 8:00 PM ...?" or "Which day did you mean ...: A or B?": that option's words. */
 function chosenOption(answer: string, question: string): string | null {
   const ordinal = /^(?:(?:yes|ok|okay|sure),?\s+)?(?:the\s+)?(first|1st|second|2nd|former|latter|last)(?:\s+(?:one|option))?$/.exec(answer);
-  if (!ordinal) return null;
+  // "Yes" to a question with one option ("Did you mean Sun, May 30, 2027 for **X**?").
+  const yes = /^(?:yes|yeah|yep|yup|sure|correct|right|exactly|that's right|that one)(?:,?\s+(?:please|that's right|correct|exactly|go ahead|do it|that one|that date))*$/.test(answer);
+  if (!ordinal && !yes) return null;
   const listed = /did you mean (.+?) for \*\*/i.exec(question)?.[1] ?? /did you mean for \*\*[^*]+\*\*:\s*([^?]+)\?/i.exec(question)?.[1];
   if (!listed) return null;
   const options = listed.split(/\s+or\s+/);
+  if (!ordinal) return options.length === 1 ? normalizeRequest(options[0]) : null;
   const index = /first|1st|former/.test(ordinal[1]) ? 0 : /second|2nd/.test(ordinal[1]) ? 1 : options.length - 1;
   return options[index] ? normalizeRequest(options[index]) : null;
 }
@@ -1633,22 +1762,42 @@ function readFollowUp(
 ): FollowUp | null {
   const question = previous.assistant ?? "";
   if (!followsUpOnAction(question, message)) return null;
+  const answer = normalizeRequest(message);
   // MONDAY's own question about where one event should move ("Which day and time should **X**
   // move to?", "Did you mean 8:00 AM or 8:00 PM for **X**?", "Which day did you mean for **X**:
-  // ...?") is about that event, whatever else the reply names in bold.
-  const asked = /\bshould \*\*([^*\n]+)\*\* move to\?|\bfor \*\*([^*\n]+)\*\*(?::[^?\n]*)?\?/i.exec(question);
-  const askedEvent = asked ? events.find((e) => sameTitle(e.title, asked[1] ?? asked[2])) : undefined;
+  // ...?", "The AI model proposed ... for **X**, which is not the time you gave. ...") is about
+  // that event, whatever else the reply names in bold.
+  const asked = ASKED_EVENT_RE.exec(question);
+  const askedTitle = asked?.slice(1).find(Boolean);
+  const askedEvent = askedTitle ? events.find((e) => sameTitle(e.title, askedTitle)) : undefined;
+  // MONDAY's own list when a request matched several events ("More than one event matches ...:
+  // **A** (...), **B** (...). Which one do you mean?").
+  const list = askedEvent ? null : WHICH_EVENT_LIST_RE.exec(question);
+  // Anything else is free model text or the "nothing was added" notice: a bold name there is not
+  // a question about that event (review of 24 Nov 2026: "Cancel it" after "Your **Dentist
+  // appointment** is on Thursday. Which day works best for the gym session?" gave a by-rule
+  // cancel of the appointment). Then only a bare day or time ("Friday at 1 pm") is read as an
+  // answer, and it keeps nothing but the model's own move of that event at that day and time; a
+  // request of its own ("Cancel it", "Move it to Friday at 6 pm") is read as usual.
+  const ownQuestion = Boolean(askedEvent || list);
+  if (!ownQuestion && current) return null;
   const candidates: KnownEvent[] = askedEvent ? [askedEvent] : [];
   if (!askedEvent) {
-    for (const bold of question.matchAll(/\*\*([^*\n]+)\*\*/g)) {
+    for (const bold of (list?.[1] ?? question).matchAll(/\*\*([^*\n]+)\*\*/g)) {
       const event = events.find((e) => sameTitle(e.title, bold[1]));
       if (event && !candidates.includes(event)) candidates.push(event);
     }
   }
   if (candidates.length === 0) return null;
-  const answer = normalizeRequest(message);
+  // "Gym Friday at 6 pm" names something else: a new request, not an answer about these events.
+  if (namesSomethingElse(answer, candidates, events)) return null;
   const target = candidates.length === 1 ? candidates[0] : pickCandidate(answer, candidates, today, timeZone);
   if (!target) return null;
+  if (!ownQuestion) {
+    const said = readDestination(answer, today);
+    const timeAnswer = Boolean(said.day || said.start || said.shiftMin !== undefined || said.weekStart);
+    return timeAnswer ? { target, timeAnswer, clock: said.start?.minutes } : null;
+  }
   // The request that MONDAY's reply answered, unless it named another event.
   let base = previous.user ? parseChangeRequest(previous.user, today) : null;
   if (base) {
@@ -1711,6 +1860,8 @@ export function reconcileCalendarChanges(opts: {
   const { message, timeZone, nowMs, events } = opts;
   const text = normalizeRequest(message);
   const log: string[] = [];
+  // Dates in another year are shown with their year in notes and questions.
+  const refYear = opts.today.slice(0, 4);
   // A proposal that is an event already in the calendar (same title, same time) is not new.
   let proposals = opts.modelProposals.filter((proposal) => {
     const duplicate = events.some(
@@ -1776,9 +1927,9 @@ export function reconcileCalendarChanges(opts: {
     if (start === Date.parse(event.starts_at) && end === Date.parse(event.ends_at)) {
       return `**${event.title}** is already at that time.`;
     }
-    if (start < nowMs) return `The new time for **${event.title}** (${describeLocal(startsAt, timeZone)}) has already passed.`;
+    if (start < nowMs) return `The new time for **${event.title}** (${describeLocal(startsAt, timeZone, refYear)}) has already passed.`;
     if (!byRule && localDateTime(startsAt, timeZone).minutes < 6 * 60 && !EARLY_OK.test(text)) {
-      return `The AI model proposed ${describeLocal(startsAt, timeZone)} for **${event.title}**, which does not look like what you asked for, so I did not offer it. Please say the day and time you want.`;
+      return `The AI model proposed ${describeLocal(startsAt, timeZone, refYear)} for **${event.title}**, which does not look like what you asked for, so I did not offer it. Please say the day and time you want.`;
     }
     return null;
   };
@@ -1804,13 +1955,15 @@ export function reconcileCalendarChanges(opts: {
       OTHER_ACTION_RE.test(text);
     const negated = NEGATED_CHANGE_RE.test(text);
     const raw = message.trim().toLowerCase().replace(/[‘’ʼ]/g, "'");
+    // An advice question or a thought is not a request, unless the message also says to go ahead.
     const question =
       /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) ||
       (/\?\s*$/.test(raw) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text)) ||
-      ADVICE_QUESTION_RE.test(text) ||
-      (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) ||
-      TAG_QUESTION_RE.test(raw) ||
-      TENTATIVE_RE.test(text);
+      ((ADVICE_QUESTION_RE.test(text) ||
+        (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) ||
+        TAG_QUESTION_RE.test(raw) ||
+        TENTATIVE_RE.test(text)) &&
+        !GO_AHEAD_RE.test(raw));
     // "Move on", "moving forward with ..." and "Push workout" are not about changing an event.
     const withoutIdioms = text.replace(NOUN_USE_RE, " ").replace(/\bmov(?:e|ing) (?:on|over|out|along|away|in|(?:forward|ahead) with)\b/g, " ");
     const asksChange = acceptChanges && !creating && !negated && !question && (Boolean(followUp) || CHANGE_WORD_ANYWHERE.test(withoutIdioms));
@@ -1885,13 +2038,13 @@ export function reconcileCalendarChanges(opts: {
         }
         const newDay = localDateTime(startsAt, timeZone).date;
         if (namedDates.size > 0 && !namedDates.has(newDay)) {
-          note = `The AI model proposed ${dayName(newDay)} for **${change.event.title}**, which is not a day your message names. Which day and time should it move to?`;
+          note = `The AI model proposed ${dayName(newDay, refYear)} for **${change.event.title}**, which is not a day your message names. Which day and time should it move to?`;
           log.push(`dropped a model update of "${change.event.title}" to ${newDay}: the message names ${[...namedDates].join(", ")}`);
           continue;
         }
         // "8 pm" as an answer: the model's move must be at that time.
         if (followUp?.clock && !followUp.clock.includes(localDateTime(startsAt, timeZone).minutes)) {
-          note = `The AI model proposed ${describeLocal(startsAt, timeZone)} for **${change.event.title}**, which is not the time you gave. Which day and time should it move to?`;
+          note = `The AI model proposed ${describeLocal(startsAt, timeZone, refYear)} for **${change.event.title}**, which is not the time you gave. Which day and time should it move to?`;
           log.push(`dropped a model update of "${change.event.title}" to ${startsAt}: the answer gives another time`);
           continue;
         }
@@ -1913,7 +2066,7 @@ export function reconcileCalendarChanges(opts: {
       const advice = mentioned(first.event)
         ? `If you want that, please say so, for example "${example}".`
         : `To ${first.kind === "delete" ? "cancel" : "move"} an event, name it, for example "${example}".`;
-      note = `The AI model also suggested ${verb} ${unasked.map((u) => describe(u.event, timeZone)).join(", ")}. I did not read your message as asking for that, so I left it out. ${advice}`;
+      note = `The AI model also suggested ${verb} ${unasked.map((u) => describe(u.event, timeZone, refYear)).join(", ")}. I did not read your message as asking for that, so I left it out. ${advice}`;
     } else if (!note && changes.length === 0 && (opts.unknownChangeRefs ?? 0) > 0) {
       note = "The AI model referred to an event that is not in your calendar, so there is no change to save.";
     }
@@ -1946,7 +2099,7 @@ export function reconcileCalendarChanges(opts: {
     if (!modelUpdate && modelProposal) {
       log.push(`the model proposed "${modelProposal.title}" as a new event; treated as a move of the existing event`);
     }
-    const resolved = resolveMove(req, target, timeZone, suggestion);
+    const resolved = resolveMove(req, target, timeZone, suggestion, opts.today);
     if (resolved.status === "unclear") return finish(target, [], resolved.question);
     if (
       suggestion &&
@@ -1994,7 +2147,7 @@ export function reconcileCalendarChanges(opts: {
       return finish(
         null,
         [],
-        `Your message names ${list.length} events: ${list.map((e) => describe(e, timeZone)).join(", ")}. I prepare one change at a time, so please send one message per event, for example "${example}".`,
+        `Your message names ${list.length} events: ${list.map((e) => describe(e, timeZone, refYear)).join(", ")}. I prepare one change at a time, so please send one message per event, for example "${example}".`,
       );
     }
   }
@@ -2023,7 +2176,7 @@ export function reconcileCalendarChanges(opts: {
     return finish(
       null,
       [],
-      `More than one event matches "${subject}": ${match.candidates.map((e) => describe(e, timeZone)).join(", ")}. Which one do you mean?`,
+      `More than one event matches "${subject}": ${match.candidates.map((e) => describe(e, timeZone, refYear)).join(", ")}. Which one do you mean?`,
     );
   }
   let target: KnownEvent | null = null;
@@ -2056,7 +2209,7 @@ export function reconcileCalendarChanges(opts: {
     if (unnamed && referenced.size === 1) {
       target = [...referenced.values()][0];
     } else if (unnamed && referenced.size > 1) {
-      return finish(null, [], `I am not sure which event you mean: ${[...referenced.values()].map((e) => describe(e, timeZone)).join(", ")}. Please name it.`);
+      return finish(null, [], `I am not sure which event you mean: ${[...referenced.values()].map((e) => describe(e, timeZone, refYear)).join(", ")}. Please name it.`);
     } else if (!unnamed && (match.similar.length > 0 || mentionsCalendar(request.subject) || opts.modelChanges.length > 0 || (opts.unknownChangeRefs ?? 0) > 0)) {
       // A move or cancel of something that is not in the calendar under that name: no card. A NEW
       // event with that name is not what was asked for either ("Move my yoga class to 6 pm" must
@@ -2072,7 +2225,7 @@ export function reconcileCalendarChanges(opts: {
       const closest = match.similar.length > 0 ? match.similar : [...referenced.values()].slice(0, 3);
       const hint =
         closest.length > 0
-          ? ` The closest ${closest.length === 1 ? "is" : "are"} ${closest.map((e) => describe(e, timeZone)).join(", ")}. To ${request.kind} ${closest.length === 1 ? "it" : "one of them"}, name it as it is in the calendar.`
+          ? ` The closest ${closest.length === 1 ? "is" : "are"} ${closest.map((e) => describe(e, timeZone, refYear)).join(", ")}. To ${request.kind} ${closest.length === 1 ? "it" : "one of them"}, name it as it is in the calendar.`
           : "";
       // As the message named it, with the day or time it gave ("the dentist appointment on friday").
       const dayText = request.sourceDay?.text ?? "";
@@ -2102,5 +2255,17 @@ export function reconcileCalendarChanges(opts: {
 export function asksToSend(message: string): boolean {
   if (asksForInformation(message)) return false;
   const text = normalizeRequest(message).replace(/^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/, "");
-  return OUTBOUND_RE.test(text) && !NOUN_USE_OUTBOUND_RE.test(text);
+  // A request to move or cancel an event is a calendar request, whatever else it says.
+  if (findChangeVerbs(text).length > 0) return false;
+  // "Forward the email to Sam" sends it too (reviewer of 24 Nov 2026).
+  if (!OUTBOUND_RE.test(text) && !FORWARD_RE.test(text)) return false;
+  if (NOUN_USE_OUTBOUND_RE.test(text)) return false;
+  // "Send the dentist appointment to Friday": to a day or a time, not to someone, so it is a move.
+  return !SEND_TO_DAY_RE.test(text);
 }
+/** "Forward the email to Sam", "Fwd the invite to Ana"; "Forward me the email" asks for it in the chat. */
+const FORWARD_RE = new RegExp(`${MESSAGE_START}(?:forward|fwd)\\b(?!\\s+me\\b)`);
+/** A send verb whose "to" names a day or a time ("Send the team sync to next week", "Text it to 5 pm"). */
+const SEND_TO_DAY_RE = new RegExp(
+  `\\bto\\s+(?:(?:the\\s+)?(?:same\\s+day|day after|${WEEKDAY_RE}\\b|${MONTH_RE}\\b)|today|tonight|tomorrow|next\\s+(?:week|month|${WEEKDAY_RE})\\b|this\\s+(?:week|month|${WEEKDAY_RE})\\b|noon\\b|midnight\\b|\\d{1,2}(?:[:.h]\\d{2})?\\s?(?:am|pm)\\b|\\d{1,2}[:h]\\d{2}\\b)`,
+);

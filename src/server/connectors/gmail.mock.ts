@@ -42,8 +42,12 @@ export function fetchMockEmails(requestedTimeZone?: string, nowMs: number = Date
   const eveningBefore = at(addDaysISO(interviewDate, -1), 18);
   const prepDue =
     Date.parse(eveningBefore) > nowMs ? eveningBefore : new Date(Date.parse(interview.starts_at) - 2 * 3600000).toISOString();
-  // "This Saturday": the next Saturday, today included.
-  const saturday = addDaysISO(today, (6 - new Date(`${today}T12:00:00Z`).getUTCDay() + 7) % 7);
+  // Lunch on the next Saturday at 1 PM that is still ahead: today until 1 PM on a Saturday, then
+  // the Saturday after, which the texts call "next Saturday" (reviewer of 24 Nov 2026: on a
+  // Saturday evening the deadline was already over).
+  let saturday = addDaysISO(today, (6 - new Date(`${today}T12:00:00Z`).getUTCDay() + 7) % 7);
+  if (Date.parse(at(saturday, 13)) <= nowMs) saturday = addDaysISO(saturday, 7);
+  const lunchDay = saturday >= addDaysISO(today, 7) ? "next Saturday" : "this Saturday";
 
   return [
     {
@@ -67,8 +71,8 @@ export function fetchMockEmails(requestedTimeZone?: string, nowMs: number = Date
     {
       id: "e3",
       from: "Sam (friend)",
-      subject: "Lunch this Saturday?",
-      snippet: "Free for lunch this Saturday around 1pm? Let me know!",
+      subject: `Lunch ${lunchDay}?`,
+      snippet: `Free for lunch ${lunchDay} around 1pm? Let me know!`,
       receivedAt: hoursAgo(11),
       unread: true,
       extractedTask: { title: "Lunch with Sam", deadline: at(saturday, 13), importance: "low" },

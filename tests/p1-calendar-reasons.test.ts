@@ -162,6 +162,35 @@ describe("a time in the reason is not the new time", () => {
         .next?.starts_at,
     ).toBe(zrh("2026-11-26", 15));
   });
+
+  // Reviewer of 24 Nov 2026: a relative clause that names the event was cut off as a reason, and
+  // the destination after it with it, so the request got no card and no note at all.
+  it.each([
+    ["Move the team sync, the meeting that is at 7 pm, to 8 pm", "sync", zrh("2026-11-24", 20)],
+    [
+      "Move the dentist appointment, the appointment that is on Thursday, to Friday",
+      "dentist",
+      zrh("2026-11-27", 14),
+    ],
+    ["Move the team sync (the meeting which is at 7 pm) to 8 pm", "sync", zrh("2026-11-24", 20)],
+  ])("reads a relative clause about the event as part of its name: %s", (message, id, start) => {
+    const result = reconcile(message);
+    expect(result.note).toBeUndefined();
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]).toMatchObject({
+      event: { id },
+      byRule: true,
+      next: { starts_at: start },
+    });
+  });
+
+  it("still cuts a sentence about something else with a relative clause in it", () => {
+    // No new time follows the clause: it is the reason, and 4 pm is not the new time.
+    const result = reconcile(
+      "Move the dentist appointment to Friday, the lecture that I have is at 4 pm",
+    );
+    expect(result.changes[0].next?.starts_at).toBe(zrh("2026-11-27", 14));
+  });
 });
 
 describe("a limit on the new time is not the new time", () => {
