@@ -260,7 +260,7 @@ export function unquoted(sentence: string): string {
  * moved to 7 PM", "Stripe says your invoice has been sent", "according to Sam's message ...".
  */
 const ATTRIBUTION =
-  /\b(?:says?|said|wrote|writes|mentions?|mentioned|reports?|reported|according\s+to|per\s+(?:the|his|her|their|your)\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
+  /\b(?:says?|said|wrote|writes|mentions?|mentioned|according\s+to|per\s+(?:the|his|her|their|your)\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
 
 /**
  * `actionRequest`: the user asked for something new or for a change (see ACTION_REQUEST_CLAIMS).
