@@ -28,11 +28,14 @@ const google = vi.hoisted(() => ({
   events: [] as Array<{ id: string; title: string; starts_at: string; ends_at: string; busy?: boolean }>,
   inserted: [] as Array<Record<string, unknown>>,
   drafts: [] as Array<Record<string, unknown>>,
+  /** When set, the Google Calendar insert fails with this raw message (as calendar.server did). */
+  insertError: null as string | null,
 }));
 
 vi.mock("@/server/google/calendar.server", () => ({
   listCalendarEvents: async () => google.events,
   insertCalendarEvent: async (_userId: string, event: Record<string, unknown>) => {
+    if (google.insertError) throw new Error(google.insertError);
     const created = { id: `g-${google.inserted.length + 1}`, ...event };
     google.inserted.push(created);
     google.events.push(created as (typeof google.events)[number]);
@@ -50,6 +53,7 @@ vi.mock("@/server/google/gmail.server", () => ({
 
 import {
   createCalendarBlock,
+  GOOGLE_NOT_CONNECTED_MESSAGE,
   isGoogleConnected,
   NO_RECIPIENT,
   NOT_RECORDED_NOTE,
@@ -162,6 +166,7 @@ beforeEach(() => {
   google.events = [];
   google.inserted = [];
   google.drafts = [];
+  google.insertError = null;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -296,6 +301,19 @@ describe("the recipient of a planner draft (44)", () => {
     expect(to).toEqual(["prof@uni.example", NO_RECIPIENT, "a@b.example Bcc: x@y.example"]);
   });
 
+  it("a cleared To field means no recipient, not the planner's address", async () => {
+    const db = fakeUserClient();
+    const email = action({ id: 16, action_type: "email_draft", email_to: "prof@uni.example" });
+    await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, to: "", record: recorder().record });
+    // Left untouched (no `to` sent), the planner's address is still used.
+    const untouched = action({ id: 17, action_type: "email_draft", email_to: "prof@uni.example" });
+    await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: untouched, timeZone: ZRH, nowMs: NOW, record: recorder().record });
+    // A pasted tab is one more space, like a line break.
+    const tabbed = action({ id: 18, action_type: "email_draft", email_to: null });
+    await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: tabbed, timeZone: ZRH, nowMs: NOW, to: "sam@uni.example\t", record: recorder().record });
+    expect(db.tables.email_drafts.map((row) => row.to_address)).toEqual([NO_RECIPIENT, "prof@uni.example", "sam@uni.example"]);
+  });
+
   it("passes the typed recipient to Gmail when Google is connected", async () => {
     admin.googleRow = { user_id: USER };
     const db = fakeUserClient();
@@ -326,6 +344,50 @@ describe("errors that reach the page (50)", () => {
     expect(userFacingMessage(new TypeError("Cannot read properties of undefined (reading 'id')"), "Try again.", "t")).toBe("Try again.");
     expect(userFacingMessage({ code: "22P02", message: "invalid input syntax for type uuid" }, "Try again.", "t")).toBe("Try again.");
     expect(userFacingMessage(new Response("Chat session not found", { status: 404 }), "Try again.", "t")).toBe("Try again.");
+  });
+
+  it("on the hosted sites, raw Google errors and internal codes become plain sentences (69)", () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    const raw = [
+      'Calendar insert failed: 403 {"error":{"code":403,"message":"Insufficient Permission"}}',
+      "Draft create failed: 400 Invalid To header",
+      "Gmail list failed: 401 Request had invalid authentication credentials.",
+      "Token refresh failed (400)",
+      "GOOGLE_CLIENT_ID is not configured",
+    ];
+    for (const message of raw) expect(userFacingMessage(new Error(message), "Try again.", "t")).toBe("Try again.");
+    expect(userFacingMessage(new Error("GOOGLE_NOT_CONNECTED"), "Try again.", "t")).toBe(GOOGLE_NOT_CONNECTED_MESSAGE);
+    // The Google clients' visitor sentences and the app's own sentences still pass.
+    expect(userFacingMessage(new Error("Google Calendar could not add the event right now (HTTP 503). Please try again in a moment."), "x", "t")).toMatch(/^Google Calendar could not/);
+    expect(userFacingMessage(new Error('This time overlaps "API_KEY review" (6:00 PM–7:00 PM).'), "x", "t")).toMatch(/^This time overlaps/);
+  });
+
+  it("a local run keeps Google's detail for the developer", () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "");
+    const message = "Calendar insert failed: 403 Insufficient Permission";
+    expect(userFacingMessage(new Error(message), "Try again.", "t")).toBe(message);
+  });
+
+  it("a Google Calendar failure while running an action shows no raw answer (69)", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    admin.googleRow = { user_id: USER };
+    google.insertError = 'Calendar insert failed: 403 {"error":{"message":"Insufficient Permission"}}';
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: fakeUserClient().client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r).toEqual({ ok: false, message: "Could not carry out this action. Please try again." });
+    expect(rec.record).not.toHaveBeenCalled();
+  });
+
+  it("a Gmail draft whose record could not be saved still counts as saved, so Run is not repeated (69)", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient({ failInsertInto: "email_drafts" });
+    const email = action({ id: 19, action_type: "email_draft", title: "Reschedule", email_subject: "Move our meeting?" });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
+    expect(google.drafts).toHaveLength(1);
+    // The planner records it as executed, so the action no longer offers Run.
+    expect(rec.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
   });
 });
 

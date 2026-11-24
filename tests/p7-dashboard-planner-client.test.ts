@@ -252,6 +252,33 @@ describe("the planner dashboard read (68)", () => {
     expect(data.metrics.total_actions).toBe(300);
   });
 
+  it("keeps the old actions and tasks that still wait for the user when it cuts the list", () => {
+    // An older planner sends everything: two old open actions and 100 newer finished ones.
+    const actions = [
+      { ...action(1), status: "approved" },
+      { ...action(2), status: "pending" },
+      { ...action(3), status: "failed" },
+      ...Array.from({ length: 100 }, (_, i) => ({ ...action(i + 10), status: i % 2 ? "executed" : "rejected" })),
+    ];
+    const tasks = [
+      { id: 1, title: "Old open task", status: "in_progress" },
+      { id: 2, title: "Old pending task", status: "pending" },
+      ...Array.from({ length: 100 }, (_, i) => ({ id: i + 10, title: `Done ${i}`, status: "done" })),
+    ];
+    const data = boundPlannerDashboard({ metrics: {}, tasks, actions, next_best_actions: [], last_plan: null });
+
+    expect(data.actions).toHaveLength(PLANNER_DASHBOARD_LIMIT);
+    expect(data.actions.slice(0, 3).map((a) => [a.id, a.status])).toEqual([
+      [2, "pending"],
+      [1, "approved"],
+      [3, "failed"],
+    ]);
+    // Then the finished ones, newest first.
+    expect(data.actions[3].id).toBe(109);
+    expect(data.tasks.slice(0, 2).map((t) => t.id)).toEqual([2, 1]);
+    expect(data.tasks[2].id).toBe(109);
+  });
+
   it("an answer without the lists counts as the service failing", () => {
     expect(() => boundPlannerDashboard({ status: 500, unhandled: true })).toThrow(BackendUnavailableError);
   });
@@ -309,6 +336,7 @@ describe("one 'Plan it' at a time (100, 11)", () => {
   type Row = Record<string, unknown>;
   const NOW = Date.parse("2026-11-24T10:00:00Z");
   const WINDOW = 300_000;
+  const allowAll = async () => {};
 
   /** planner_requests rows in memory, with the calls startPlanRequest makes; optionally the unique index. */
   function fakeRequests(rows: Row[], opts: { uniqueRunning?: boolean } = {}) {
@@ -368,7 +396,7 @@ describe("one 'Plan it' at a time (100, 11)", () => {
   it("refuses a second request while one is running, before the allowance and the insert", async () => {
     const rows: Row[] = [{ id: "old", user_id: "u1", status: "running", created_at: new Date(NOW - 30_000).toISOString() }];
     const allowance = vi.fn(async () => {});
-    await expect(startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, beforeInsert: allowance, nowMs: NOW })).rejects.toThrow(
+    await expect(startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, enforceAllowance: allowance, nowMs: NOW })).rejects.toThrow(
       PLAN_ALREADY_RUNNING,
     );
     expect(allowance).not.toHaveBeenCalled();
@@ -384,7 +412,7 @@ describe("one 'Plan it' at a time (100, 11)", () => {
     const error = await failure(
       startPlanRequest(fakeRequests(rows, { uniqueRunning: true }), "u1", "Plan my week", {
         windowMs: WINDOW,
-        beforeInsert: allowance,
+        enforceAllowance: allowance,
         nowMs: NOW,
       }),
     );
@@ -395,7 +423,7 @@ describe("one 'Plan it' at a time (100, 11)", () => {
 
   it("closes a request the host cut off, so the unique index does not block the next one", async () => {
     const rows: Row[] = [{ id: "stale", user_id: "u1", status: "running", created_at: new Date(NOW - WINDOW - 1_000).toISOString() }];
-    const row = await startPlanRequest(fakeRequests(rows, { uniqueRunning: true }), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW });
+    const row = await startPlanRequest(fakeRequests(rows, { uniqueRunning: true }), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: allowAll });
     expect(row.status).toBe("running");
     expect(rows[0]).toMatchObject({ status: "failed", error: INTERRUPTED_TEXT });
     expect(rows.filter((r) => r.status === "running")).toHaveLength(1);
@@ -406,12 +434,23 @@ describe("one 'Plan it' at a time (100, 11)", () => {
     const refuse = vi.fn(async () => {
       throw new Error("You have reached this demo's limit of 6 planner requests per hour. Please try again later.");
     });
-    await expect(startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, beforeInsert: refuse, nowMs: NOW })).rejects.toThrow(
+    await expect(startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, enforceAllowance: refuse, nowMs: NOW })).rejects.toThrow(
       /limit of 6 planner requests/,
     );
     expect(rows).toHaveLength(1);
-    const allowed = await startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW });
+    const allowed = await startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: allowAll });
     expect(allowed).toMatchObject({ input: "Plan my week", status: "running" });
+  });
+
+  it("records one 'planner' use per request, also when the planner is off and the in-app assistant answers", async () => {
+    // The assistant's chat turn only checks the chat allowance, so with the planner switched off
+    // a press recorded no use at all.
+    vi.stubEnv("LIFEOPS_BACKEND_URL", "off");
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    const enforce = vi.fn(async () => {});
+    await startPlanRequest(fakeRequests([]), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: enforce });
+    expect(enforce).toHaveBeenCalledTimes(1);
+    expect(enforce).toHaveBeenCalledWith(expect.anything(), "u1", "planner");
   });
 });
 

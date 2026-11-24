@@ -13,11 +13,13 @@
  * A local run keeps the developer wording, because the reader there is the one who can fix it.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import type { Database } from "@/integrations/supabase/types";
 import { isRecord } from "@/lib/errors";
 import type { PlanRequestRow } from "@/lib/plan-request";
 import { isHostedDeployment } from "@/server/deployment.server";
 import { capToHostLimit } from "@/server/host-limit.server";
+import { enforceAiAllowance } from "@/server/limits.server";
 import { dbError, describeCause } from "@/server/public-error.server";
 import { localDateTime, normalizeTimeZone } from "@/server/timezone.server";
 
@@ -207,20 +209,38 @@ export function busyForPlanner(
     });
 }
 
-/** The newest planner tasks and actions the dashboard asks for (the planner may ignore it). */
+/** The most planner tasks and actions the dashboard asks for (the planner may ignore it). */
 export const PLANNER_DASHBOARD_LIMIT = 50;
 
-function newestFirst<T extends { id: number }>(items: unknown, limit: number): T[] {
+/**
+ * Open items first, in the planner's own order: actions that still wait for the user (pending,
+ * approved, failed) before finished ones (executed, rejected); tasks not yet done before done
+ * ones. An unknown status goes last.
+ */
+const ACTION_STATUS_ORDER = ["pending", "approved", "failed", "executed", "rejected"];
+const TASK_STATUS_ORDER = ["pending", "in_progress", "done"];
+
+function statusRank(order: string[], status: unknown): number {
+  const index = typeof status === "string" ? order.indexOf(status) : -1;
+  return index === -1 ? order.length : index;
+}
+
+/**
+ * At most `limit` items, open ones first and the newest first within a status. Cutting by id alone
+ * dropped an older action that still waited for approval while newer finished ones were kept.
+ */
+function openFirst<T extends { id: number; status: string }>(items: unknown, limit: number, order: string[]): T[] {
   if (!Array.isArray(items)) return [];
   return (items.filter((item) => isRecord(item) && typeof item.id === "number") as T[])
-    .sort((a, b) => b.id - a.id)
+    .sort((a, b) => statusRank(order, a.status) - statusRank(order, b.status) || b.id - a.id)
     .slice(0, limit);
 }
 
 /**
- * The planner's dashboard, bounded to the newest `limit` tasks and actions. An older planner
- * ignores the limit parameter and sends its whole history; the page never needs more than this.
- * An answer without the dashboard's lists is not the planner's: it counts as unavailable.
+ * The planner's dashboard, bounded to `limit` tasks and actions, open ones first (as the planner
+ * orders them itself). An older planner ignores the limit parameter and sends its whole history;
+ * the page never needs more than this. The metrics keep the planner's totals. An answer without
+ * the dashboard's lists is not the planner's: it counts as unavailable.
  */
 export function boundPlannerDashboard(value: unknown, limit: number = PLANNER_DASHBOARD_LIMIT): BackendDashboard {
   if (!isRecord(value) || !Array.isArray(value.actions) || !Array.isArray(value.tasks)) {
@@ -246,8 +266,8 @@ export function boundPlannerDashboard(value: unknown, limit: number = PLANNER_DA
     next_best_actions: (Array.isArray(value.next_best_actions) ? value.next_best_actions : [])
       .filter((task): task is BackendTask => isRecord(task) && typeof task.id === "number")
       .slice(0, limit),
-    tasks: newestFirst<BackendTask>(value.tasks, limit),
-    actions: newestFirst<BackendAction>(value.actions, limit),
+    tasks: openFirst<BackendTask>(value.tasks, limit, TASK_STATUS_ORDER),
+    actions: openFirst<BackendAction>(value.actions, limit, ACTION_STATUS_ORDER),
   };
 }
 
@@ -439,8 +459,13 @@ const REQUEST_COLUMNS = "id, input, status, result, error, created_at, finished_
 
 /**
  * Store a new "Plan it" request as running, one at a time per user: a second tab used to start a
- * second planner run (and spend a second AI request). `beforeInsert` runs after the checks and
- * before the row is stored (the demo's AI allowance), so a refused request leaves no row.
+ * second planner run (and spend a second AI request).
+ *
+ * Every request records one "planner" use of the demo's AI allowance (off unless the AI_*
+ * settings are set), after the checks and before the row is stored, so a refused request leaves
+ * no row. That holds whether the planner service or the in-app assistant answers it: the
+ * assistant's chat turn only checks the chat allowance and records no use of its own, so a press
+ * with the planner switched off was not counted at all. `enforceAllowance` is for tests.
  *
  * A request the host cut off is still "running" in the table, although the page shows it as
  * interrupted once `windowMs` has passed; it is closed first. Without that, the unique index on
@@ -451,7 +476,7 @@ export async function startPlanRequest(
   supabase: SupabaseClient<Database>,
   userId: string,
   input: string,
-  opts: { windowMs: number; beforeInsert?: () => Promise<void>; nowMs?: number },
+  opts: { windowMs: number; nowMs?: number; enforceAllowance?: typeof enforceAiAllowance },
 ): Promise<PlanRequestRow> {
   const now = opts.nowMs ?? Date.now();
   const cutoff = new Date(now - opts.windowMs).toISOString();
@@ -474,7 +499,7 @@ export async function startPlanRequest(
   if (runningError) throw dbError("check your running plan request", runningError);
   if (running) throw new Error(PLAN_ALREADY_RUNNING);
 
-  await opts.beforeInsert?.();
+  await (opts.enforceAllowance ?? enforceAiAllowance)(supabaseAdmin, userId, "planner");
 
   const { data: row, error: insertError } = await supabase
     .from("planner_requests")

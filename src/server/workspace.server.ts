@@ -17,14 +17,29 @@ import {
   toMs,
   type TimedEvent,
 } from "@/server/calendar/time-ranges.server";
+import { isHostedDeployment } from "@/server/deployment.server";
 import { dbError, describeCause } from "@/server/public-error.server";
 
 export type UserClient = SupabaseClient<Database>;
 
 /**
+ * Errors of the Google clients that carry Google's raw answer, an internal code or a setting name
+ * ("Calendar insert failed: 403 {...}", "Draft create failed: ...", "GOOGLE_NOT_CONNECTED",
+ * "GOOGLE_CLIENT_ID is not configured"). They are plain Errors, so without this check they reached
+ * the page as they were.
+ */
+const RAW_GOOGLE_ERROR =
+  /^(?:(?:Calendar (?:list|insert|patch|delete)|Draft create|Gmail list|Token (?:exchange|refresh)|Google token revocation) failed\b|Could not fetch original message\b|Gmail returned a draft without an ID\b|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b)/;
+
+/** Google was disconnected (or its access ended) between the check and the write. */
+export const GOOGLE_NOT_CONNECTED_MESSAGE =
+  "Your Google account is no longer connected. Connect it again from your profile, then try again.";
+
+/**
  * The message a visitor sees for an error a server function caught. Errors this app throws
  * carry a sentence meant for users; anything else (a database error object, a TypeError from a
- * bug, a Response) is logged and replaced by `fallback`, so no internal text reaches the page.
+ * bug, a Response, and on the hosted sites a Google error with Google's raw answer or a setting
+ * name) is logged and replaced by `fallback`, so no internal text reaches the page.
  */
 export function userFacingMessage(error: unknown, fallback: string, context: string): string {
   const internal =
@@ -32,7 +47,17 @@ export function userFacingMessage(error: unknown, fallback: string, context: str
     error instanceof RangeError ||
     error instanceof SyntaxError ||
     error instanceof ReferenceError;
-  if (error instanceof Error && error.message.trim() && !internal) return readableErrorMessage(error.message);
+  if (error instanceof Error && error.message.trim() && !internal) {
+    const message = error.message.trim();
+    if (message === "GOOGLE_NOT_CONNECTED") {
+      console.error(`[lifeops] ${context}:`, describeCause(error));
+      return GOOGLE_NOT_CONNECTED_MESSAGE;
+    }
+    // A local run keeps the developer's detail; the hosted sites show the plain fallback.
+    if (!isHostedDeployment() || !RAW_GOOGLE_ERROR.test(message)) return readableErrorMessage(error.message);
+    console.error(`[lifeops] ${context}:`, describeCause(error));
+    return fallback;
+  }
   console.error(`[lifeops] ${context}:`, describeCause(error));
   return fallback;
 }
@@ -232,15 +257,22 @@ export async function saveNewDraft(opts: {
   const connected = await isGoogleConnected(opts.userId);
   if (connected) {
     const draft = await createDraft(opts.userId, { to: opts.to, subject: opts.subject, body: opts.body });
-    await recordDraft(opts.supabase, {
-      user_id: opts.userId,
-      message_id: opts.reference,
-      to_address: opts.to,
-      subject: opts.subject,
-      body: opts.body,
-      provider: "gmail",
-      external_draft_id: draft.draftId,
-    });
+    // The Gmail draft exists now. A failed record must not turn the run into an error: the
+    // planner would keep the action approved, and the next Run would save a second Gmail draft.
+    // As for saveReplyDraft, it is logged and the draft is returned.
+    try {
+      await recordDraft(opts.supabase, {
+        user_id: opts.userId,
+        message_id: opts.reference,
+        to_address: opts.to,
+        subject: opts.subject,
+        body: opts.body,
+        provider: "gmail",
+        external_draft_id: draft.draftId,
+      });
+    } catch (error: unknown) {
+      console.error("[lifeops] Gmail draft saved, but recording it failed:", describeCause(error));
+    }
     return { draftId: draft.draftId, subject: opts.subject, to: opts.to, provider: "gmail" };
   }
   const draftId = await recordDraft(opts.supabase, {
@@ -361,7 +393,10 @@ async function carryOutPlannerAction(opts: {
   }
 
   if (action.action_type === "email_draft") {
-    const to = fit(oneLine(opts.to ?? "") || oneLine(action.email_to ?? "") || NO_RECIPIENT, 320);
+    // A recipient the user gave wins, and an empty one means "no recipient": the user cleared the
+    // planner's address in the To field. Without a typed value the planner's address is used.
+    const recipient = opts.to !== undefined ? oneLine(opts.to) : oneLine(action.email_to ?? "");
+    const to = fit(recipient || NO_RECIPIENT, 320);
     const draft = await saveNewDraft({
       supabase,
       userId,
@@ -401,7 +436,7 @@ export async function runApprovedPlannerAction(opts: {
   userId: string;
   action: PlannerActionToRun;
   timeZone: string;
-  /** The recipient the user typed for an email draft (optional). */
+  /** The recipient the user typed for an email draft; "" when the user cleared the field. */
   to?: string;
   record: (outcome: PlannerActionOutcome) => Promise<unknown>;
   nowMs?: number;

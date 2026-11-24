@@ -12,9 +12,10 @@ import { dismissChatCard } from "@/functions/chat.functions";
 import { EmailDraftCard, PendingEventCard } from "@/components/workspace/ContextPanel";
 import type { PlanRequestView } from "@/lib/plan-request";
 import { getBrowserTimeZone } from "@/lib/date";
+import { DashboardLoadError, RecipientField, TaskDoneButton } from "@/components/dashboard/DashboardParts";
 import {
   dashboardViewState, executionProviderLabel, formatRequestTime, isActionRunAnswer, isDashboardAnswer,
-  isPlanPollAnswer, isPlanRequestAnswer, isStaleOutcome, plannerBadgeText, UNEXPECTED_ANSWER,
+  isPlanPollAnswer, isPlanRequestAnswer, isStaleOutcome, plannerBadgeText, recipientToSend, UNEXPECTED_ANSWER,
 } from "@/lib/dashboard-view";
 import { getErrorMessage } from "@/lib/errors";
 import { prioritiesSubtitle } from "@/lib/priorities";
@@ -152,8 +153,9 @@ function DashboardPage() {
   async function run(action: PlannerAction) {
     setBusyAction(action.id);
     try {
-      const to = action.action_type === "email_draft" ? recipients[action.id]?.trim() : undefined;
-      const r: unknown = await executeBackendAction({ data: { id: action.id, timeZone, ...(to ? { to } : {}) } });
+      // Only a recipient the user typed or cleared is sent; untouched, the planner's address is used.
+      const to = action.action_type === "email_draft" ? recipientToSend(recipients[action.id]) : undefined;
+      const r: unknown = await executeBackendAction({ data: { id: action.id, timeZone, ...(to !== undefined ? { to } : {}) } });
       if (!isActionRunAnswer(r)) throw new Error(UNEXPECTED_ANSWER);
       if (r.ok) toast.success(r.message);
       else toast.error(r.message);
@@ -181,19 +183,13 @@ function DashboardPage() {
   if (view === "loading" || !data) {
     if (view === "error") {
       return (
-        <div role="alert" className="grid place-items-center gap-3 py-24 text-center text-sm" data-testid="dashboard-load-error">
-          <p className="max-w-md text-muted-foreground">{loadError ?? "Could not load the dashboard."}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setLoading(true);
-              void refresh();
-            }}
-            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
-          >
-            Try again
-          </button>
-        </div>
+        <DashboardLoadError
+          message={loadError}
+          onRetry={() => {
+            setLoading(true);
+            void refresh();
+          }}
+        />
       );
     }
     return <div className="grid place-items-center py-24"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>;
@@ -365,24 +361,12 @@ function DashboardPage() {
                         </div>
                         {/* The recipient can be filled in here before Run (the planner leaves an unknown one empty). */}
                         {action.action_type === "email_draft" && canEditRecipient(action) && (
-                          <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                            <span className="shrink-0">To</span>
-                            <input
-                              type="text"
-                              inputMode="email"
-                              autoComplete="email"
-                              value={recipients[action.id] ?? action.email_to ?? ""}
-                              onChange={(e) => {
-                                const value = e.target.value.replace(/[\r\n]+/g, " ");
-                                setRecipients((prev) => ({ ...prev, [action.id]: value }));
-                              }}
-                              maxLength={320}
-                              placeholder="recipient to fill in"
-                              disabled={busyAction === action.id}
-                              data-testid={`action-${action.id}-to`}
-                              className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                            />
-                          </label>
+                          <RecipientField
+                            value={recipients[action.id] ?? action.email_to ?? ""}
+                            onChange={(value) => setRecipients((prev) => ({ ...prev, [action.id]: value }))}
+                            disabled={busyAction === action.id}
+                            testId={`action-${action.id}-to`}
+                          />
                         )}
                       </div>
                       <div className="flex shrink-0 gap-1.5">
@@ -499,10 +483,7 @@ function DashboardPage() {
                           Priority {task.priority}/5 · ~{task.estimated_minutes} min{task.deadline ? ` · due ${fmtNaive(task.deadline)}` : ""}
                         </div>
                       </div>
-                      <button onClick={() => completeTask(task.id)} disabled={busyTask === task.id}
-                        className="shrink-0 text-[11px] rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-60">
-                        {busyTask === task.id ? <Loader2 className="h-3 w-3 animate-spin" /> : "Done"}
-                      </button>
+                      <TaskDoneButton busy={busyTask === task.id} onClick={() => completeTask(task.id)} />
                     </li>
                   ))}
                 </ul>

@@ -8,7 +8,6 @@ import { fetchWeekPlan, generateWeekPlan, refineWeekPlan, approveWeekPlan, updat
 import type { WeekPlan, BusyEvent } from "@/types/plan";
 import { toast } from "sonner";
 import { formatLocalDate, getBrowserTimeZone } from "@/lib/date";
-import { formatRequestTime } from "@/lib/dashboard-view";
 import { getErrorMessage } from "@/lib/errors";
 import type { WeekPlanRequestView } from "@/lib/week-plan-request";
 import { planDayStatus } from "@/lib/plan-state";
@@ -453,9 +452,11 @@ function PlanPage() {
   );
 }
 
-/** "3:14 PM", with the date when it was not today ("Tue, Nov 17, 1:53 PM"; a weekday alone hid a week-old failure). */
+/** "3:14 PM", with the day when it was not today ("Mon 3:14 PM"). */
 function fmtClock(iso: string) {
-  return formatRequestTime(iso, Date.now(), { locale: "en-US" });
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString("en-US", { weekday: "short" })} ${time}`;
 }
 
 function fmtWeek(monday: string) {

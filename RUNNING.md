@@ -292,9 +292,10 @@ and a reload loses nothing; requests time out after 30 minutes (`LLM_TIMEOUT_MS`
    whose **Run** is refused (it overlaps an event, or its time has passed) can still be **Reject**ed.
    A recipient in a planned draft is kept only if you wrote it (the address, or the name as a word of
    your text): the planner has no address book, and the model invented "sam@example.com" for "draft an
-   email to Sam" (QA round 4). A planned draft has a _To_ field in the approval center: type the
-   recipient there before **Run**. Left empty, a Gmail draft is created without a To header and the
-   demo draft row keeps the text "(recipient to fill in)" in its To field. A reminder becomes a
+   email to Sam" (QA round 4). A planned draft has a _To_ field in the approval center, filled with
+   the planner's address when it kept one: type or change the recipient there before **Run**. Left
+   empty (or cleared), a Gmail draft is created without a To header and the demo draft row keeps the
+   text "(recipient to fill in)" in its To field. A reminder becomes a
    15-minute calendar entry "Reminder: <what>" (same conflict check); a task is only noted.
    Running an action again after its outcome could not be recorded reuses the block or draft.
    Reminders and tasks show one time (a point in time), not "17:45 – 17:45". _Top priorities_ says who

@@ -10,7 +10,6 @@ import { withoutHandledCards } from "@/lib/panel-state";
 import { planRequestView, type PlanRequestResult, type PlanRequestView } from "@/lib/plan-request";
 import { cardIdsOfPanel, listCardStates } from "@/server/chat-cards.server";
 import { ensureChatSessionFor, maxChatTurnMs, runChatTurn } from "@/server/chat-turn.server";
-import { enforceAiAllowance } from "@/server/limits.server";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
 import { ensureSeedEvents } from "@/server/connectors/calendar.mock";
 import { toMs, type TimedEvent } from "@/server/calendar/time-ranges.server";
@@ -244,14 +243,10 @@ export const runChaosPlan = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
 
-    // One "Plan it" at a time (see startPlanRequest). Demo limits (off unless the AI_* settings
-    // are set) refuse before a request row is stored. With the planner switched off the in-app
-    // assistant answers, and its chat turn counts itself.
+    // One "Plan it" at a time, and one use of the demo's AI allowance per press, recorded before
+    // the request row is stored (see startPlanRequest), whichever of the two answers it.
     const plannerOn = backendBaseUrl() !== null;
-    const row = await startPlanRequest(supabase, userId, data.input, {
-      windowMs: maxPlanRequestMs(),
-      beforeInsert: plannerOn ? () => enforceAiAllowance(supabaseAdmin, userId, "planner") : undefined,
-    });
+    const row = await startPlanRequest(supabase, userId, data.input, { windowMs: maxPlanRequestMs() });
 
     // The answer can take longer than the rest of the browser's access token (1 hour) on a slow
     // local model: the final update uses the service-role client, scoped to this user's row.

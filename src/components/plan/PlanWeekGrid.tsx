@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import { Check, Calendar as CalIcon, Pencil, X as XIcon } from "lucide-react";
-import { busyForDay, rhythmSegment } from "@/lib/plan-grid";
+import { formatLocalDate } from "@/lib/date";
 import { planDayStatus } from "@/lib/plan-state";
 
 interface Props {
@@ -26,7 +26,7 @@ export function PlanWeekGrid({ plan, busyEvents, approvedDates, addedItems, onAp
           key={day.date}
           day={day}
           dayLabel={FULL_DAY_NAMES[i]}
-          busy={busyForDay(busyEvents, day.date)}
+          busy={busyEvents.filter(b => sameDay(b.starts_at, day.date))}
           approved={approvedDates.has(day.date)}
           added={addedItems?.[day.date] ?? []}
           approving={approving === day.date}
@@ -79,7 +79,7 @@ function DayCard({ day, dayLabel, busy, approved, added, approving, onApprove, o
         )}
       </div>
 
-      <RhythmBar date={day.date} items={day.items} busy={busy} />
+      <RhythmBar items={day.items} busy={busy} />
 
       {day.headline && (
         <p className="text-sm text-foreground/80 italic font-serif mt-3 leading-snug">
@@ -199,15 +199,15 @@ function PlanItemRow({ item, added, editable, onSave }: {
   );
 }
 
-function RhythmBar({ date, items, busy }: { date: string; items: { starts_at: string; ends_at: string }[]; busy: BusyEvent[] }) {
+function RhythmBar({ items, busy }: { items: { starts_at: string; ends_at: string }[]; busy: BusyEvent[] }) {
   const dayStart = 7 * 60;
   const dayEnd = 22 * 60;
   const span = dayEnd - dayStart;
   const seg = (s: string, e: string, color: string, key: string) => {
-    // Only this day's part of the event (one that crosses midnight has a part on each day).
-    const part = rhythmSegment({ starts_at: s, ends_at: e }, date, dayStart, dayEnd);
-    if (!part) return null;
-    const [sm, em] = part;
+    const sd = new Date(s), ed = new Date(e);
+    const sm = Math.max(dayStart, sd.getHours() * 60 + sd.getMinutes());
+    const em = Math.min(dayEnd, ed.getHours() * 60 + ed.getMinutes());
+    if (em <= sm) return null;
     return (
       <span key={key} className="absolute top-0 bottom-0 rounded-full"
         style={{ left: `${((sm - dayStart) / span) * 100}%`, width: `${((em - sm) / span) * 100}%`, background: color }} />
@@ -223,6 +223,9 @@ function RhythmBar({ date, items, busy }: { date: string; items: { starts_at: st
 
 function fmt(iso: string) {
   return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+function sameDay(iso: string, ymd: string) {
+  return formatLocalDate(new Date(iso)) === ymd;
 }
 function toLocalHM(iso: string): string {
   const d = new Date(iso);

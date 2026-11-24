@@ -117,6 +117,27 @@ export function formatRequestTime(
 }
 
 /* ------------------------------------------------------------------------------------------
+ * The To field of a planner email draft
+ * ---------------------------------------------------------------------------------------- */
+
+/**
+ * The To field's text as it is typed: control characters (a pasted line break or tab) become
+ * spaces. The recipient goes into the draft's To header, and the server refuses control characters.
+ */
+export function cleanRecipientInput(value: string): string {
+  return value.replace(/\p{Cc}+/gu, " ");
+}
+
+/**
+ * The recipient Run sends: nothing when the user left the field as the planner filled it (the
+ * server then uses the planner's address), otherwise what the user typed. An empty value is sent
+ * too: the user cleared the planner's address and wants no recipient.
+ */
+export function recipientToSend(typed: string | undefined): string | undefined {
+  return typed === undefined ? undefined : typed.trim();
+}
+
+/* ------------------------------------------------------------------------------------------
  * Page state and server answers
  * ---------------------------------------------------------------------------------------- */
 

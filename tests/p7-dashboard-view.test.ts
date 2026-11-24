@@ -1,6 +1,6 @@
 /**
- * What the dashboard and the plan grid show (src/lib/dashboard-view.ts, src/lib/plan-grid.ts,
- * src/lib/priorities.ts), audit of 24 Nov 2026:
+ * What the dashboard shows (src/lib/dashboard-view.ts, src/lib/priorities.ts), audit of
+ * 24 Nov 2026:
  *  - 12: the AI badge read "Ollama · @cf/zai-org/glm-4.7-flash" on a site without AI; the planner
  *    badge said "offline" for every failure; the priorities subtitle blamed the model for every
  *    rule-based ranking;
@@ -8,12 +8,13 @@
  *    re-approval);
  *  - 40: a failed first load showed a spinner forever;
  *  - 61: failed and interrupted banners stayed for weeks with a bare clock time;
- *  - 93: an odd server answer was taken as success (the text was cleared, no error);
- *  - 38: plan day cards placed busy events on their start day only.
+ *  - 93: an odd server answer was taken as success (the text was cleared, no error).
+ * (Finding 38, busy events on the plan day cards, is fixed in PlanWeekGrid by the plan package.)
  */
 import { describe, expect, it } from "vitest";
 import {
   aiStatus,
+  cleanRecipientInput,
   dashboardViewState,
   executionProviderLabel,
   formatRequestTime,
@@ -24,8 +25,8 @@ import {
   isStaleOutcome,
   planApprovalCounts,
   plannerBadgeText,
+  recipientToSend,
 } from "@/lib/dashboard-view";
-import { busyForDay, rhythmSegment } from "@/lib/plan-grid";
 import { planItemEventTitle } from "@/lib/plan-state";
 import { prioritiesSubtitle } from "@/lib/priorities";
 import { resolveLLMConfig } from "@/server/ai/llm.server";
@@ -154,6 +155,20 @@ describe("failed and interrupted banners (61)", () => {
   });
 });
 
+describe("the To field of a planner draft (44)", () => {
+  it("turns any control character into a space as it is typed, not only line breaks", () => {
+    expect(cleanRecipientInput("sam@uni.example\tx")).toBe("sam@uni.example x");
+    expect(cleanRecipientInput("a@b.example\r\nBcc: x@y.example")).toBe("a@b.example Bcc: x@y.example");
+    expect(cleanRecipientInput("sam@uni.example")).toBe("sam@uni.example");
+  });
+
+  it("sends nothing for an untouched field, and an empty value for a cleared one", () => {
+    expect(recipientToSend(undefined)).toBeUndefined();
+    expect(recipientToSend("")).toBe("");
+    expect(recipientToSend("  sam@uni.example ")).toBe("sam@uni.example");
+  });
+});
+
 describe("execution log (82)", () => {
   it("says where an action went in words, and that a noted task scheduled nothing", () => {
     expect(executionProviderLabel("monday")).toBe("noted (nothing scheduled)");
@@ -163,25 +178,3 @@ describe("execution log (82)", () => {
   });
 });
 
-describe("plan day cards (38)", () => {
-  it("shows an event that runs past midnight on both days", () => {
-    const late = { title: "Late shift", starts_at: local(2026, 11, 24, 20), ends_at: local(2026, 11, 25, 2) };
-    expect(busyForDay([late], "2026-11-24")).toEqual([late]);
-    expect(busyForDay([late], "2026-11-25")).toEqual([late]);
-    expect(busyForDay([late], "2026-11-26")).toEqual([]);
-  });
-
-  it("shows an event that started the Sunday before on Monday", () => {
-    const overnight = { title: "Flight", starts_at: local(2026, 11, 22, 23), ends_at: local(2026, 11, 23, 3) };
-    expect(busyForDay([overnight], "2026-11-23")).toEqual([overnight]);
-  });
-
-  it("draws each day's part of an event on the rhythm bar (07:00-22:00)", () => {
-    const late = { starts_at: local(2026, 11, 24, 20), ends_at: local(2026, 11, 25, 2) };
-    expect(rhythmSegment(late, "2026-11-24")).toEqual([1200, 1320]);
-    expect(rhythmSegment(late, "2026-11-25")).toBeNull();
-    const twoDays = { starts_at: local(2026, 11, 27, 9), ends_at: local(2026, 11, 28, 12) };
-    expect(rhythmSegment(twoDays, "2026-11-27")).toEqual([540, 1320]);
-    expect(rhythmSegment(twoDays, "2026-11-28")).toEqual([420, 720]);
-  });
-});
