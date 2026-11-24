@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from app.core.security import current_owner
@@ -7,6 +7,7 @@ from app.models import ActionProposal, PlanRun, Task
 from app.routes.settings import get_or_create_settings
 from app.schemas import PlanRequest, PlanResponse
 from app.services.action_executor import apply_execution_result, execute_action
+from app.services.busy_slots import deadline_passed, keep_clear_of_busy
 from app.services.llm_planner import create_plan
 from app.services.safety import can_auto_execute, requires_human_approval
 
@@ -24,6 +25,12 @@ def create_lifeops_plan(
         now=payload.current_datetime,
         timezone=payload.timezone,
     )
+    # The caller stopped waiting and planned without this service: storing the plan now would
+    # leave a second set of proposals for the same request.
+    if deadline_passed(payload.deadline):
+        raise HTTPException(status_code=504, detail="The plan was ready only after the caller's deadline; nothing was stored.")
+    plan, busy_note = keep_clear_of_busy(plan, payload.busy, payload.current_datetime)
+    planner_note = " ".join(note for note in (planner_note, busy_note) if note) or None
 
     app_settings = get_or_create_settings(session, owner)
     effective_autonomous_mode = payload.autonomous_mode or app_settings.autonomous_mode

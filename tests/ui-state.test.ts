@@ -11,7 +11,7 @@ const local = (y: number, m: number, d: number, h: number, min = 0) => new Date(
 
 describe("dashboard: who ranked the priorities", () => {
   it("does not say 'Ranked by the assistant' over rule-ranked rows", () => {
-    expect(prioritiesSubtitle(["rules", "rules", "rules"])).toMatch(/^Ranked by simple rules, because the AI model returned no ranking/);
+    expect(prioritiesSubtitle(["rules", "rules", "rules"])).toMatch(/^Ranked by simple rules, because the AI model was not available or gave no ranking/);
     expect(prioritiesSubtitle(["chat", "chat"])).toBe("Ranked by the AI assistant from your inbox, calendar and chat.");
     expect(prioritiesSubtitle(["chat", "rules"])).toContain("marked “rule”");
   });
