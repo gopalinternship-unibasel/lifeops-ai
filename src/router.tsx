@@ -1,4 +1,5 @@
 import { createRouter, useRouter, type ErrorComponentProps } from "@tanstack/react-router";
+import { isStaticShellBuild } from "@/lib/static-shell";
 import { routeTree } from "./routeTree.gen";
 
 function DefaultErrorComponent({ error, reset }: ErrorComponentProps) {
@@ -56,16 +57,6 @@ function DefaultErrorComponent({ error, reset }: ErrorComponentProps) {
   );
 }
 
-/**
- * The GitHub Pages build (made with VITE_SERVER_FN_ORIGIN set) serves a static shell with an empty
- * slot where the page content goes. Marking every route as client-only makes the browser's first
- * render of that slot empty too, so React hydrates the shell cleanly and draws the page straight
- * after. Without it, the router could finish loading the landing page (whose code the shell
- * preloads) before React reached that slot; React then reported error #418 and redrew it.
- * The Vercel build renders pages on the server and is left as it is.
- */
-const staticShellBuild = Boolean(import.meta.env.VITE_SERVER_FN_ORIGIN?.trim());
-
 export const getRouter = () => {
   const router = createRouter({
     routeTree,
@@ -75,7 +66,13 @@ export const getRouter = () => {
     defaultErrorComponent: DefaultErrorComponent,
   });
 
-  if (staticShellBuild) {
+  // GitHub Pages build: the static shell has an empty slot where the page content goes. Marking
+  // every route as client-only makes the browser's first render of that slot empty too, so React
+  // hydrates the shell cleanly and draws the page straight after. Without it, the router could
+  // finish loading the landing page (whose code the shell preloads) before React reached that
+  // slot; React then reported error #418 and redrew it. The Vercel build renders pages on the
+  // server and is left as it is.
+  if (isStaticShellBuild) {
     for (const route of Object.values(router.routesById)) {
       if (!route.isRoot) route.options.ssr = false;
     }

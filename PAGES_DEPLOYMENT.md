@@ -148,6 +148,15 @@ today `lifeops-api` is the only one.
   inbox and calendar. The Google OAuth callback is a server route that the Pages edition does not serve.
 - **Shared limits.** The demo limits (`AI_*`) count rows in the shared database, so a user's messages on
   both editions count together. Both editions use the same Cloudflare daily allowance.
+- **Pages are drawn in the browser.** Every address gets the same static shell with an empty slot for
+  the page, so the Pages build marks every route client-only (`src/router.tsx`, `src/lib/static-shell.ts`)
+  and the page appears right after the shell is hydrated. Without that, the landing page logged React
+  error #418 (hydration mismatch) and was redrawn. Vercel renders pages on the server as before.
+- **Unknown addresses.** An address the app does not have (for example `/lifeops-ai/no-such-page` or
+  `/lifeops-ai/index.html`) shows the app's "Page not found" screen, as on Vercel, but logs React error
+  #418 once in the browser console. The not-found screen is drawn where the shell has the landing
+  route's placeholders; React redraws it and nothing visible is wrong. A catch-all route would remove the
+  message but would also change how Vercel answers unknown addresses, so it was left as it is.
 
 ## Checks
 
