@@ -93,6 +93,31 @@ export interface ChangeRequest {
   dayUnclear?: boolean;
   /** A week named without a day ("to next week"): the Monday of that week. */
   weekStart?: string;
+  /**
+   * Limits the message puts on the new start instead of naming it ("before 3 pm", "no later
+   * than 5 pm", "after 6 pm", "anytime except 7 pm"), in minutes after local midnight. A time in
+   * such a phrase is never the new time itself; the model's proposal counts only inside them.
+   */
+  bounds?: TimeBounds;
+  /**
+   * Clock times named in the reason for the request ("... because I'm busy at 7 pm"). They are
+   * never the new time, and a move to another day does not keep the event at such a time.
+   */
+  reasonTimes?: number[];
+  /** "morning" ("am") or "afternoon", "evening", "tonight" ("pm") next to the new time. */
+  halfOfDay?: "am" | "pm";
+}
+
+/** See ChangeRequest.bounds. */
+export interface TimeBounds {
+  /** The new start is at or before this minute ("by 5 pm", "no later than 5 pm"). */
+  latest?: number;
+  /** "before 3 pm": the new start is strictly before `latest`. */
+  latestExclusive?: boolean;
+  /** The new start is at or after this minute ("after 6 pm"). */
+  earliest?: number;
+  /** Starts that are ruled out ("except 7 pm", "not at 7 pm"). */
+  avoid?: number[];
 }
 
 const WEEKDAYS: Record<string, number> = {
@@ -198,21 +223,43 @@ const NOUN_USE_RE = new RegExp(`${CLAUSE_START}(?:push|shift|delay|change|drop)\
  * ..." the subject "the gym session from my plan". A full stop after an abbreviation ("Nov. 13",
  * "Dr. Lee") does not end it.
  */
+// The dot of a numeric date ("1.12. at 4 pm") does not end the clause either when a time or a
+// range follows it.
 const NEXT_CLAUSE_RE =
-  /(?:[;!?]\s+|(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|dr|mr|mrs|ms|prof|st|approx|ca|[a-z]))\.\s+|,\s*(?:and\s+|then\s+|also\s+|but\s+)?(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check|what|when|how)\b)|\s(?:and|then|but|also|and then)\s+(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check)\b))/;
+  /(?:[;!?]\s+|(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|dr|mr|mrs|ms|prof|st|approx|ca|[a-z]))(?<!(?<![\d.])\d{1,2}\.(?:0?[1-9]|1[0-2])(?=\.\s+(?:(?:at|from|between|to|until|till|for)\b|@|\d)))\.\s+|,\s*(?:and\s+|then\s+|also\s+|but\s+)?(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check|what|when|how)\b)|\s(?:and|then|but|also|and then)\s+(?=(?:please\s+)?(?:block|schedule|add|book|create|make|plan|set|put|move|cancel|delete|remove|draft|write|reply|remind|email|reschedule|postpone|push|shift|change|bring|pull|drop|call|text|find|show|tell|check)\b))/;
 /**
  * Where the reason for a request starts: in "Move the dentist appointment to Friday because I
  * have a lecture on Wednesday at 4 pm" the new time is not 4 pm, and in "... to Friday so that it
  * doesn't clash with the lecture at 10 am" it is not 10 am. The request is read up to there.
  */
-const REASON_RE =
-  /\s(?:because|since|so|if|unless|when|while|although|though|but|due to|in case|otherwise|or else|as (?:i|we|it|there|he|she|they|my|the))\s|,\s*(?:it|i|we|that|which|she|he|they|there)\b/;
+// A reason also starts with "cause"/"cuz", with a new sentence after a comma (", the lecture is at
+// 10 am", ", my lecture ends at 3 pm"), and after a colon, a bracket or a dash followed by a new
+// subject ("... to Friday (I have a lecture at 3 pm)", "... to Friday: the lecture is at 3 pm").
+// Until the review of 24 Nov 2026 those times were read as the new time.
+// A new sentence about something else: "the lecture is ...", "my lecture ends ..." (not "the one
+// that is on Friday", which names the event, nor "the 27th", which is a date).
+const REASON_SENTENCE =
+  "(?:the|my|our|his|her|their|your)\\s+(?!ones?\\b)(?:[a-z'-]+\\s+){0,3}?(?:is|are|was|were|ends?|starts?|begins?|finish(?:es)?|runs?|has|have|clash(?:es)?|overlaps?)\\b";
+// After a colon, a bracket or a dash: a pronoun or such a sentence ("(I have a lecture at 3 pm)",
+// ": the lecture is at 3 pm"); "(the 27th)" and ": this Friday at 3 pm" are part of the request.
+const REASON_SUBJECT = `(?:(?:i|i'm|im|we|we're|it|it's|there|he|she|they|since|because|as|due)\\b|${REASON_SENTENCE})`;
+const REASON_RE = new RegExp(
+  "\\s(?:because|since|so|if|unless|when|while|although|though|but|due to|in case|otherwise|or else|'?cause|cuz|coz|bc|b/c|as (?:i|we|it|there|he|she|they|my|the))\\s" +
+    "|,\\s*(?:it|i|we|that|which|she|he|they|there)\\b" +
+    `|,\\s*(?=${REASON_SENTENCE})` +
+    `|\\s*:\\s*(?=${REASON_SUBJECT})|\\s\\(\\s*(?=${REASON_SUBJECT})|\\s-\\s(?=${REASON_SUBJECT})`,
+);
 
-function cutAtNextClause(text: string): string {
+/** The request up to the next clause, and the reason given for it (empty when none). */
+function splitAtNextClause(text: string): { request: string; reason: string } {
   const next = NEXT_CLAUSE_RE.exec(text);
   const clause = next ? text.slice(0, next.index) : text;
   const reason = REASON_RE.exec(clause);
-  return reason ? clause.slice(0, reason.index) : clause;
+  return reason ? { request: clause.slice(0, reason.index), reason: clause.slice(reason.index) } : { request: clause, reason: "" };
+}
+
+function cutAtNextClause(text: string): string {
+  return splitAtNextClause(text).request;
 }
 
 interface ChangeVerb {
@@ -307,12 +354,44 @@ export function titleWords(text: string): string[] {
     .map((word) => (word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word));
 }
 
-const NUMBER_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, half: 0.5 };
+const NUMBER_WORDS: Record<string, number> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, "half an": 0.5, "half a": 0.5, "a half": 0.5,
+};
+/**
+ * An amount of time, the same for durations, shifts and where a shift starts (review of 24 Nov
+ * 2026: "an hour and a half" was read as an hour, "1h30" and "three hours" not at all): "an
+ * hour", "90 minutes", "1.5 hours", "half an hour", "three hours", "an hour and a half", "one
+ * and a half hours", "1h30".
+ */
+const AMOUNT_NUMBER = "(?:\\d+(?:\\.\\d+)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half an?|a half)";
+const AMOUNT_UNIT = "(?:hours?|hrs?|h|minutes?|mins?|m)";
+// A number word needs a space and a whole unit word: "a" + "m" is "am", not a minute. Hours and
+// minutes together ("1 hour 30 minutes", "an hour and 15 minutes", "1h 30m") are one amount.
+const AMOUNT =
+  "(?:(?:\\d+ ?(?:hours?|hrs?|h)|(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (?:hours?|hrs?)),? (?:and )?\\d{1,2} ?(?:minutes?|mins?|m)" +
+  "|\\d{1,2}h\\d{2}" +
+  `|\\d+(?:\\.\\d+)?(?: and a half)? ?${AMOUNT_UNIT}(?: and a half)?` +
+  "|(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half an?|a half)(?: and a half)? (?:hours?|hrs?|minutes?|mins?)(?: and a half)?)";
+const AMOUNT_PARTS_RE = new RegExp(`^(${AMOUNT_NUMBER})( and a half)? ?(${AMOUNT_UNIT})( and a half)?$`);
 
-function amountToMinutes(amount: string, unit: string): number | undefined {
-  const value = /^\d+(\.\d+)?$/.test(amount) ? Number(amount) : NUMBER_WORDS[amount.replace(/ an?$/, "")];
-  if (value === undefined || !Number.isFinite(value)) return undefined;
-  return Math.round(/^h/.test(unit) ? value * 60 : value);
+/** Minutes in an AMOUNT ("an hour and a half" = 90, "1h30" = 90), or undefined. */
+function amountToMinutes(amount: string): number | undefined {
+  const text = amount.trim();
+  const hoursMinutes = /^(\d{1,2})h(\d{2})$/.exec(text);
+  if (hoursMinutes) return Number(hoursMinutes[1]) * 60 + Number(hoursMinutes[2]);
+  // "1 hour 30 minutes", "an hour and 15 minutes", "1h 30m".
+  const compound = /^(.+?(?:hours?|hrs?|h)),? (?:and )?(\d{1,2}) ?(?:minutes?|mins?|m)$/.exec(text);
+  if (compound) {
+    const hours = amountToMinutes(compound[1]);
+    return hours === undefined ? undefined : hours + Number(compound[2]);
+  }
+  const parts = AMOUNT_PARTS_RE.exec(text);
+  if (!parts) return undefined;
+  const base = /^\d/.test(parts[1]) ? Number(parts[1]) : NUMBER_WORDS[parts[1]];
+  if (base === undefined || !Number.isFinite(base)) return undefined;
+  const value = base + (parts[2] || parts[4] ? 0.5 : 0);
+  return Math.round(/^h/.test(parts[3]) ? value * 60 : value);
 }
 
 function to24(hour: number, minute: number, meridiem: "am" | "pm"): number {
@@ -321,6 +400,15 @@ function to24(hour: number, minute: number, meridiem: "am" | "pm"): number {
 
 function validClock(hour: number, minute: number): boolean {
   return Number.isInteger(hour) && hour >= 0 && hour <= 24 && minute >= 0 && minute <= 59 && !(hour === 24 && minute > 0);
+}
+
+/**
+ * A clock time with am/pm needs an hour from 1 to 12. "13 am" was read as 01:00 and, inside
+ * "8.15 pm", "15 pm" as 15:00 (review of 24 Nov 2026); such a time is not read by rule, so the
+ * model's answer or a question decides.
+ */
+function validMeridiemClock(hour: number, minute: number): boolean {
+  return hour >= 1 && hour <= 12 && validClock(hour, minute);
 }
 
 /** A clock time without am/pm: 24-hour when it can only be that ("16:00", "09:30"), else both. */
@@ -334,9 +422,12 @@ function bareClock(hourText: string, minute: number): number[] {
 /** Day words in a text, resolved against today's local date (and its weekday, 0 = Sunday). */
 export function parseDay(text: string, today: string, opts: { subject?: boolean } = {}): { day?: DayRef | "same"; rest: string } {
   let rest = text;
+  const cut = (m: RegExpExecArray) => {
+    rest = `${rest.slice(0, m.index)} ${rest.slice(m.index + m[0].length)}`;
+  };
   const take = (re: RegExp): RegExpExecArray | null => {
     const m = re.exec(rest);
-    if (m) rest = `${rest.slice(0, m.index)} ${rest.slice(m.index + m[0].length)}`;
+    if (m) cut(m);
     return m;
   };
   const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
@@ -375,21 +466,83 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     const parsed = new Date(`${date}T12:00:00Z`);
     return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
   };
+  const isoDate = (year: number, month: number, dayNumber: number) =>
+    `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
+  // A day and month without a year: this year, or next year when this year's date is more than
+  // two weeks back. "May 30" asked in November is next May; it was this May until the review of
+  // 24 Nov 2026 (only dates more than half a year back moved on), so it was refused as over.
+  const upcoming = (month: number, dayNumber: number): string => {
+    if (month < 1 || month > 12 || dayNumber < 1 || dayNumber > 31) return "";
+    const year = Number(today.slice(0, 4));
+    const thisYear = isoDate(year, month, dayNumber);
+    const longAgo = Date.parse(`${thisYear}T12:00:00Z`) < Date.parse(`${today}T12:00:00Z`) - 14 * 86_400_000;
+    return validDate(thisYear) && !longAgo ? thisYear : isoDate(year + 1, month, dayNumber);
+  };
+  // Date words that name no real date ("Nov 31", "the 31st" in November, "2026-11-31", "31.11."):
+  // the user is asked which date is meant. Until the review of 24 Nov 2026 such words were
+  // dropped without a trace and the event was moved on its own day.
+  const notADate = (words: string): { day: DayRef; rest: string } => ({ day: { dates: [today], text: words.trim(), unclear: true }, rest });
   m = take(new RegExp(`\\b(?:${WEEKDAY_RE},? )?(\\d{4})-(\\d{2})-(\\d{2})\\b`));
-  if (m && validDate(`${m[2]}-${m[3]}-${m[4]}`)) return { day: dated(`${m[2]}-${m[3]}-${m[4]}`, m[1], m[0].trim()), rest };
+  if (m) {
+    const date = `${m[2]}-${m[3]}-${m[4]}`;
+    return validDate(date) ? { day: dated(date, m[1], m[0].trim()), rest } : notADate(m[0]);
+  }
   const dayMonth = take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?(?:the )?(\\d{1,2})(?:st|nd|rd|th)?(?: of)? ${MONTH_RE}\\b`));
   const monthDay = dayMonth ? null : take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? )?${MONTH_RE}\\.? (\\d{1,2})(?:st|nd|rd|th)?\\b`));
   m = dayMonth ?? monthDay;
   if (m) {
-    const dayNumber = Number(dayMonth ? m[2] : m[3]);
-    const month = MONTHS[(dayMonth ? m[3] : m[2]).slice(0, 3)];
-    let year = Number(today.slice(0, 4));
-    const candidate = (y: number) => `${y}-${String(month).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
-    if (month && dayNumber >= 1 && dayNumber <= 31) {
-      // A date more than half a year back means next year ("Jan 5" asked in November).
-      if (Date.parse(`${candidate(year)}T12:00:00Z`) < Date.parse(`${today}T12:00:00Z`) - 180 * 86_400_000) year += 1;
-      if (validDate(candidate(year))) return { day: dated(candidate(year), m[1], m[0].trim()), rest };
-    }
+    const date = upcoming(MONTHS[(dayMonth ? m[3] : m[2]).slice(0, 3)] ?? 0, Number(dayMonth ? m[2] : m[3]));
+    return date && validDate(date) ? { day: dated(date, m[1], m[0].trim()), rest } : notADate(m[0]);
+  }
+  // Numeric dates, day first as in Switzerland: "01.12.2026", "1.12.26", and "1.12." with its
+  // final dot. Without the final dot or a year, "1.12" or "9.10" can also be a clock time, so the
+  // clock reader decides; only a pair that cannot be one ("25.12", "1.5") is a date here. With
+  // slashes both orders are tried: "28/11" can only be 28 Nov, "1/12" is 1 Dec or 12 Jan, and the
+  // user is asked. Until the review of 24 Nov 2026 none of them was read, and the event was moved
+  // on its own day by rule.
+  // The words of the date, without a "to", "from" or "or" read in front of it.
+  const numericText = (match: RegExpExecArray) => match[0].trim().replace(/^(?:to|from|or)\s+/, "");
+  const numericDate = (match: RegExpExecArray, dayNumber: number, month: number, yearText?: string): { day: DayRef; rest: string } => {
+    const year = yearText ? (yearText.length === 2 ? 2000 + Number(yearText) : Number(yearText)) : undefined;
+    const date = year !== undefined ? isoDate(year, month, dayNumber) : upcoming(month, dayNumber);
+    return date && validDate(date) ? { day: dated(date, match[1], numericText(match)), rest } : notADate(numericText(match));
+  };
+  const numericLead = `\\b(?:(?:on|for) )?(?:${WEEKDAY_RE},? )?(?<![\\d.:/])`;
+  // A pair without its final dot or a year ("25.12", "1/12") is a date only where a date is
+  // expected: at the start of the words read (the new day) or after "on", "to", "for" and the
+  // like ("before 25.12" is a limit, not the day). "The 2.5 km run", "Lecture 1.2" and "the 1/2
+  // day workshop" are names and amounts.
+  const weakNumericLead = `(?:^\\s*|\\b(?:on|to|for|from|or)\\s+)(?:${WEEKDAY_RE},? )?(?<![\\d.:/])`;
+  m = take(new RegExp(`${numericLead}(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4}|\\d{2})(?![\\d.])`));
+  if (m) return numericDate(m, Number(m[2]), Number(m[3]), m[4]);
+  m = new RegExp(`${numericLead}(\\d{1,2})\\.(\\d{1,2})\\.(?!\\d)`).exec(rest);
+  // "8.15." is a time with a full stop: there is no 15th month.
+  if (m && Number(m[3]) >= 1 && Number(m[3]) <= 12) {
+    cut(m);
+    return numericDate(m, Number(m[2]), Number(m[3]));
+  }
+  m = new RegExp(`${weakNumericLead}(\\d{1,2})\\.(\\d{1,2})(?![\\d.])(?!\\s?(?:am|pm|hours?|hrs?|h|minutes?|mins?|m)\\b)`).exec(rest);
+  if (m && Number(m[3]) >= 1 && Number(m[3]) <= 12 && (Number(m[2]) > 24 || m[3].length === 1)) {
+    cut(m);
+    return numericDate(m, Number(m[2]), Number(m[3]));
+  }
+  const slashDate = (lead: string, year: string) =>
+    new RegExp(`${lead}(\\d{1,2})/(\\d{1,2})${year}(?![\\d/])(?!\\s?(?:hours?|hrs?|h|minutes?|mins?|an?\\s+hour)\\b)`);
+  m = take(slashDate(numericLead, "/(\\d{4}|\\d{2})")) ?? take(slashDate(weakNumericLead, ""));
+  if (m) {
+    const [first, second] = [Number(m[2]), Number(m[3])];
+    const year = m[4] ? (m[4].length === 2 ? 2000 + Number(m[4]) : Number(m[4])) : undefined;
+    const readings = [
+      [first, second], // day first (Europe)
+      [second, first], // month first (US)
+    ].map(([dayNumber, month]) => (year !== undefined ? isoDate(year, month, dayNumber) : upcoming(month, dayNumber)));
+    const valid = [...new Set(readings.filter((date) => date && validDate(date)))];
+    // A reading that is over is dropped when the other one is still ahead.
+    const ahead = valid.filter((date) => date >= today);
+    const dates = ahead.length > 0 ? ahead : valid;
+    if (dates.length === 0) return notADate(numericText(m));
+    if (dates.length === 1) return { day: dated(dates[0], m[1], numericText(m)), rest };
+    return { day: { dates, text: numericText(m) }, rest };
   }
   // "the 13th", "Tuesday the 17th": the next such day of the month (not "the 2nd lecture").
   m = take(new RegExp(`\\b(?:on |for )?(?:${WEEKDAY_RE},? (?:the )?|the )(\\d{1,2})(?:st|nd|rd|th)\\b(?=\\s*(?:$|,|at\\b|from\\b|to\\b|\\d))`));
@@ -398,7 +551,7 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     const [year, month, todayNumber] = today.split("-").map(Number);
     const inMonth = (y: number, mo: number) => `${mo > 12 ? y + 1 : y}-${String(mo > 12 ? 1 : mo).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
     const date = dayNumber >= todayNumber ? inMonth(year, month) : inMonth(year, month + 1);
-    if (dayNumber >= 1 && validDate(date)) return { day: dated(date, m[1], m[0].trim()), rest };
+    return dayNumber >= 1 && validDate(date) ? { day: dated(date, m[1], m[0].trim()), rest } : notADate(m[0]);
   }
   // A weekday with a week named next to it: "Friday next week", "next week on Friday", "Thursday
   // of next week", "a week from Friday", "Friday week", "Friday in two weeks", "Friday after
@@ -483,6 +636,11 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
   return { rest };
 }
 
+/** Where an hour may start: not inside another number ("8.15 pm" is not "15 pm", "1.12.2026" holds no time). */
+const HOUR_START = "(?<![\\d.:/])";
+/** Minutes after the hour: "16:00", "8.15" (British and Swiss), "14h30" (French and Swiss). */
+const MINUTES = "(?:[:.h](\\d{2}))";
+
 /** Clock words in a destination text: a range, a start, an end, a duration or a shift. */
 export function parseClock(text: string): {
   start?: ClockRef;
@@ -491,25 +649,40 @@ export function parseClock(text: string): {
   durationMin?: number;
   shiftMin?: number;
   shiftDirectionMissing?: boolean;
+  /**
+   * A time the rules cannot read for sure: a dotted pair that is a date or a time ("9.10",
+   * "1.12"), or am/pm with an hour that cannot have it ("13 am", "15 pm").
+   */
+  unreadTime?: boolean;
+  /** "two hours from now": a time counted from the current time, which the rules do not work out. */
+  fromNow?: boolean;
   rest: string;
 } {
   let rest = ` ${text} `;
+  const cut = (m: RegExpExecArray) => {
+    rest = `${rest.slice(0, m.index)} ${rest.slice(m.index + m[0].length)}`;
+  };
   const take = (re: RegExp): RegExpExecArray | null => {
     const m = re.exec(rest);
-    if (m) rest = `${rest.slice(0, m.index)} ${rest.slice(m.index + m[0].length)}`;
+    if (m) cut(m);
     return m;
   };
   const out: ReturnType<typeof parseClock> = { rest: "" };
 
-  // Duration: "for an hour", "for 90 minutes", "for 1.5 hours", "for half an hour".
-  const duration = take(/\bfor (\d+(?:\.\d+)?|an?|one|two|three|four|half an?) ?(hours?|hrs?|h|minutes?|mins?|m)\b/);
-  if (duration) out.durationMin = amountToMinutes(duration[1], duration[2]);
+  // Duration: "for an hour", "for 90 minutes", "for 1.5 hours", "for half an hour", "for an hour
+  // and a half", "for 1h30".
+  const duration = take(new RegExp(`\\bfor (${AMOUNT})\\b`));
+  if (duration) out.durationMin = amountToMinutes(duration[1]);
 
-  // Shift: "an hour later", "30 minutes earlier", "back by an hour", "forward 30 minutes".
-  const shift =
-    take(/\b(?:(back|forward|ahead) )?(?:by )?(\d+(?:\.\d+)?|an?|one|two|three|half an?) ?(hours?|hrs?|minutes?|mins?)(?: (later|earlier|back|forward|ahead))?\b/);
-  if (shift) {
-    const minutes = amountToMinutes(shift[2], shift[3]);
+  // "Two hours from now" counts from the current time, not from the event.
+  if (take(new RegExp(`\\b(?:in )?${AMOUNT} from now\\b`))) out.fromNow = true;
+
+  // Shift: "an hour later", "30 minutes earlier", "back by an hour", "forward 30 minutes", "three
+  // hours later", "back an hour and a half". "14h30" alone is a clock time, not an amount.
+  const shift = new RegExp(`\\b(?:(back|forward|ahead) )?(by )?(${AMOUNT})(?: (later|earlier|back|forward|ahead))?\\b`).exec(rest);
+  if (shift && !(/^\d{1,2}h\d{2}$/.test(shift[3]) && !shift[1] && !shift[2] && !shift[4])) {
+    cut(shift);
+    const minutes = amountToMinutes(shift[3]);
     const direction = shift[4] ?? shift[1];
     if (minutes !== undefined && direction) {
       out.shiftMin = /later|back/.test(direction) ? minutes : -minutes;
@@ -519,13 +692,22 @@ export function parseClock(text: string): {
     }
   }
 
-  rest = rest.replace(/\bnoon\b|\bmidday\b/g, "12:00 pm").replace(/\bmidnight\b/g, "12:00 am");
+  // "quarter past 8 pm", "half past 8", "quarter to 9": the same as "8:15 pm", "8:30", "8:45".
+  rest = rest
+    .replace(/\bnoon\b|\bmidday\b/g, "12:00 pm")
+    .replace(/\b(?:a )?quarter (?:past|after) (\d{1,2})\b/g, "$1:15")
+    .replace(/\bhalf past (\d{1,2})\b/g, "$1:30")
+    .replace(/\b(?:a )?quarter (?:to|before|of) (\d{1,2})\b/g, (_, hour: string) => `${Number(hour) <= 1 ? 12 : Number(hour) - 1}:45`);
   const endOnlyWords = /\b(?:end(?:s|ing)?|finish(?:es|ing)?|until|till|wrap(?:s)? up)(?: at)? $/;
 
-  // Range: "4-5:30 pm", "4 pm to 5:30 pm", "between 2 and 4 pm", "14:00-15:30".
+  // Range: "4-5:30 pm", "4 pm to 5:30 pm", "between 2 and 4 pm", "14:00-15:30", "8.15-9.45 pm".
+  // In a range, midnight is its start or end ("from midnight to 2 am", "10 pm until midnight");
+  // range ends at or before the start already wrap to the next day.
+  const withMidnight = rest;
+  rest = rest.replace(/\b(?:12 ?)?midnight\b/g, "12:00 am");
   const range =
-    take(/\bbetween (\d{1,2})(?::(\d{2}))? ?(am|pm)? ?and ?(\d{1,2})(?::(\d{2}))? ?(am|pm)?\b(?! ?(?:hours?|hrs?|minutes?|mins?))/) ??
-    take(/\b(?:from )?(\d{1,2})(?::(\d{2}))? ?(am|pm)? ?(?:-|to|until|till) ?(\d{1,2})(?::(\d{2}))? ?(am|pm)?\b(?! ?(?:hours?|hrs?|minutes?|mins?))/);
+    take(new RegExp(`\\bbetween ${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)? ?and ?${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)?\\b(?! ?(?:hours?|hrs?|minutes?|mins?))`)) ??
+    take(new RegExp(`\\b(?:from )?${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)? ?(?:-|to|until|till) ?${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)?\\b(?! ?(?:hours?|hrs?|minutes?|mins?))`));
   if (range) {
     const h1 = Number(range[1]);
     const m1 = Number(range[2] ?? 0);
@@ -533,7 +715,10 @@ export function parseClock(text: string): {
     const m2 = Number(range[5] ?? 0);
     const ap1 = range[3] as "am" | "pm" | undefined;
     const ap2 = range[6] as "am" | "pm" | undefined;
-    if (validClock(h1, m1) && validClock(h2, m2)) {
+    // An hour that gets am or pm (its own or the other end's) must be 1 to 12.
+    const valid1 = ap1 || ap2 ? validMeridiemClock(h1, m1) : validClock(h1, m1);
+    const valid2 = ap2 || ap1 ? validMeridiemClock(h2, m2) : validClock(h2, m2);
+    if (valid1 && valid2) {
       let starts: number[];
       let ends: number[];
       if (ap1 && ap2) {
@@ -573,25 +758,63 @@ export function parseClock(text: string): {
       out.end = { minutes: ends, text: range[0].trim() };
     }
   }
+  if (!out.start) rest = withMidnight;
 
   if (!out.start) {
-    // A single time with am/pm: "4 pm", "at 4:30pm", "start at 4 pm".
-    let single = /\b(?:at |@ ?|by |around )?(\d{1,2})(?::(\d{2}))? ?(am|pm)\b/.exec(rest);
+    // A lone "midnight" is the END of the day it names (24:00): "midnight tonight" is tonight,
+    // not the midnight that started today, and "end at midnight" ends the same day. It was read as
+    // 00:00 of that day until the review of 24 Nov 2026.
+    const midnight = /(?:^|\s)(?:at |by |around )?(?:12 ?)?midnight\b/.exec(rest);
+    if (midnight) {
+      if (endOnlyWords.test(rest.slice(0, midnight.index + 1))) out.endOnly = true;
+      cut(midnight);
+      out.start = { minutes: [1440], text: midnight[0].trim() };
+    }
+  }
+
+  if (!out.start) {
+    // A single time with am/pm: "4 pm", "at 4:30pm", "start at 4 pm", "8.15 pm".
+    let single = new RegExp(`\\b(?:at |@ ?|by |around )?${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)\\b`).exec(rest);
     let minutes: number[] | undefined;
-    if (single && validClock(Number(single[1]), Number(single[2] ?? 0))) {
-      minutes = [to24(Number(single[1]), Number(single[2] ?? 0), single[3] as "am" | "pm")];
+    if (single) {
+      // "13 am", "15 pm": am or pm with an hour that cannot have one. Not read by rule.
+      if (validMeridiemClock(Number(single[1]), Number(single[2] ?? 0))) {
+        minutes = [to24(Number(single[1]), Number(single[2] ?? 0), single[3] as "am" | "pm")];
+      }
     } else {
-      // "16:00", "9:30" (am or pm unknown), or a bare hour after "at"/"to": "at 4".
-      single = /\b(\d{1,2}):(\d{2})\b/.exec(rest) ?? /(?:^|\s)(?:at|to|for|around|@) ?(\d{1,2})(?!\d|:| ?(?:hours?|hrs?|minutes?|mins?|days?|weeks?|people|st|nd|rd|th))\b/.exec(rest) ?? /^\s*(\d{1,2})\s*$/.exec(rest);
-      if (single && validClock(Number(single[1]), Number(single[2] ?? 0))) {
-        minutes = bareClock(single[1], Number(single[2] ?? 0));
+      // "16:00", "9:30", "14.30", "14h30" (am or pm unknown below 13), or a bare hour after
+      // "at"/"to": "at 4". A time followed by am/pm was handled above.
+      const clock = new RegExp(`${HOUR_START}(\\d{1,2})([:.h])(\\d{2})\\b(?!\\.\\d)(?! ?(?:am|pm)\\b)`).exec(rest);
+      if (clock) {
+        const hour = Number(clock[1]);
+        const minute = Number(clock[3]);
+        const lead = rest.slice(0, clock.index);
+        // "9.10" and "1.12" are also a date (9 Oct, 1 Dec) unless "at" says it is a time; neither
+        // reading is applied by rule then (25.12 and 14.30 can only be one of them).
+        const maybeDate = clock[2] === "." && hour >= 1 && hour <= 31 && minute >= 1 && minute <= 12 && !/(?:\bat|@|\baround|\bby|\bfrom|\buntil|\btill)\s*$/.test(lead);
+        if (maybeDate) {
+          cut(clock);
+          out.unreadTime = true;
+        } else if (validClock(hour, minute)) {
+          single = clock;
+          minutes = bareClock(clock[1], minute);
+        }
+      } else {
+        single =
+          /(?:^|\s)(?:at|to|for|around|@) ?(\d{1,2})(?!\d|:|\.\d| ?(?:hours?|hrs?|minutes?|mins?|days?|weeks?|people|st|nd|rd|th)| ?(?:am|pm)\b)\b/.exec(rest) ??
+          /^\s*(\d{1,2})\s*$/.exec(rest);
+        if (single && validClock(Number(single[1]), 0)) minutes = bareClock(single[1], 0);
       }
     }
     if (single && minutes) {
       const before = rest.slice(0, single.index + (single[0].match(/^\s/) ? 1 : 0));
       if (endOnlyWords.test(before)) out.endOnly = true;
-      rest = `${rest.slice(0, single.index)} ${rest.slice(single.index + single[0].length)}`;
+      cut(single);
       out.start = { minutes, text: single[0].trim() };
+    } else if (single && !minutes && /(?:am|pm)$/.test(single[0])) {
+      // An impossible am/pm time is not left in the text for the bare readers.
+      cut(single);
+      out.unreadTime = true;
     }
   }
   out.rest = rest.replace(/\s+/g, " ").trim();
@@ -610,14 +833,153 @@ export function parseChangeRequest(message: string, today: string): ChangeReques
   return requests.find((request) => request.subjectWords.length > 0 || request.sourceDay || request.sourceClock) ?? requests[0] ?? null;
 }
 
+/** A clock time that limits or explains a request: "3 pm", "15:00", "8.15 pm", "3", "noon", "midnight". */
+const LIMIT_TIME = `(?:${HOUR_START}\\d{1,2}(?:[:.h]\\d{2})?(?: ?(?:am|pm))?|noon|midday|midnight)(?![\\d.:/])(?! ?(?:hours?|hrs?|h|minutes?|mins?|m|days?|weeks?)\\b)`;
+/**
+ * A limit on the new time instead of the new time itself: "before 3 pm", "by 5 pm", "no later
+ * than 5 pm", "after 6 pm", "after the lecture at 10 am", "anytime except 7 pm". "end by 5 pm" is
+ * the new end, so the end words stay with the clock reader.
+ */
+const LIMIT_RE = new RegExp(
+  "(?<!\\b(?:end(?:s|ing)?|finish(?:es|ing)?|wrap(?:s)? up) )" +
+    "\\b(before|by|no later than|not later than|latest|after|except|other than|not at|but not)\\s+" +
+    `(?:(?:the|my|our|your)\\s+(?:[a-z'-]+\\s+){0,4}?(?:at|from)\\s+)?(${LIMIT_TIME})`,
+  "g",
+);
+/** "at 5 pm at the latest": the same as "by 5 pm". */
+const AT_THE_LATEST_RE = new RegExp(`\\b(?:at |by )?(${LIMIT_TIME}) at the latest\\b`, "g");
+/** Clock times in the reason for a request: with am/pm or minutes, "at 7", noon or midnight. */
+const REASON_TIME_RE = new RegExp(
+  `\\b(?:at |until |till |from )?${HOUR_START}\\d{1,2}(?:[:.h]\\d{2})? ?(?:am|pm)\\b|${HOUR_START}\\d{1,2}[:.h]\\d{2}\\b|\\bat ${HOUR_START}\\d{1,2}\\b(?![:.]\\d)|\\b(?:noon|midday|midnight)\\b`,
+  "g",
+);
+
+/**
+ * Limits on the new start ("before 3 pm", "after 6 pm", "except 7 pm"), taken out of the text so
+ * that their time is not read as the new time (review of 24 Nov 2026: "to Friday before 3 pm"
+ * was moved to 15:00 by rule, over the model's correct 13:00).
+ */
+function readLimits(text: string): { text: string; bounds?: TimeBounds } {
+  const bounds: TimeBounds = {};
+  let found = false;
+  const latest = (minutes: number[], exclusive: boolean) => {
+    const value = Math.max(...minutes);
+    if (bounds.latest === undefined || value < bounds.latest) {
+      bounds.latest = value;
+      bounds.latestExclusive = exclusive;
+    }
+  };
+  const rest = text
+    .replace(AT_THE_LATEST_RE, (whole: string, time: string) => {
+      const minutes = parseClock(time).start?.minutes ?? [];
+      if (minutes.length === 0) return whole;
+      found = true;
+      latest(minutes, false);
+      return " ";
+    })
+    .replace(LIMIT_RE, (whole: string, word: string, time: string) => {
+      // "Push the team sync back by 1h30" is an amount, not a deadline, and "Delay the gym session
+      // by 10" most likely one too: "by" sets a deadline only with a clock time ("by 5 pm", "by 17:00").
+      if (word === "by" && (/^\d{1,2}h\d{2}$/.test(time) || /^\d{1,2}$/.test(time))) return whole;
+      const minutes = parseClock(time).start?.minutes ?? [];
+      if (minutes.length === 0) return whole;
+      found = true;
+      if (word === "before") latest(minutes, true);
+      else if (word === "after") bounds.earliest = Math.max(bounds.earliest ?? 0, Math.min(...minutes) % 1440);
+      else if (/^(?:except|other than|not at|but not)$/.test(word)) bounds.avoid = [...(bounds.avoid ?? []), ...minutes.map((m) => m % 1440)];
+      else latest(minutes, false);
+      return " ";
+    });
+  return found ? { text: rest, bounds } : { text };
+}
+
+/** Clock times (minutes after local midnight) named in the reason for a request. */
+function readReasonTimes(reason: string): number[] {
+  const times = new Set<number>();
+  for (const match of reason.matchAll(REASON_TIME_RE)) {
+    for (const minutes of parseClock(match[0]).start?.minutes ?? []) times.add(minutes % 1440);
+  }
+  return [...times];
+}
+
+/** The parts of a request that name the new day and time. */
+type Destination = Pick<
+  ChangeRequest,
+  "day" | "start" | "end" | "endOnly" | "durationMin" | "shiftMin" | "vagueTime" | "dayUnclear" | "weekStart" | "halfOfDay"
+>;
+
+/** The new day and time that a destination text names ("Friday at 3 pm", "an hour later"). */
+function readDestination(destination: string, today: string): Destination {
+  const dest = parseDay(destination, today);
+  let day = dest.day;
+  let dayRest = dest.rest;
+  // "Friday or Monday", "tomorrow or Friday": both days, so the model's choice or a question
+  // decides (review of 24 Nov 2026: the first day was taken by rule and the second one lost).
+  if (day && day !== "same" && !day.past && !day.unclear && /(?:^|\s)or\s/.test(dayRest)) {
+    const other = parseDay(dayRest, today);
+    if (other.day && other.day !== "same" && !other.day.past && !other.day.unclear) {
+      day = { dates: [...new Set([...day.dates, ...other.day.dates])], text: `${day.text} or ${other.day.text}` };
+      dayRest = other.rest.replace(/(?:^|\s)or(?=\s)/, " ");
+    }
+  }
+  const clock = parseClock(dayRest);
+  // "tomorrow morning at 7" is 7 AM, "this evening at 8" and "tonight at 9" are PM. "Tonight at
+  // 1" may be after midnight, so it stays a question.
+  const halfOfDay = /\bmorning\b/.test(destination) ? "am" : /\b(?:afternoon|evening|tonight|night)\b/.test(destination) ? "pm" : undefined;
+  if (halfOfDay && clock.start && clock.start.minutes.length === 2 && !clock.end) {
+    const lateNight = halfOfDay === "pm" && !/\b(?:afternoon|evening)\b/.test(destination);
+    const kept = clock.start.minutes.filter((minutes) => (halfOfDay === "am" ? minutes < 720 : minutes >= (lateNight ? 17 * 60 : 720)));
+    if (kept.length > 0) clock.start = { ...clock.start, minutes: kept };
+  }
+  const out: Destination = {
+    day,
+    start: clock.start,
+    end: clock.end,
+    endOnly: clock.endOnly || (/\buntil\b/.test(destination) && !clock.end ? Boolean(clock.start) : false),
+    durationMin: clock.durationMin,
+    halfOfDay,
+  };
+  if (clock.shiftMin !== undefined && !clock.shiftDirectionMissing && !clock.start) out.shiftMin = clock.shiftMin;
+  // Words the rules do not read: a time counted from now, a number that may be a date or a time.
+  const unread = Boolean(clock.shiftDirectionMissing || clock.unreadTime || clock.fromNow);
+  const leftover = clock.rest.replace(/\b(start(?:s|ing)?|begin(?:s|ning)?|at|on|the|it|instead|please|so|that|later|earlier|back|forward|ahead|o'?clock|sharp)\b/g, " ");
+  out.vagueTime = /\b(morning|afternoon|evening|night|week|weekend|month|after|before|asap|soon|sometime|free)\b/.test(leftover) || unread;
+  // A day was read, but week or month words next to it were not ("Friday next month", "Friday
+  // two weeks later"): the date is unknown.
+  // A week named without a day: "to next week", "to the same day next week", "to the week after
+  // next at 3 pm". The event keeps its weekday when a time or "same day" is given; with the week
+  // alone, the model's day counts only if it lies in that week, else MONDAY asks which day (the
+  // review of 11 Nov 2026 saw a model answer for THIS week accepted for "to next week").
+  if (day === undefined || day === "same") {
+    const weeks = /\bweek after next\b/.test(destination) ? 2 : /\b(?:next|following|coming) week\b/.test(destination) ? 1 : 0;
+    if (weeks > 0) {
+      const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+      out.weekStart = addDaysISO(today, 7 * weeks - ((todayWeekday + 6) % 7));
+      out.vagueTime = /\b(morning|afternoon|evening|night|weekend|month|before|asap|soon|sometime|free)\b/.test(leftover) || unread;
+    }
+  }
+  // Only words that qualify the day itself count: a date ("Friday the 20th, next week",
+  // "tomorrow like last week") is known whatever stands next to it, and "first thing in the
+  // week" says nothing about which week (review of 11 Nov 2026).
+  out.dayUnclear =
+    day !== undefined && day !== "same" && !day.exact &&
+    (Boolean(day.unclear) ||
+      /\b(?:next|last|previous|following|coming)\s+(?:weeks?|months?|year)\b|\b(?:in|after)\s+(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\b(?:weeks?|months?)\s+(?:from|later|after|ago)\b|\b(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\bfortnight\b|\bafter next\b/.test(leftover));
+  return out;
+}
+
 function readChangeRequest(text: string, verb: ChangeVerb, today: string): ChangeRequest {
 
   // Where the destination starts: the first " to " (or "at" after move/change) after the verb
   // that is followed by a time, a day or "start"/"end"; or a shift phrase ("an hour later").
   // "so it starts at 4 pm" is a destination ("to start at 4 pm"), not a reason.
-  let afterVerb = cutAtNextClause(
+  const { request: clause, reason } = splitAtNextClause(
     text.slice(verb.index + verb.length).replace(/\bso (?:that )?it (start|begin|end|finish)(?:s|es)?\b/g, "to $1"),
   );
+  let afterVerb = clause;
+  // "before 3 pm", "after the lecture at 10 am": a limit, not the new time.
+  let bounds: TimeBounds | undefined;
+  if (verb.kind === "move") ({ text: afterVerb, bounds } = readLimits(afterVerb));
   // A particle right after the verb ("push back the team sync an hour", "bring forward the
   // lecture") gives the direction, it is not part of the event's name.
   let particle = "";
@@ -631,14 +993,16 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
   // subject and was read as the day of the event to move (QA round 5).
   // After "to" only, and only next to a day or week word: "the review for Last mile" and "the
   // Next steps meeting" are names (review of 11 Nov 2026: " for last" started a destination).
-  const baseWords = `start|begin|end|finish|the same day|same day|the \\d|today|tonight|tomorrow|the day after|next|this|coming|on |noon|midday|midnight|\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b`;
+  const baseWords = `start|begin|end|finish|the same day|same day|the \\d|today|tonight|tomorrow|the day after|next|this|coming|on |noon|midday|midnight|(?:a )?quarter (?:past|after|to|before|of) \\d|half past \\d|\\d|${WEEKDAY_RE}\\b|${MONTH_RE}\\b`;
   const weekWords = `the day before|yesterday|(?:last|previous|this past) (?:${WEEKDAY_RE}|week)\\b|the week after|the following|following (?:${WEEKDAY_RE}|week)\\b|(?:a|one|two|three|four|five|six) (?:weeks?|days?)\\b|in (?:a|one|two|three|four|five|six|\\d)\\b|the ${WEEKDAY_RE}\\b|the (?:first|second|third|fourth|last) (?:${WEEKDAY_RE}|week)\\b`;
   const destinationWords = `(?=(?:${baseWords}))`;
   // "to"/"until"/"for" first; "at" only when there is none ("move the 3 pm meeting at ... to 4 pm"
   // names the old time with "at").
   const destStart = new RegExp(`\\s(?:(?:to|for|until|till)\\s${destinationWords}|to\\s(?=(?:${weekWords})))`);
   const atStart = new RegExp(`\\sat\\s${destinationWords}`);
-  const shiftAnywhere = /\b(?:back|forward|ahead|later|earlier)\b|\b(?:by )?(?:\d+(?:\.\d+)?|an?|one|two|half an?) ?(?:hours?|hrs?|minutes?|mins?) (?:later|earlier|back|forward)\b/;
+  // "three hours later", "an hour and a half later" and "two hours from now" start the destination
+  // as well: until the review of 24 Nov 2026 the amount stayed in the event's name.
+  const shiftAnywhere = new RegExp(`\\b(?:back|forward|ahead|later|earlier)\\b|\\b(?:by |in )?${AMOUNT} (?:later|earlier|back|forward|ahead|from now)\\b`);
 
   let subject = afterVerb;
   let destination = "";
@@ -661,9 +1025,7 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
     // "Postpone the team sync by 30 minutes", "push back the team sync an hour": the verb gives
     // the direction, the rest the amount.
     const directional = Boolean(particle) || /^(push|delay|postpone|bring|pull|prepone)$/.test(verb.verb);
-    const shift =
-      shiftAnywhere.exec(afterVerb) ??
-      (directional ? /\b(?:by )?(?:\d+(?:\.\d+)?|an?|one|two|half an?) ?(?:hours?|hrs?|minutes?|mins?)\b/.exec(afterVerb) : null);
+    const shift = shiftAnywhere.exec(afterVerb) ?? (directional ? new RegExp(`\\b(?:by )?${AMOUNT}\\b`).exec(afterVerb) : null);
     if (shift) {
       subject = afterVerb.slice(0, shift.index);
       destination = afterVerb.slice(shift.index);
@@ -682,12 +1044,23 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
   const source = parseDay(subject, today, { subject: true });
   let subjectRest = source.rest;
   let sourceClock: ClockRef | undefined;
-  const sourceTime = /\b(?:at |from )?(\d{1,2})(?::(\d{2}))? ?(am|pm)\b|\b(\d{1,2}):(\d{2})\b/.exec(subjectRest);
+  // In the name of the event, "14.30" and "14h30" are a time only after "at" or "from": "the
+  // Python 3.12 workshop" is a name.
+  const sourceTime = new RegExp(
+    `\\b(?:at |from )?${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)\\b|${HOUR_START}(\\d{1,2}):(\\d{2})\\b|\\b(?:at|from) (\\d{1,2})[.h](\\d{2})\\b(?!\\.\\d)`,
+  ).exec(subjectRest);
   if (sourceTime) {
+    // "the 13 am meeting" names no time.
+    const hourText = sourceTime[4] ?? sourceTime[6];
+    const minuteText = sourceTime[5] ?? sourceTime[7];
     const minutes = sourceTime[3]
-      ? [to24(Number(sourceTime[1]), Number(sourceTime[2] ?? 0), sourceTime[3] as "am" | "pm")]
-      : bareClock(sourceTime[4], Number(sourceTime[5]));
-    sourceClock = { minutes, text: sourceTime[0] };
+      ? validMeridiemClock(Number(sourceTime[1]), Number(sourceTime[2] ?? 0))
+        ? [to24(Number(sourceTime[1]), Number(sourceTime[2] ?? 0), sourceTime[3] as "am" | "pm")]
+        : []
+      : validClock(Number(hourText), Number(minuteText))
+        ? bareClock(hourText, Number(minuteText))
+        : [];
+    if (minutes.length > 0) sourceClock = { minutes, text: sourceTime[0] };
     subjectRest = `${subjectRest.slice(0, sourceTime.index)} ${subjectRest.slice(sourceTime.index + sourceTime[0].length)}`;
   }
   subjectRest = subjectRest.replace(/\b(?:the time of|the date of|time of)\b/g, " ").replace(/\s+/g, " ").trim();
@@ -702,44 +1075,13 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
   };
   if (kind === "cancel") return request;
 
-  const dest = parseDay(destination, today);
-  const clock = parseClock(dest.rest);
-  if (clock.start && clock.start.minutes.length === 2 && !clock.end) {
-    // "tomorrow morning at 7" is 7 AM, "this evening at 8" is 8 PM.
-    const half = /\bmorning\b/.test(destination) ? "am" : /\b(?:afternoon|evening)\b/.test(destination) ? "pm" : null;
-    if (half) clock.start = { ...clock.start, minutes: clock.start.minutes.filter((minutes) => (half === "am" ? minutes < 720 : minutes >= 720)) };
+  Object.assign(request, readDestination(destination, today));
+  if (bounds) {
+    request.bounds = bounds;
+    request.vagueTime = true;
   }
-  request.day = dest.day;
-  request.start = clock.start;
-  request.end = clock.end;
-  request.endOnly = clock.endOnly || (/\buntil\b/.test(destination) && !clock.end ? Boolean(clock.start) : false);
-  request.durationMin = clock.durationMin;
-  if (clock.shiftMin !== undefined && !clock.shiftDirectionMissing && !clock.start) request.shiftMin = clock.shiftMin;
-  const leftover = clock.rest.replace(/\b(start(?:s|ing)?|begin(?:s|ning)?|at|on|the|it|instead|please|so|that|later|earlier|back|forward|ahead|o'?clock|sharp)\b/g, " ");
-  request.vagueTime =
-    /\b(morning|afternoon|evening|night|week|weekend|month|after|before|asap|soon|sometime|free)\b/.test(leftover) ||
-    (clock.shiftDirectionMissing ?? false);
-  // A day was read, but week or month words next to it were not ("Friday next month", "Friday
-  // two weeks later"): the date is unknown.
-  // A week named without a day: "to next week", "to the same day next week", "to the week after
-  // next at 3 pm". The event keeps its weekday when a time or "same day" is given; with the week
-  // alone, the model's day counts only if it lies in that week, else MONDAY asks which day (the
-  // review of 11 Nov 2026 saw a model answer for THIS week accepted for "to next week").
-  if (request.day === undefined || request.day === "same") {
-    const weeks = /\bweek after next\b/.test(destination) ? 2 : /\b(?:next|following|coming) week\b/.test(destination) ? 1 : 0;
-    if (weeks > 0) {
-      const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
-      request.weekStart = addDaysISO(today, 7 * weeks - ((todayWeekday + 6) % 7));
-      request.vagueTime = /\b(morning|afternoon|evening|night|weekend|month|before|asap|soon|sometime|free)\b/.test(leftover) || (clock.shiftDirectionMissing ?? false);
-    }
-  }
-  // Only words that qualify the day itself count: a date ("Friday the 20th, next week",
-  // "tomorrow like last week") is known whatever stands next to it, and "first thing in the
-  // week" says nothing about which week (review of 11 Nov 2026).
-  request.dayUnclear =
-    dest.day !== undefined && dest.day !== "same" && !dest.day.exact &&
-    (Boolean(dest.day.unclear) ||
-      /\b(?:next|last|previous|following|coming)\s+(?:weeks?|months?|year)\b|\b(?:in|after)\s+(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\b(?:weeks?|months?)\s+(?:from|later|after|ago)\b|\b(?:a|an|one|two|three|four|five|six|\d+)\s+(?:weeks?|months?)\b|\bfortnight\b|\bafter next\b/.test(leftover));
+  const reasonTimes = readReasonTimes(reason);
+  if (reasonTimes.length > 0) request.reasonTimes = reasonTimes;
   return request;
 }
 
@@ -806,7 +1148,8 @@ export function asksForAction(message: string): boolean {
  */
 export function followsUpOnAction(previousAssistant: string | null | undefined, message: string): boolean {
   const previous = previousAssistant ?? "";
-  if (!/naming the day and the time|nothing (?:was|has been|in your calendar was) (?:added|prepared|changed)|\bwhich (?:day|date|one|event)\b|\bwhat time\b|\bdid you mean\b|should \*\*[^*]+\*\* move to/i.test(previous)) return false;
+  // "Please say the day and time you want." (after a model time that was not offered) asks too.
+  if (!/naming the day and the time|nothing (?:was|has been|in your calendar was) (?:added|prepared|changed)|\bwhich (?:day|date|one|event)\b|\bwhat time\b|\bdid you mean\b|should \*\*[^*]+\*\* move to|\bsay the day and time\b/i.test(previous)) return false;
   const raw = (message ?? "").trim();
   const text = normalizeRequest(message);
   if (!text || text.split(/\s+/).length > 14) return false;
@@ -888,7 +1231,9 @@ export function matchEvent(request: ChangeRequest, events: KnownEvent[], timeZon
 /** "the dentist appointment to after lunch" -> "the dentist appointment": the name ends at the first word that starts a destination or a time. */
 function subjectHead(subject: string): string | null {
   const padded = ` ${subject} `;
-  const m = /,|\s(?:to|so|that|until|till|by|from|after|before|into|onto|as|at)\s/.exec(padded);
+  // An amount of time ("the team sync three hours") and "anytime" ("the team sync anytime after
+  // 8 pm") end the name as well.
+  const m = new RegExp(`,|\\s(?:to|so|that|until|till|by|from|after|before|into|onto|as|at)\\s|\\s(?=${AMOUNT}\\b|any ?time\\b|sometime\\b)`).exec(padded);
   const head = m ? padded.slice(0, m.index).trim() : "";
   return head || null;
 }
@@ -941,6 +1286,20 @@ export function resolveMove(
     }
   }
 
+  // The limits the message sets ("before 3 pm", "not at 7 pm"); a time in its reason ("I'm busy
+  // at 7 pm") is never kept as the event's time on its new day.
+  const bounds = request.bounds;
+  const inBounds = (iso: string) => {
+    if (!bounds) return true;
+    const minutes = localDateTime(iso, timeZone).minutes;
+    if (bounds.latest !== undefined && (bounds.latestExclusive ? minutes >= bounds.latest : minutes > bounds.latest)) return false;
+    if (bounds.earliest !== undefined && minutes < bounds.earliest) return false;
+    return !(bounds.avoid ?? []).includes(minutes);
+  };
+  const atReasonTime = (iso: string) => (request.reasonTimes ?? []).includes(localDateTime(iso, timeZone).minutes);
+  const suggestionFits = (s: { starts_at: string; ends_at: string }) =>
+    Date.parse(s.ends_at) > Date.parse(s.starts_at) && inBounds(s.starts_at) && !atReasonTime(s.starts_at);
+
   let dates = request.day === "same" || request.day === undefined ? [original.date] : request.day.dates;
   let dayGiven = request.day !== undefined;
   const timeGiven = Boolean(request.start);
@@ -954,7 +1313,7 @@ export function resolveMove(
       // The week alone: the model's day, if it lies in that week; otherwise a question.
       if (suggestion) {
         const day = localDateTime(suggestion.starts_at, timeZone).date;
-        if (day >= request.weekStart && day <= addDaysISO(request.weekStart, 6) && Date.parse(suggestion.ends_at) > Date.parse(suggestion.starts_at)) {
+        if (day >= request.weekStart && day <= addDaysISO(request.weekStart, 6) && Date.parse(suggestion.ends_at) > Date.parse(suggestion.starts_at) && inBounds(suggestion.starts_at)) {
           return { status: "resolved", ...suggestion, byRule: false };
         }
       }
@@ -965,12 +1324,14 @@ export function resolveMove(
     zonedDateTimeToISO(addDaysISO(date, Math.floor(minutes / 1440)), { hour: Math.floor((minutes % 1440) / 60), minute: minutes % 60 }, timeZone);
 
   // Every reading the request allows: [start, end] pairs.
-  const readings: { starts_at: string; ends_at: string }[] = [];
+  let readings: { starts_at: string; ends_at: string }[] = [];
   if (!timeGiven && !dayGiven) {
-    // Nothing the rules can read ("to next week", "to a later time"): the model's proposal, if any.
-    if (suggestion) return { status: "resolved", ...suggestion, byRule: false };
+    // Nothing the rules can read ("to next week", "to a later time"): the model's proposal, if
+    // any, within the limits the message sets.
+    if (suggestion && (!bounds || suggestionFits(suggestion))) return { status: "resolved", ...suggestion, byRule: false };
     return { status: "unclear", question: `Which day and time should **${event.title}** move to?` };
   }
+  let ruledOut = false;
   for (const date of dates) {
     if (request.endOnly && request.start) {
       for (const minutes of request.start.minutes) {
@@ -988,23 +1349,29 @@ export function resolveMove(
         readings.push({ starts_at: startIso, ends_at: endIso });
       });
     } else if (!request.vagueTime) {
-      // A new day only: same clock time, same length.
+      // A new day only: same clock time, same length. Not at a time the reason rules out ("to
+      // tomorrow, I'm busy at 7 pm" for a 7 pm event).
       const startIso = at(date, original.minutes);
-      readings.push({ starts_at: startIso, ends_at: new Date(Date.parse(startIso) + durationMs).toISOString() });
+      if (atReasonTime(startIso)) ruledOut = true;
+      else readings.push({ starts_at: startIso, ends_at: new Date(Date.parse(startIso) + durationMs).toISOString() });
     }
   }
+  const allowed = readings.filter((reading) => inBounds(reading.starts_at));
+  if (allowed.length < readings.length) ruledOut = true;
+  readings = allowed;
 
   if (readings.length === 1) return { status: "resolved", ...readings[0], byRule: true };
 
   // A choice is left (am/pm, which Monday, "Friday afternoon"): the model's proposal decides
-  // only if it is one of the allowed readings (or, for a vague time, on an allowed day).
+  // only if it is one of the allowed readings (or, for a vague time, on an allowed day and
+  // within the limits the message sets).
   if (suggestion) {
     const suggestedStart = Date.parse(suggestion.starts_at);
     const match = readings.find((reading) => Date.parse(reading.starts_at) === suggestedStart);
     if (match) return { status: "resolved", ...match, byRule: false };
-    if (readings.length === 0 && request.vagueTime) {
+    if (readings.length === 0 && (request.vagueTime || ruledOut)) {
       const local = localDateTime(suggestion.starts_at, timeZone);
-      if (dates.includes(local.date) && Date.parse(suggestion.ends_at) > suggestedStart) {
+      if (dates.includes(local.date) && suggestionFits(suggestion)) {
         return { status: "resolved", ...suggestion, byRule: false };
       }
     }
@@ -1083,12 +1450,33 @@ export interface Reconciled {
 
 /** A message that talks about moving an event ("the dentist appointment was moved to Friday"). */
 const MOVE_WORD_ANYWHERE = /\b(move|moved|reschedule|postpone|shift|push (?:it )?back|bring (?:it )?forward)\b/;
-/** Words that ask to change something that exists. */
+/**
+ * Words that ask to change something that exists. "Get rid of", "take ... off my calendar",
+ * "rebook", "scratch", "nix", "erase", "unschedule" and an arrow ("team sync -> Friday") were
+ * missing until the review of 24 Nov 2026, so the model's correct cancel or move was left out.
+ * "Take the day off" is not about an event.
+ */
 const CHANGE_WORD_ANYWHERE =
-  /\b(move[sd]?|moving|reschedul\w*|postpon\w*|shift\w*|push\w*|delay\w*|prepone|cancel\w*|delet\w*|remov\w*|call off|scrap|drop\w*|chang\w*|updat\w*|edit|modif\w*|adjust\w*|switch|replace|rearrang\w*|bump|rename|swap|skip|free up|clear|later|earlier|instead|longer|shorter|extend|lengthen|shorten|(?:start|begin|end|finish)(?:s|es|ing)? at|can't make|cannot make|won't make)\b/;
+  /\b(move[sd]?|moving|reschedul\w*|postpon\w*|shift\w*|push\w*|delay\w*|prepone|cancel\w*|delet\w*|remov\w*|call off|scrap|drop\w*|chang\w*|updat\w*|edit|modif\w*|adjust\w*|switch|replace|rearrang\w*|bump|rename|swap|skip|free up|clear|later|earlier|instead|longer|shorter|extend|lengthen|shorten|(?:start|begin|end|finish)(?:s|es|ing)? at|can't make|cannot make|won't make|get(?:ting)? rid of|re-?book\w*|scratch|nix|erase|unschedul\w*|tak(?:e|es|ing) (?:the|my|our|this|that|it)\b(?:\s+[\w'-]+){0,4}?(?<!\b(?:day|days|time|week|weekend|morning|afternoon|evening|night))\s+(?:off|out of)(?!\s+(?:work|school|sick)\b))\b|->|=>|→/;
 /** "Don't cancel the team sync", "I do not want to move the lecture", "never reschedule ...". */
 const NEGATED_CHANGE_RE =
-  /\b(?:don't|dont|do not|never|not|no need to|without)\s+(?:\w+\s+){0,3}?(?:mov\w*|reschedul\w*|cancel\w*|delet\w*|remov\w*|postpon\w*|shift\w*|push\w*|chang\w*|drop\w*|touch\w*)\b/;
+  /\b(?:don't|dont|do not|never|not|no need to|without)\s+(?:\w+\s+){0,3}?(?:mov\w*|reschedul\w*|cancel\w*|delet\w*|remov\w*|postpon\w*|shift\w*|push\w*|chang\w*|drop\w*|touch\w*|get(?:ting)? rid|tak(?:e|es|ing)|re-?book\w*|scratch\w*|nix\w*|eras\w*|unschedul\w*)\b/;
+/**
+ * A question for advice, not a request (review of 24 Nov 2026: these kept the model's move or
+ * cancel card): "Should I cancel the team sync?", "Would moving the dentist appointment to
+ * Friday cause a conflict?", "Will it clash ...?". "Can you cancel ...?" and "Could we move ...?"
+ * ask for the change and stay requests.
+ */
+const ADVICE_QUESTION_RE = new RegExp(
+  `^(?:${FILLER},?\\s+){0,3}(?:(?:should|might|must|ought)\\s+(?:i|we|it|the|my|our|this|that)\\b|shall i\\b|(?:would|could|will|does|is)\\s+(?:moving|cancell?ing|rescheduling|postponing|shifting|pushing|dropping|deleting|removing)\\b|(?:would|will) it\\b)`,
+);
+/** "If I move the dentist appointment to Friday, will it clash with anything?" (with a question mark). */
+const IF_QUESTION_RE = new RegExp(`^(?:${FILLER},?\\s+){0,3}if\\s+(?:i|we)\\b`);
+/** "I can't cancel the team sync, right?": a tag question (read on the message with its question mark). */
+const TAG_QUESTION_RE = /,\s*(?:right|correct|yes|no|isn't it|is it|don't i|do i|can i|can't i|won't it|will it|okay|ok)\s*\?\s*$/;
+/** "Not sure if I should cancel ...", "I'm thinking about moving ...", "... would be bad": a thought, not a request. */
+const TENTATIVE_RE =
+  /\b(?:i|we)\s+(?:might|may|could)\s+(?:\w+\s+){0,2}?(?:mov|cancel|reschedul|postpon|shift|push|drop|delet|remov)\w*|\bnot sure (?:if|whether|about)\b|\b(?:i'm|i am|we're|we are|been)\s+(?:thinking|wondering)\b|\b(?:thinking|wondering) (?:about|of|if|whether)\b|\bwould be (?:bad|a problem|annoying|a shame|a pity|terrible)\b/;
 /** Words that allow a time between 00:00 and 05:59. */
 const EARLY_OK = /\b(\d{1,2}(?::\d{2})? ?am|morning|early|night|midnight|0[0-5]:\d{2}|[0-5]:\d{2})\b/;
 
@@ -1099,6 +1487,196 @@ function describe(event: KnownEvent, timeZone: string): string {
 function describeLocal(iso: string, timeZone: string): string {
   const local = localDateTime(iso, timeZone);
   return `${dayName(local.date)}, ${hhmm(local.minutes)}`;
+}
+
+/** MONDAY's last reply in the chat and the user message it answered (see reconcileCalendarChanges). */
+export interface PreviousTurn {
+  assistant?: string | null;
+  user?: string | null;
+}
+
+/**
+ * The previous turn of a chat history (oldest first; the current message may already be its last
+ * entry): MONDAY's last reply and the user message right before it.
+ */
+export function previousTurnOf(history: readonly { role: string; content?: unknown }[] | null | undefined): PreviousTurn {
+  const list = history ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].role !== "assistant") continue;
+    for (let j = i - 1; j >= 0; j--) {
+      if (list[j].role === "user") return { assistant: String(list[i].content ?? ""), user: String(list[j].content ?? "") };
+    }
+    return { assistant: String(list[i].content ?? "") };
+  }
+  return {};
+}
+
+/** An answer to MONDAY's own question back, read together with the request it answers. */
+interface FollowUp {
+  /** The event MONDAY asked about (named in bold in its reply). */
+  target: KnownEvent;
+  /** The earlier request with the answer read into it, when there is one the rules can read. */
+  request?: ChangeRequest;
+  /** Without such a request: the answer gives a day or a time (so it asks for a move). */
+  timeAnswer: boolean;
+  /** Without such a request: the clock times the answer gives, which a model move must match. */
+  clock?: number[];
+}
+
+/** "the first one", "the dentist appointment", "the one on Wednesday": which of MONDAY's candidates. */
+function pickCandidate(answer: string, candidates: KnownEvent[], today: string, timeZone: string): KnownEvent | undefined {
+  const ordinal = /\b(first|1st|second|2nd|third|3rd|fourth|4th|former|latter|last)\b/.exec(answer);
+  if (ordinal) {
+    const word = ordinal[1];
+    const index = /first|1st|former/.test(word) ? 0 : /second|2nd/.test(word) ? 1 : /third|3rd/.test(word) ? 2 : /fourth|4th/.test(word) ? 3 : candidates.length - 1;
+    return candidates[index];
+  }
+  const words = new Set(titleWords(answer).filter((word) => !GENERIC_NOUNS.has(word)));
+  const named = candidates.filter((event) => titleWords(event.title).some((word) => words.has(word)));
+  if (named.length === 1) return named[0];
+  const day = parseDay(answer, today, { subject: true });
+  const time = new RegExp(`${HOUR_START}(\\d{1,2})${MINUTES}? ?(am|pm)\\b|${HOUR_START}(\\d{1,2})[:.h](\\d{2})\\b`).exec(day.rest);
+  // "13 am" names no time, as in the request reader.
+  const minutes = time
+    ? time[3]
+      ? validMeridiemClock(Number(time[1]), Number(time[2] ?? 0))
+        ? [to24(Number(time[1]), Number(time[2] ?? 0), time[3] as "am" | "pm")]
+        : undefined
+      : validClock(Number(time[4]), Number(time[5]))
+        ? bareClock(time[4], Number(time[5]))
+        : undefined
+    : undefined;
+  const dates = day.day && day.day !== "same" && !day.day.unclear ? day.day.dates : undefined;
+  if (!dates && !minutes) return undefined;
+  const pool = named.length > 1 ? named : candidates;
+  const when = pool.filter((event) => {
+    const local = localDateTime(event.starts_at, timeZone);
+    return (!dates || dates.includes(local.date)) && (!minutes || minutes.includes(local.minutes));
+  });
+  return when.length === 1 ? when[0] : undefined;
+}
+
+/** "the second one" after "Did you mean 8:00 AM or 8:00 PM ...?" or "Which day did you mean ...: A or B?": that option's words. */
+function chosenOption(answer: string, question: string): string | null {
+  const ordinal = /^(?:(?:yes|ok|okay|sure),?\s+)?(?:the\s+)?(first|1st|second|2nd|former|latter|last)(?:\s+(?:one|option))?$/.exec(answer);
+  if (!ordinal) return null;
+  const listed = /did you mean (.+?) for \*\*/i.exec(question)?.[1] ?? /did you mean for \*\*[^*]+\*\*:\s*([^?]+)\?/i.exec(question)?.[1];
+  if (!listed) return null;
+  const options = listed.split(/\s+or\s+/);
+  const index = /first|1st|former/.test(ordinal[1]) ? 0 : /second|2nd/.test(ordinal[1]) ? 1 : options.length - 1;
+  return options[index] ? normalizeRequest(options[index]) : null;
+}
+
+/** "pm", "the evening one", "morning": which half of the day, as an answer to "8:00 AM or 8:00 PM?". */
+function halfOfDayAnswer(answer: string): "am" | "pm" | undefined {
+  const half = /^(?:(?:yes|ok|okay|sure),?\s+)?(?:in the |the |at )?(am|pm|morning|afternoon|evening|night|tonight)(?:\s+(?:one|please))?$/.exec(answer);
+  return half ? (/^(?:am|morning)$/.test(half[1]) ? "am" : "pm") : undefined;
+}
+
+/** The earlier request with an answer's day and time read into it. */
+function mergeAnswer(base: ChangeRequest, said: Destination, half: "am" | "pm" | undefined): ChangeRequest {
+  const merged: ChangeRequest = { ...base, certainty: "clear" };
+  // "pm" picks one of the earlier time's two readings, with its own end ("8-9", "pm").
+  const keepHalf = (start: ClockRef, end: ClockRef | undefined, which: "am" | "pm") => {
+    const kept = start.minutes.map((minutes, index) => ({ minutes, index })).filter(({ minutes }) => (which === "am" ? minutes < 720 : minutes >= 720));
+    if (kept.length === 0) return;
+    merged.start = { ...start, minutes: kept.map((k) => k.minutes) };
+    if (end) merged.end = { ...end, minutes: kept.map((k) => end.minutes[Math.min(k.index, end.minutes.length - 1)]) };
+  };
+  if (half && !said.start && base.start && base.start.minutes.length > 1) keepHalf(base.start, base.end, half);
+  if (said.day !== undefined || said.weekStart !== undefined) {
+    let day = said.day;
+    if (base.weekStart && day && day !== "same" && !day.exact && !day.past && !day.unclear) {
+      // "Thursday" after "Which day in the week of Mon, Nov 30 ...?": that week's Thursday.
+      const weekday = new Date(`${day.dates[0]}T12:00:00Z`).getUTCDay();
+      day = { dates: [addDaysISO(base.weekStart, (weekday + 6) % 7)], text: day.text, exact: true };
+    }
+    merged.day = day;
+    merged.dayUnclear = said.dayUnclear;
+    merged.weekStart = day !== undefined && day !== "same" ? undefined : said.weekStart ?? base.weekStart;
+  }
+  if (said.start) {
+    merged.start = said.start;
+    merged.end = said.end;
+    if (!said.end && base.end && base.start) {
+      // "8 pm" for "8-9" (am or pm): the end that belongs with that start.
+      const index = base.start.minutes.findIndex((minutes) => said.start?.minutes.includes(minutes));
+      if (index >= 0) merged.end = { ...base.end, minutes: [base.end.minutes[Math.min(index, base.end.minutes.length - 1)]] };
+    }
+    if (said.start.minutes.length > 1 && !merged.end && base.halfOfDay) keepHalf(said.start, undefined, base.halfOfDay);
+    merged.endOnly = said.endOnly || (!said.end && Boolean(base.endOnly));
+    merged.shiftMin = undefined;
+  }
+  if (said.shiftMin !== undefined) {
+    merged.shiftMin = said.shiftMin;
+    merged.start = undefined;
+    merged.end = undefined;
+  }
+  if (said.durationMin !== undefined) merged.durationMin = said.durationMin;
+  merged.vagueTime = Boolean(said.vagueTime) || (!said.start && said.shiftMin === undefined && Boolean(base.vagueTime));
+  return merged;
+}
+
+/**
+ * A short answer to MONDAY's own question back ("8 pm", "Dec 4", "the first one", "Friday at 3
+ * pm"). It names no event and often no verb, so on its own it was read as no request at all and
+ * the model's change was left out (review of 24 Nov 2026). The event is the one MONDAY's reply
+ * named in bold; the answer is read into the earlier request when the rules can read that one.
+ */
+function readFollowUp(
+  previous: PreviousTurn,
+  message: string,
+  current: ChangeRequest | null,
+  events: KnownEvent[],
+  today: string,
+  timeZone: string,
+): FollowUp | null {
+  const question = previous.assistant ?? "";
+  if (!followsUpOnAction(question, message)) return null;
+  // MONDAY's own question about where one event should move ("Which day and time should **X**
+  // move to?", "Did you mean 8:00 AM or 8:00 PM for **X**?", "Which day did you mean for **X**:
+  // ...?") is about that event, whatever else the reply names in bold.
+  const asked = /\bshould \*\*([^*\n]+)\*\* move to\?|\bfor \*\*([^*\n]+)\*\*(?::[^?\n]*)?\?/i.exec(question);
+  const askedEvent = asked ? events.find((e) => sameTitle(e.title, asked[1] ?? asked[2])) : undefined;
+  const candidates: KnownEvent[] = askedEvent ? [askedEvent] : [];
+  if (!askedEvent) {
+    for (const bold of question.matchAll(/\*\*([^*\n]+)\*\*/g)) {
+      const event = events.find((e) => sameTitle(e.title, bold[1]));
+      if (event && !candidates.includes(event)) candidates.push(event);
+    }
+  }
+  if (candidates.length === 0) return null;
+  const answer = normalizeRequest(message);
+  const target = candidates.length === 1 ? candidates[0] : pickCandidate(answer, candidates, today, timeZone);
+  if (!target) return null;
+  // The request that MONDAY's reply answered, unless it named another event.
+  let base = previous.user ? parseChangeRequest(previous.user, today) : null;
+  if (base) {
+    const named = matchEvent(base, events, timeZone);
+    if (named.status === "one" && named.event.id !== target.id) base = null;
+  }
+  const kind = current?.kind ?? base?.kind ?? "move";
+  const blank: ChangeRequest = { kind, certainty: "clear", subject: target.title.toLowerCase(), subjectWords: titleWords(target.title) };
+  if (candidates.length > 1) {
+    // The answer said which event; the earlier request says what to do with it.
+    const request = base ?? (current ? { ...current, certainty: "clear" as const } : null);
+    return request ? { target, request: { ...request, kind, certainty: "clear" }, timeAnswer: false } : { target, timeAnswer: false };
+  }
+  if (kind === "cancel") return { target, request: { ...(base ?? blank), kind: "cancel", certainty: "clear" }, timeAnswer: false };
+  const said = readDestination(chosenOption(answer, question) ?? answer, today);
+  const half = halfOfDayAnswer(answer);
+  const timeAnswer = Boolean(said.day || said.start || said.shiftMin !== undefined || said.weekStart || half);
+  // "Move it to 8 pm": the answer is a whole request for the event MONDAY asked about.
+  if (!base && current) return { target, request: { ...current, certainty: "clear" }, timeAnswer };
+  if (!base) {
+    // "Friday at 3 pm" after MONDAY's own "Which day and time should **X** move to?", when the
+    // earlier request is not at hand: the answer is the move, read like "Move X to Friday at 3 pm".
+    if (askedEvent && timeAnswer) return { target, request: mergeAnswer(blank, said, half), timeAnswer };
+    return { target, timeAnswer, clock: said.start?.minutes };
+  }
+  // "Yes, go ahead": the earlier request again, now with the model's current answer.
+  if (!timeAnswer) return { target, request: { ...base, certainty: "clear" }, timeAnswer };
+  return { target, request: mergeAnswer(base, said, half), timeAnswer };
 }
 
 /**
@@ -1122,6 +1700,13 @@ export function reconcileCalendarChanges(opts: {
   modelProposals: ProposedBlock[];
   /** Changes the model made for event ids that are not in the calendar (already dropped). */
   unknownChangeRefs?: number;
+  /**
+   * MONDAY's last reply and the user message it answered (previousTurnOf(history)). When that
+   * reply asked a question back about an event ("Did you mean 8:00 AM or 8:00 PM for **Team
+   * sync**?", "Which one do you mean?") or said that nothing was changed, and this message
+   * answers it ("8 pm", "Dec 4", "the first one"), the answer is read as part of that request.
+   */
+  previousTurn?: PreviousTurn;
 }): Reconciled {
   const { message, timeZone, nowMs, events } = opts;
   const text = normalizeRequest(message);
@@ -1139,6 +1724,8 @@ export function reconcileCalendarChanges(opts: {
   });
 
   const request = parseChangeRequest(message, opts.today);
+  /** The request the result is built from: the message's own, or an answer read into an earlier one. */
+  let active = request;
   /**
    * The proposals that are left, as the user will see them: a reminder the model titled exactly
    * like the event it is about is called "Reminder: ..." (QA round 4's "Set a reminder for my
@@ -1158,11 +1745,11 @@ export function reconcileCalendarChanges(opts: {
       sameTitleAs.push({ title: proposal.title, event: same });
       return proposal;
     });
-    return { request, ...base, proposals: shown, sameTitleAs, log };
+    return { request: active, ...base, proposals: shown, sameTitleAs, log };
   };
 
   const finish = (target: KnownEvent | null, changes: ReconciledChange[], note?: string): Reconciled => {
-    if (target && request?.kind !== "cancel") {
+    if (target && active?.kind !== "cancel") {
       // The event the user asked to move is never proposed again as a new event. (After a cancel
       // a new one may be wanted: "Cancel the dentist appointment and book a new one for Friday".)
       proposals = proposals.filter((proposal) => {
@@ -1200,28 +1787,46 @@ export function reconcileCalendarChanges(opts: {
    * Not a move or cancel request the rules can read: the model's proposals stay, and its changes
    * to existing events are checked. A change is kept only when the message asks for a change at
    * all ("The dentist appointment needs to be later", "Put the team sync on Friday") and is not
-   * a request for something new ("Set a reminder for my dentist appointment at 1 pm") or a
-   * refusal ("Don't cancel the team sync"); otherwise it is left out and the reply says so.
+   * a request for something new ("Set a reminder for my dentist appointment at 1 pm"), a refusal
+   * ("Don't cancel the team sync") or a question ("Should I cancel the team sync?"); otherwise it
+   * is left out and the reply says so. After MONDAY's own question back (`followUp`), the answer
+   * asks for a change of the event the question was about, and of no other.
    */
-  const withoutRequest = (acceptChanges = true): Reconciled => {
+  const withoutRequest = (acceptChanges = true, followUp?: FollowUp): Reconciled => {
     // A message about a reminder asks for a reminder, whatever verb it starts with; a message to
-    // write or tell something ("Email the team that the sync is cancelled") asks for that.
+    // write or tell something ("Email the team that the sync is cancelled", "Let Alicia know we
+    // need to cancel the team sync") asks for that.
     const creating =
-      CREATE_RE.test(text) || /\b(?:remind\w*|to-?dos?|note to self)\b/.test(text) || COMMUNICATE_RE.test(text) || ADD_TO_CALENDAR_RE.test(text);
+      CREATE_RE.test(text) ||
+      /\b(?:remind\w*|to-?dos?|note to self)\b/.test(text) ||
+      COMMUNICATE_RE.test(text) ||
+      ADD_TO_CALENDAR_RE.test(text) ||
+      OTHER_ACTION_RE.test(text);
     const negated = NEGATED_CHANGE_RE.test(text);
-    const question = /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) || (/\?\s*$/.test(message.trim()) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text));
+    const raw = message.trim().toLowerCase().replace(/[‘’ʼ]/g, "'");
+    const question =
+      /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) ||
+      (/\?\s*$/.test(raw) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text)) ||
+      ADVICE_QUESTION_RE.test(text) ||
+      (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) ||
+      TAG_QUESTION_RE.test(raw) ||
+      TENTATIVE_RE.test(text);
     // "Move on", "moving forward with ..." and "Push workout" are not about changing an event.
     const withoutIdioms = text.replace(NOUN_USE_RE, " ").replace(/\bmov(?:e|ing) (?:on|over|out|along|away|in|(?:forward|ahead) with)\b/g, " ");
-    const asksChange = acceptChanges && !creating && !negated && !question && CHANGE_WORD_ANYWHERE.test(withoutIdioms);
-    // A change is kept only for an event the message mentions: by a word of its title, or by its day.
+    const asksChange = acceptChanges && !creating && !negated && !question && (Boolean(followUp) || CHANGE_WORD_ANYWHERE.test(withoutIdioms));
+    // A change is kept only for an event the message mentions: by a word of its title, or by its
+    // day (a date the rules could not read names no day). An answer to MONDAY's question is
+    // about the event it asked about.
     const messageWords = new Set(titleWords(text));
     const messageDay = parseDay(text, opts.today).day;
     const mentioned = (event: KnownEvent) =>
-      titleWords(event.title).some((word) => messageWords.has(word)) ||
-      (messageDay !== undefined && messageDay !== "same" && messageDay.dates.includes(localDateTime(event.starts_at, timeZone).date));
+      followUp
+        ? event.id === followUp.target.id
+        : titleWords(event.title).some((word) => messageWords.has(word)) ||
+          (messageDay !== undefined && messageDay !== "same" && !messageDay.unclear && messageDay.dates.includes(localDateTime(event.starts_at, timeZone).date));
     // A new event with the title of an existing one, in a message that talks about moving, is
     // that event moved (QA round 3 saw a "moved" dentist appointment proposed as a second one).
-    if (asksChange && MOVE_WORD_ANYWHERE.test(text)) {
+    if (asksChange && (MOVE_WORD_ANYWHERE.test(text) || Boolean(followUp?.timeAnswer))) {
       for (const proposal of proposals) {
         const same = events.filter((event) => sameTitle(event.title, proposal.title));
         if (same.length !== 1 || !mentioned(same[0])) continue;
@@ -1244,15 +1849,19 @@ export function reconcileCalendarChanges(opts: {
       found.day.dates.forEach((date) => namedDates.add(date));
       unread = found.rest;
     }
-    const unasked: KnownEvent[] = [];
+    const unasked: { event: KnownEvent; kind: ModelChange["kind"]; moves: boolean }[] = [];
     const changes: ReconciledChange[] = [];
     let note: string | undefined;
     for (const change of opts.modelChanges) {
-      if (!asksChange || !mentioned(change.event)) {
+      // An answer that gives a day or a time asks for a move, not a cancel.
+      const wrongKind = Boolean(followUp?.timeAnswer) && change.kind === "delete";
+      if (!asksChange || !mentioned(change.event) || wrongKind) {
         log.push(
-          `dropped a model ${change.kind} of "${change.event.title}": the message ${creating ? "asks for something new or to write something" : negated ? "says not to change it" : question ? "is a question" : acceptChanges && asksChange ? "does not mention this event" : acceptChanges ? "does not ask for a change" : "does not name this event"}`,
+          `dropped a model ${change.kind} of "${change.event.title}": the message ${creating ? "asks for something new or to write something" : negated ? "says not to change it" : question ? "is a question or a thought, not a request" : wrongKind ? "answers with a day or time" : acceptChanges && asksChange ? "does not mention this event" : acceptChanges ? "does not ask for a change" : "does not name this event"}`,
         );
-        if (!unasked.includes(change.event)) unasked.push(change.event);
+        if (!unasked.some((u) => u.event === change.event)) {
+          unasked.push({ event: change.event, kind: change.kind, moves: Boolean(change.starts_at || change.ends_at) });
+        }
         continue;
       }
       if (change.kind === "delete") {
@@ -1280,6 +1889,12 @@ export function reconcileCalendarChanges(opts: {
           log.push(`dropped a model update of "${change.event.title}" to ${newDay}: the message names ${[...namedDates].join(", ")}`);
           continue;
         }
+        // "8 pm" as an answer: the model's move must be at that time.
+        if (followUp?.clock && !followUp.clock.includes(localDateTime(startsAt, timeZone).minutes)) {
+          note = `The AI model proposed ${describeLocal(startsAt, timeZone)} for **${change.event.title}**, which is not the time you gave. Which day and time should it move to?`;
+          log.push(`dropped a model update of "${change.event.title}" to ${startsAt}: the answer gives another time`);
+          continue;
+        }
       }
       if (!timeChanged && !change.title) continue;
       changes.push({
@@ -1290,12 +1905,77 @@ export function reconcileCalendarChanges(opts: {
       });
     }
     if (unasked.length > 0) {
-      note = `The AI model also suggested changing ${unasked.map((e) => describe(e, timeZone)).join(", ")}. I did not read your message as asking for that, so I left it out. To move or cancel an event, name it, for example "Move ${unasked[0].title} to Friday at 3 pm".`;
+      // Say what was left out (a cancel, a move) and, when the message already named the event,
+      // how to ask for it instead of telling the user to name it (review of 24 Nov 2026).
+      const first = unasked[0];
+      const verb = unasked.every((u) => u.kind === "delete") ? "cancelling" : unasked.every((u) => u.kind === "update" && u.moves) ? "moving" : "changing";
+      const example = first.kind === "delete" ? `Cancel ${first.event.title}` : `Move ${first.event.title} to Friday at 3 pm`;
+      const advice = mentioned(first.event)
+        ? `If you want that, please say so, for example "${example}".`
+        : `To ${first.kind === "delete" ? "cancel" : "move"} an event, name it, for example "${example}".`;
+      note = `The AI model also suggested ${verb} ${unasked.map((u) => describe(u.event, timeZone)).join(", ")}. I did not read your message as asking for that, so I left it out. ${advice}`;
     } else if (!note && changes.length === 0 && (opts.unknownChangeRefs ?? 0) > 0) {
       note = "The AI model referred to an event that is not in your calendar, so there is no change to save.";
     }
     return result({ changeRequest: false, changes, note, unasked: unasked.length > 0 });
   };
+
+  /** The change of `target` that `req` asks for; `named` when the event was named, not guessed from the model. */
+  const changeEvent = (target: KnownEvent, req: ChangeRequest, named: boolean): Reconciled => {
+    if (req.kind === "cancel") return finish(target, [{ kind: "delete", event: target, byRule: named }]);
+    // The model's own proposal for this event, used only where the request leaves a choice.
+    const modelUpdate = opts.modelChanges.find((c) => c.kind === "update" && c.event.id === target.id && (c.starts_at || c.ends_at));
+    const modelProposal = proposals.find((p) => coversTitle(p.title, target.title) || sameTitle(p.title, target.title));
+    const readable = req.day !== undefined || req.start !== undefined || req.shiftMin !== undefined || req.weekStart !== undefined;
+    if (!readable && !req.vagueTime && !modelUpdate && !modelProposal) {
+      // "Move the dentist appointment": no new day or time, and the model did not move this event
+      // either, so there is no change to offer (a change it made to ANOTHER event is left out).
+      return withoutRequest(false);
+    }
+    const lengthMs = Date.parse(target.ends_at) - Date.parse(target.starts_at);
+    const suggestion = modelUpdate
+      ? {
+          starts_at: modelUpdate.starts_at ?? target.starts_at,
+          ends_at:
+            modelUpdate.ends_at ??
+            (modelUpdate.starts_at ? new Date(Date.parse(modelUpdate.starts_at) + lengthMs).toISOString() : target.ends_at),
+        }
+      : modelProposal
+        ? { starts_at: modelProposal.starts_at, ends_at: modelProposal.ends_at }
+        : undefined;
+    if (!modelUpdate && modelProposal) {
+      log.push(`the model proposed "${modelProposal.title}" as a new event; treated as a move of the existing event`);
+    }
+    const resolved = resolveMove(req, target, timeZone, suggestion);
+    if (resolved.status === "unclear") return finish(target, [], resolved.question);
+    if (
+      suggestion &&
+      resolved.byRule &&
+      (Date.parse(suggestion.starts_at) !== Date.parse(resolved.starts_at) || Date.parse(suggestion.ends_at) !== Date.parse(resolved.ends_at))
+    ) {
+      log.push(`corrected the model's time for "${target.title}" from ${suggestion.starts_at}/${suggestion.ends_at} to ${resolved.starts_at}/${resolved.ends_at}`);
+    }
+    const problem = checkTime(target, resolved.starts_at, resolved.ends_at, resolved.byRule);
+    if (problem) return finish(target, [], problem);
+    return finish(target, [
+      { kind: "update", event: target, next: { starts_at: resolved.starts_at, ends_at: resolved.ends_at }, byRule: resolved.byRule },
+    ]);
+  };
+
+  // An answer to MONDAY's own question back ("8 pm", "Dec 4", "The first one", "Move it to 8
+  // pm"): the event is the one the question was about.
+  const unnamedRequest = request !== null && request.subjectWords.length === 0 && !request.sourceDay && !request.sourceClock;
+  if (opts.previousTurn && (request === null || unnamedRequest)) {
+    const followUp = readFollowUp(opts.previousTurn, message, request, events, opts.today, timeZone);
+    if (followUp) {
+      log.push(`read as an answer to the question about "${followUp.target.title}"`);
+      if (followUp.request) {
+        active = followUp.request;
+        return changeEvent(followUp.target, followUp.request, true);
+      }
+      return withoutRequest(true, followUp);
+    }
+  }
   if (!request) return withoutRequest();
 
   const readable = request.day !== undefined || request.start !== undefined || request.shiftMin !== undefined || request.weekStart !== undefined;
@@ -1410,45 +2090,17 @@ export function reconcileCalendarChanges(opts: {
     }
   }
 
-  if (request.kind === "cancel") {
-    return finish(target, [{ kind: "delete", event: target, byRule: match.status === "one" }]);
-  }
+  return changeEvent(target, request, match.status === "one");
+}
 
-  // The model's own proposal for this event, used only where the request leaves a choice.
-  const chosen = target;
-  const modelUpdate = opts.modelChanges.find((c) => c.kind === "update" && c.event.id === chosen.id && (c.starts_at || c.ends_at));
-  const modelProposal = proposals.find((p) => coversTitle(p.title, chosen.title) || sameTitle(p.title, chosen.title));
-  if (!readable && !request.vagueTime && !modelUpdate && !modelProposal) {
-    // "Move the dentist appointment": no new day or time, and the model did not move this event
-    // either, so there is no change to offer (a change it made to ANOTHER event is left out).
-    return withoutRequest(false);
-  }
-  const lengthMs = Date.parse(chosen.ends_at) - Date.parse(chosen.starts_at);
-  const suggestion = modelUpdate
-    ? {
-        starts_at: modelUpdate.starts_at ?? chosen.starts_at,
-        ends_at:
-          modelUpdate.ends_at ??
-          (modelUpdate.starts_at ? new Date(Date.parse(modelUpdate.starts_at) + lengthMs).toISOString() : chosen.ends_at),
-      }
-    : modelProposal
-      ? { starts_at: modelProposal.starts_at, ends_at: modelProposal.ends_at }
-      : undefined;
-  if (!modelUpdate && modelProposal) {
-    log.push(`the model proposed "${modelProposal.title}" as a new event; treated as a move of the existing event`);
-  }
-  const resolved = resolveMove(request, chosen, timeZone, suggestion);
-  if (resolved.status === "unclear") return finish(chosen, [], resolved.question);
-  if (
-    suggestion &&
-    resolved.byRule &&
-    (Date.parse(suggestion.starts_at) !== Date.parse(resolved.starts_at) || Date.parse(suggestion.ends_at) !== Date.parse(resolved.ends_at))
-  ) {
-    log.push(`corrected the model's time for "${chosen.title}" from ${suggestion.starts_at}/${suggestion.ends_at} to ${resolved.starts_at}/${resolved.ends_at}`);
-  }
-  const problem = checkTime(chosen, resolved.starts_at, resolved.ends_at, resolved.byRule);
-  if (problem) return finish(chosen, [], problem);
-  return finish(chosen, [
-    { kind: "update", event: chosen, next: { starts_at: resolved.starts_at, ends_at: resolved.ends_at }, byRule: resolved.byRule },
-  ]);
+/**
+ * Does the message ask MONDAY to send something (an email, a message, a reply) to someone? MONDAY
+ * never sends, so the reply guard answers such a request with where drafts go, not with "try
+ * again, naming the day and the time" (review of 24 Nov 2026). "Send me my schedule" and "Email
+ * summary, please" ask for an answer in the chat; "Draft a reply ..." asks for a draft.
+ */
+export function asksToSend(message: string): boolean {
+  if (asksForInformation(message)) return false;
+  const text = normalizeRequest(message).replace(/^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/, "");
+  return OUTBOUND_RE.test(text) && !NOUN_USE_OUTBOUND_RE.test(text);
 }
