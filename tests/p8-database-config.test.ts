@@ -90,8 +90,62 @@ describe("text length limits agreed with the forms and the server (contract 2)",
   });
 });
 
+describe("rows per account (finding 41)", () => {
+  const limits = sql("20261124110100");
+  // One account's worst case stays a small share of the free database (500 MB): see the
+  // migration's header for the sum.
+  const caps: Array<[string, number]> = [
+    ["calendar_events", 1000],
+    ["chat_card_actions", 1000],
+    ["chat_messages", 1000],
+    ["chat_sessions", 100],
+    ["connector_status", 20],
+    ["email_drafts", 100],
+    ["planner_requests", 200],
+    ["week_plan_requests", 300],
+  ];
+
+  it.each(caps)("%s: at most %i rows per user, with a sentence for the visitor", (table, cap) => {
+    const trigger = limits.match(
+      new RegExp(
+        `create trigger ${table}_row_limit before insert on public\\.${table} for each row execute function public\\.enforce_user_row_limit\\( '(\\d+)', '([^']*)' \\)`,
+      ),
+    );
+    expect(trigger?.[1]).toBe(String(cap));
+    const sentence = trigger?.[2] ?? "";
+    expect(sentence).toMatch(/^This demo account has reached its limit of /);
+    // No table or column names in what a visitor may read; they go in the error's DETAIL.
+    expect(sentence).not.toMatch(/_/);
+  });
+
+  it("names the table only in the error detail", () => {
+    expect(limits).toContain(
+      "detail = format('Row limit %s per user on %I.%I.', v_limit, tg_table_schema, tg_table_name)",
+    );
+    expect(limits).not.toMatch(/raise exception '[^']*%[^']*rows in %/);
+  });
+
+  it("limits the weeks with a stored plan for every role, letting a re-plan of a week through", () => {
+    expect(limits).toContain(
+      "create trigger weekly_plans_row_limit before insert on public.weekly_plans for each row execute function public.enforce_weekly_plan_limit('52')",
+    );
+    const fn = limits.slice(limits.indexOf("function public.enforce_weekly_plan_limit()"));
+    expect(fn).not.toContain("current_user <> 'authenticated'");
+    expect(fn.indexOf("week_start = new.week_start")).toBeLessThan(fn.indexOf("select count(*)"));
+  });
+});
+
 describe("one running request at a time (contract 3)", () => {
   const running = sql("20261124110200");
+
+  it("has a hosted step that closes cut-off requests again right before the new code ships", () => {
+    const close = read("supabase/hosted/close_stale_running_requests.sql").replace(/\s+/g, " ");
+    for (const table of ["week_plan_requests", "planner_requests"]) {
+      expect(close).toContain(
+        `update public.${table} set status = 'failed', error = 'This request was cut off before it finished.', finished_at = coalesce(finished_at, now()) where status = 'running' and created_at < now() - interval '15 minutes'`,
+      );
+    }
+  });
 
   it("creates the partial unique indexes after closing older running rows", () => {
     expect(running).toMatch(
@@ -139,8 +193,10 @@ describe("rows only the server writes (finding 49)", () => {
     expect(rows).toContain("revoke insert, delete on table public.weekly_plans from anon, authenticated");
   });
 
-  it("lets the user's token insert only plain user messages", () => {
-    expect(rows).toMatch(/create policy "msgs_insert_own"[^;]*role = 'user' and panel_payload is null/);
+  it("lets the user's token insert only plain user messages of chat-form length", () => {
+    expect(rows).toMatch(
+      /create policy "msgs_insert_own"[^;]*role = 'user' and panel_payload is null and char_length\(content\) <= 4000/,
+    );
   });
 
   it("keeps request rows to the columns the app writes with the user's token", () => {

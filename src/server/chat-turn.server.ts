@@ -592,13 +592,17 @@ async function answerChatTurn(
           .join("; ")}`;
   const calendarForPrompt = (() => {
     if (soonEvents.length === 0) return "  (no events)";
+    // The earliest events in full, up to a fixed number, so a crowded calendar cannot make every
+    // prompt longer without end; the model is told how many more there are.
+    const listedSoon = soonEvents.slice(0, CHAT_PROMPT_LIMITS.soonEvents);
+    const omitted = soonEvents.length - listedSoon.length;
     const groups = new Map<string, KnownEvent[]>();
-    for (const event of soonEvents) {
+    for (const event of listedSoon) {
       const date = localDateTime(event.starts_at, timeZone).date;
       if (!groups.has(date)) groups.set(date, []);
       groups.get(date)!.push(event);
     }
-    return Array.from(groups.entries())
+    const listed = Array.from(groups.entries())
       .map(([date, events]) => {
         const label = `${weekdayName(date)} ${date}${date === todayDate ? " (today)" : date === addDaysISO(todayDate, 1) ? " (tomorrow)" : ""}`;
         const rows = events.map((event) => {
@@ -610,8 +614,10 @@ async function answerChatTurn(
         return `  ${label}:\n${rows.join("\n")}`;
       })
       .join("\n");
+    return omitted > 0 ? `${listed}\n  (${omitted} later events in these days are not listed)` : listed;
   })();
   const nowLocal = localDateTime(Date.now(), timeZone);
+  const userContext = userContextForPrompt(profile, tasks);
   // What the prompt's short ids stand for, so a reply that still names one shows the event's
   // title or the email instead, and a sentence about an id the prompt never had is dropped.
   const replyRefs: ReplyRefs = {
@@ -651,9 +657,7 @@ INSTRUCTIONS:
 - When user asks to reply / draft a response to a specific email, populate "email_reply" with that email's id (e1, e2, ...) and a polished 3-6 sentence body. Never claim it was sent.
 
 USER PROFILE:
-- Name: ${profile?.name ?? "User"}
-- Role: ${profile?.role ?? "Professional"}
-- Goals: ${profile?.goals ?? "(not specified)"}
+${userContext.profile}
 
 CURRENT CONTEXT (all times local, 24-hour, time zone ${timeZone}):
 - Now: ${weekdayName(nowLocal.date)} ${nowLocal.date} ${nowLocal.hhmm}
@@ -669,7 +673,7 @@ ${calendarForPrompt}${laterForPrompt}
 ${emailsForPrompt || "  (none)"}
 
 - Active tasks:
-${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #${task.priority_rank ?? "?"} ${task.title} — ${task.reason ?? ""}`).join("\n")}`;
+${userContext.tasks}`;
 
   // 5. LLM
   const recentHistory = (history ?? []).slice(-10).map((entry) => ({
@@ -855,9 +859,11 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     const { error: insertTasksError } = await store.from("tasks").insert(
       priorities.map((priority) => ({
         user_id: userId,
-        title: priority.title,
+        // The database keeps a task's title to 300 and its reason to 1000 characters
+        // (20261124110100): a longer model answer is cut here instead of failing the turn.
+        title: priority.title.slice(0, 300),
         priority_rank: priority.rank,
-        reason: priority.reason,
+        reason: priority.reason.slice(0, 1000),
         source: rulePriorities ? "rules" : "chat",
       })),
     );
@@ -1047,7 +1053,9 @@ ${(tasks ?? []).length === 0 ? "  (none)" : (tasks ?? []).map((task) => `  • #
     session_id: sessionId,
     user_id: userId,
     role: "assistant",
-    content: replyText,
+    // A message is at most 12000 characters in the database (20261124110100); a reply is far
+    // shorter, but an unusually long one is cut instead of failing the turn.
+    content: replyText.slice(0, 12000),
     panel_payload: JSON.parse(JSON.stringify(panel)) as Json,
   });
   if (assistantMessageError) throw assistantMessageError;
@@ -1070,6 +1078,56 @@ export function upcomingDates(timeZone = "UTC", days = 8): string {
     });
     return `${weekday} ${date}${i === 0 ? " (today)" : i === 1 ? " (tomorrow)" : ""}`;
   }).join(", ");
+}
+
+/**
+ * How much of the user's own text goes into each chat prompt. The profile and the task list are
+ * part of every turn's prompt and the AI limits count calls, not their size, so without a bound
+ * one account could make every call many times larger. The database limits these columns too,
+ * but not in rows saved before those limits (they are NOT VALID), so the prompt cuts as well.
+ */
+export const CHAT_PROMPT_LIMITS = {
+  name: 100,
+  role: 100,
+  goals: 1500,
+  tasks: 20,
+  taskTitle: 120,
+  taskReason: 200,
+  /** Events listed in full for today and the next 7 days. */
+  soonEvents: 60,
+} as const;
+
+/** Text for one prompt line: whitespace (line breaks too) collapsed, cut to `max` characters. */
+function promptLine(value: string | null | undefined, max: number): string {
+  return (value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+/** The profile lines and the task lines of the chat prompt, within CHAT_PROMPT_LIMITS. */
+export function userContextForPrompt(
+  profile: { name?: string | null; role?: string | null; goals?: string | null } | null | undefined,
+  tasks:
+    | ReadonlyArray<{ title: string; priority_rank: number | null; reason: string | null }>
+    | null
+    | undefined,
+): { profile: string; tasks: string } {
+  const limits = CHAT_PROMPT_LIMITS;
+  const listed = (tasks ?? []).slice(0, limits.tasks);
+  return {
+    profile: [
+      `- Name: ${promptLine(profile?.name, limits.name) || "User"}`,
+      `- Role: ${promptLine(profile?.role, limits.role) || "Professional"}`,
+      `- Goals: ${promptLine(profile?.goals, limits.goals) || "(not specified)"}`,
+    ].join("\n"),
+    tasks:
+      listed.length === 0
+        ? "  (none)"
+        : listed
+            .map(
+              (task) =>
+                `  • #${task.priority_rank ?? "?"} ${promptLine(task.title, limits.taskTitle)} — ${promptLine(task.reason, limits.taskReason)}`,
+            )
+            .join("\n"),
+  };
 }
 
 export function startOfToday(timeZone = "UTC") {

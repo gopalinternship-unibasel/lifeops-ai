@@ -18,14 +18,15 @@ select 'planner_requests', count(*) filter (where created_at < now() - interval 
 
 -- 3. Users already at or over a new per-user row limit (20261124110100). Such a user cannot add
 --    rows to that table any more (the message names the limit). Expect no rows.
-select 'calendar_events' as table_name, user_id, count(*) from public.calendar_events group by user_id having count(*) >= 2000
-union all select 'chat_card_actions', user_id, count(*) from public.chat_card_actions group by user_id having count(*) >= 5000
-union all select 'chat_messages', user_id, count(*) from public.chat_messages group by user_id having count(*) >= 10000
+select 'calendar_events' as table_name, user_id, count(*) from public.calendar_events group by user_id having count(*) >= 1000
+union all select 'chat_card_actions', user_id, count(*) from public.chat_card_actions group by user_id having count(*) >= 1000
+union all select 'chat_messages', user_id, count(*) from public.chat_messages group by user_id having count(*) >= 1000
 union all select 'chat_sessions', user_id, count(*) from public.chat_sessions group by user_id having count(*) >= 100
 union all select 'connector_status', user_id, count(*) from public.connector_status group by user_id having count(*) >= 20
-union all select 'email_drafts', user_id, count(*) from public.email_drafts group by user_id having count(*) >= 1000
-union all select 'planner_requests', user_id, count(*) from public.planner_requests group by user_id having count(*) >= 2000
-union all select 'week_plan_requests', user_id, count(*) from public.week_plan_requests group by user_id having count(*) >= 2000;
+union all select 'email_drafts', user_id, count(*) from public.email_drafts group by user_id having count(*) >= 100
+union all select 'planner_requests', user_id, count(*) from public.planner_requests group by user_id having count(*) >= 200
+union all select 'week_plan_requests', user_id, count(*) from public.week_plan_requests group by user_id having count(*) >= 300
+union all select 'weekly_plans', user_id, count(*) from public.weekly_plans group by user_id having count(*) >= 52;
 
 -- 4. Rows longer than the new limits. The constraints are NOT VALID, so these rows stay and stay
 --    readable, but they cannot be changed without being shortened. Expect zeros on a demo.
@@ -34,6 +35,7 @@ select
   (select count(*) from public.tasks where char_length(title) > 300 or char_length(reason) > 1000) as tasks,
   (select count(*) from public.calendar_events where char_length(title) > 200 or char_length(notes) > 2000) as calendar_events,
   (select count(*) from public.chat_messages where char_length(content) > 12000) as chat_messages,
+  (select count(*) from public.chat_messages where role = 'user' and char_length(content) > 4000) as user_messages_over_4000,
   (select count(*) from public.email_drafts where char_length(subject) > 300 or char_length(body) > 12000 or char_length(to_address) > 320) as email_drafts,
   (select count(*) from public.weekly_plans where octet_length(payload::text) > 131072) as weekly_plans;
 

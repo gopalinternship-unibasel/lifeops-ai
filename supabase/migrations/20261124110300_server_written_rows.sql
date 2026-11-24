@@ -16,9 +16,11 @@ drop policy if exists "tasks_insert_own" on public.tasks;
 drop policy if exists "tasks_update_own" on public.tasks;
 drop policy if exists "tasks_delete_own" on public.tasks;
 
--- chat_messages: the user's token inserts only the user's own message (role 'user', no panel);
--- assistant messages, their cards and failed turns are stored with the service role. Deleting
--- the own history (clearChatHistory) stays allowed.
+-- chat_messages: the user's token inserts only the user's own message (role 'user', no panel,
+-- at most 4000 characters: the chat form and the server accept no longer message, and the
+-- dashboard's "Plan it" fallback sends its input of at most 4000 characters); assistant
+-- messages, their cards and failed turns are stored with the service role (content up to the
+-- 12000-character column limit). Deleting the own history (clearChatHistory) stays allowed.
 drop policy if exists "msgs_insert_own" on public.chat_messages;
 create policy "msgs_insert_own" on public.chat_messages
   for insert
@@ -26,6 +28,7 @@ create policy "msgs_insert_own" on public.chat_messages
     auth.uid() = user_id
     and role = 'user'
     and panel_payload is null
+    and char_length(content) <= 4000
     and exists (
       select 1
         from public.chat_sessions s
@@ -37,6 +40,10 @@ create policy "msgs_insert_own" on public.chat_messages
 -- chat_card_actions: a card is claimed (insert), its result recorded (update) and, when the action
 -- failed, released again (delete), with the user's token. Once a result is recorded the card is
 -- done: the user can no longer change or delete that record, so a saved card cannot be saved twice.
+-- Known gap: until the result is recorded (while the action runs, or when recording it failed,
+-- which the app only logs), the user's token can still delete the claim and save the card again.
+-- That affects only the user's own data. Closing it needs the claim, the result and the release
+-- written with the service role; then a later migration can revoke these rights from the user.
 drop policy if exists "chat_card_actions_update_own" on public.chat_card_actions;
 create policy "chat_card_actions_update_own" on public.chat_card_actions
   for update

@@ -139,6 +139,18 @@ export class CapReachedError extends Error {
 
 type Client = SupabaseClient<Database>;
 
+/** Options of checkAiAllowance and enforceAiAllowance. */
+export interface AllowanceOptions {
+  /**
+   * @deprecated Not used. The windows are measured with the database clock, inside
+   * public.ai_allowance, so the check and the record use one clock. Kept so that existing calls
+   * still type-check.
+   */
+  now?: Date;
+  /** The settings to read the limits from (default: process.env). */
+  env?: Env;
+}
+
 interface LedgerAnswer {
   usage: CapUsage;
   recorded: boolean;
@@ -194,7 +206,7 @@ export async function checkAiAllowance(
   client: Client,
   userId: string,
   kind: AiRequestKind,
-  options: { now?: Date; env?: Env } = {},
+  options: AllowanceOptions = {},
 ): Promise<CapDecision> {
   const caps = readCaps(options.env);
   if (userLimit(kind, caps) === null && caps.callsPerDay === null) return { allowed: true };
@@ -212,7 +224,7 @@ export async function enforceAiAllowance(
   client: Client,
   userId: string,
   kind: AiRequestKind,
-  options: { now?: Date; env?: Env } = {},
+  options: AllowanceOptions = {},
 ): Promise<void> {
   const caps = readCaps(options.env);
   if (userLimit(kind, caps) === null && caps.callsPerDay === null) return;

@@ -9,7 +9,29 @@
 --    changed row is. The forms and the server keep within the same numbers (TEXT_LIMITS in
 --    src/lib/validation.ts; the server trims what it writes).
 -- 2. A per-user row limit on the tables a user can insert into, for writes made with the user's
---    own token. The limits are far above what the app itself writes for one person.
+--    own token, and on the week plans the server stores. The limits are well above what one
+--    person uses in the app (the AI requests that create most of these rows are limited to a few
+--    per hour, and to 150 a day for all visitors together on the hosted demo), and low enough that
+--    one account cannot take a large share of the free database (500 MB).
+--
+-- The most one account can store through these tables, with every column at its limit:
+--   calendar_events     1000 rows x  2350 characters (title, notes, source, seed_key)
+--   chat_card_actions   1000 rows x  1133 (card id, status, result id)
+--   chat_messages       1000 rows x  4000 (a message written with the user's token: at most
+--                                          4000 characters, the chat form's limit; see
+--                                          msgs_insert_own in 20261124110300)
+--   email_drafts         100 rows x 13025 (subject, body, recipient, ids)
+--   planner_requests     200 rows x  6007 (input, error)
+--   week_plan_requests   300 rows x  1506 (kind, instructions)
+--   chat_sessions 100 and connector_status 20 small rows, one profile of 2200 characters
+--   together about 10.4 million characters: about 10 MB of plain text (2% of 500 MB), at most
+--   about 42 MB if every character takes 4 bytes, plus some hundred bytes of row and index
+--   overhead per row (under 2 MB). weekly_plans adds at most 52 plans x 192 kB (about 10 MB), and
+--   each new plan needs an allowed AI request.
+--   Assistant messages are written by the server, one per allowed AI request (limited as above).
+-- Many accounts together can still store more: Supabase allows 30 anonymous sign-ins per hour
+-- per IP address. Closing that needs a decision on the project's sign-up settings (a CAPTCHA,
+-- lower sign-in limits) and is not done here.
 
 -- New accounts: the name comes from the sign-up metadata (any length) or the e-mail address.
 -- Cut it to the profile limit, so a long name never makes the sign-up itself fail.
@@ -85,11 +107,14 @@ alter table public.planner_requests
 create index if not exists idx_chat_messages_user_created on public.chat_messages (user_id, created_at);
 create index if not exists idx_chat_sessions_user_created on public.chat_sessions (user_id, created_at);
 
--- BEFORE INSERT trigger: refuse a row when the user already has TG_ARGV[0] rows in the table.
+-- BEFORE INSERT trigger: refuse a row when the user already has TG_ARGV[0] rows in the table,
+-- with the sentence TG_ARGV[1] (meant for the visitor; the table and the limit go in DETAIL).
 -- Applies only to writes made as the authenticated role (the Data API, or the server acting with
 -- the user's token); the server's service-role writes and maintenance jobs are not limited.
 -- Runs with the caller's rights, so row level security limits the count to the caller's own rows;
 -- a row for another user is refused by the insert policy anyway.
+-- The trigger also fires for an insert that ON CONFLICT DO NOTHING then skips, so at the limit a
+-- repeated claim or dismissal of the same chat card is refused too, with the same sentence.
 create or replace function public.enforce_user_row_limit()
 returns trigger
 language plpgsql
@@ -114,8 +139,10 @@ begin
     into v_count
     using new.user_id, v_limit;
   if v_count >= v_limit then
-    raise exception 'This account has reached the limit of % rows in %.', v_limit, tg_table_name
-      using errcode = '23514';
+    raise exception using
+      errcode = '23514',
+      message = coalesce(tg_argv[1], 'This demo account has reached its storage limit for this kind of item.'),
+      detail = format('Row limit %s per user on %I.%I.', v_limit, tg_table_schema, tg_table_name);
   end if;
   return new;
 end;
@@ -126,35 +153,92 @@ revoke all on function public.enforce_user_row_limit() from public, anon, authen
 
 drop trigger if exists calendar_events_row_limit on public.calendar_events;
 create trigger calendar_events_row_limit before insert on public.calendar_events
-  for each row execute function public.enforce_user_row_limit('2000');
+  for each row execute function public.enforce_user_row_limit(
+    '1000', 'This demo account has reached its limit of 1000 calendar events. Delete some older events to add new ones.'
+  );
 
 drop trigger if exists chat_card_actions_row_limit on public.chat_card_actions;
 create trigger chat_card_actions_row_limit before insert on public.chat_card_actions
-  for each row execute function public.enforce_user_row_limit('5000');
+  for each row execute function public.enforce_user_row_limit(
+    '1000', 'This demo account has reached its limit of 1000 handled chat suggestions.'
+  );
 
+-- Counts the assistant's answers too (written by the server, one per turn), so 1000 rows are
+-- about 500 turns. Clearing the chat history deletes them.
 drop trigger if exists chat_messages_row_limit on public.chat_messages;
 create trigger chat_messages_row_limit before insert on public.chat_messages
-  for each row execute function public.enforce_user_row_limit('10000');
+  for each row execute function public.enforce_user_row_limit(
+    '1000', 'This demo account has reached its limit of 1000 stored chat messages. Clear the chat history to continue.'
+  );
 
 drop trigger if exists chat_sessions_row_limit on public.chat_sessions;
 create trigger chat_sessions_row_limit before insert on public.chat_sessions
-  for each row execute function public.enforce_user_row_limit('100');
+  for each row execute function public.enforce_user_row_limit(
+    '100', 'This demo account has reached its limit of 100 chat sessions. Clear the chat history to continue.'
+  );
 
 drop trigger if exists connector_status_row_limit on public.connector_status;
 create trigger connector_status_row_limit before insert on public.connector_status
-  for each row execute function public.enforce_user_row_limit('20');
+  for each row execute function public.enforce_user_row_limit(
+    '20', 'This demo account has reached its limit of 20 connected services.'
+  );
 
 drop trigger if exists email_drafts_row_limit on public.email_drafts;
 create trigger email_drafts_row_limit before insert on public.email_drafts
-  for each row execute function public.enforce_user_row_limit('1000');
+  for each row execute function public.enforce_user_row_limit(
+    '100', 'This demo account has reached its limit of 100 saved email drafts.'
+  );
 
 drop trigger if exists planner_requests_row_limit on public.planner_requests;
 create trigger planner_requests_row_limit before insert on public.planner_requests
-  for each row execute function public.enforce_user_row_limit('2000');
+  for each row execute function public.enforce_user_row_limit(
+    '200', 'This demo account has reached its limit of 200 "Plan it" requests.'
+  );
 
 drop trigger if exists week_plan_requests_row_limit on public.week_plan_requests;
 create trigger week_plan_requests_row_limit before insert on public.week_plan_requests
-  for each row execute function public.enforce_user_row_limit('2000');
+  for each row execute function public.enforce_user_row_limit(
+    '300', 'This demo account has reached its limit of 300 week plan requests.'
+  );
 
--- weekly_plans needs no row limit: only the server inserts plans (20261124110300), one per week a
--- plan request was allowed for.
+-- weekly_plans: only the server inserts plans (20261124110300), one per week a plan request was
+-- allowed for, but the user's token may rewrite a plan up to the size limits above (192 kB). So the
+-- number of weeks with a plan is limited as well, for every role: 52 weeks, a year of plans. A
+-- plan for a week that already has one is an update (the server upserts on user_id, week_start)
+-- and always goes through.
+create or replace function public.enforce_weekly_plan_limit()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_limit integer := tg_argv[0]::integer;
+  v_count integer;
+begin
+  -- One new plan at a time per user, so parallel requests cannot pass the limit together.
+  perform pg_advisory_xact_lock(
+    hashtextextended(format('lifeops:rows:%s:%s', tg_table_name, new.user_id), 0)
+  );
+  if exists (
+    select 1 from public.weekly_plans where user_id = new.user_id and week_start = new.week_start
+  ) then
+    return new;
+  end if;
+  select count(*)
+    into v_count
+    from (select 1 from public.weekly_plans where user_id = new.user_id limit v_limit) s;
+  if v_count >= v_limit then
+    raise exception using
+      errcode = '23514',
+      message = format('This demo account has reached its limit of %s saved week plans.', v_limit),
+      detail = format('Row limit %s per user on public.weekly_plans.', v_limit);
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.enforce_weekly_plan_limit() from public, anon, authenticated;
+
+drop trigger if exists weekly_plans_row_limit on public.weekly_plans;
+create trigger weekly_plans_row_limit before insert on public.weekly_plans
+  for each row execute function public.enforce_weekly_plan_limit('52');
