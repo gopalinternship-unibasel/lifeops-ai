@@ -8,6 +8,14 @@ ActionTypeLiteral = Literal["task", "calendar_block", "email_draft", "reminder"]
 RiskLevelLiteral = Literal["low", "medium", "high"]
 
 
+class BusyInterval(BaseModel):
+    """A time the caller's calendar is already taken (naive local wall-clock times)."""
+
+    title: str = Field(default="", max_length=200)
+    start: datetime
+    end: datetime
+
+
 class PlanRequest(BaseModel):
     user_input: str = Field(..., min_length=3, max_length=4000)
     autonomous_mode: bool = False
@@ -15,6 +23,10 @@ class PlanRequest(BaseModel):
     # Planned times are naive local times in that zone.
     current_datetime: datetime | None = None
     timezone: str | None = Field(default=None, max_length=100)
+    # The caller's busy calendar times for the coming days; proposed blocks are kept clear of them.
+    busy: list[BusyInterval] = Field(default_factory=list, max_length=200)
+    # When the caller stops waiting (UTC). A plan that is ready only after that is not stored.
+    deadline: datetime | None = None
 
 
 class PlannerTask(BaseModel):

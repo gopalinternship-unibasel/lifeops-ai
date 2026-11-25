@@ -12,6 +12,11 @@ import { dismissChatCard } from "@/functions/chat.functions";
 import { EmailDraftCard, PendingEventCard } from "@/components/workspace/ContextPanel";
 import type { PlanRequestView } from "@/lib/plan-request";
 import { getBrowserTimeZone } from "@/lib/date";
+import { DashboardLoadError, RecipientField, TaskDoneButton } from "@/components/dashboard/DashboardParts";
+import {
+  dashboardViewState, executionProviderLabel, formatRequestTime, isActionRunAnswer, isDashboardAnswer,
+  isPlanPollAnswer, isPlanRequestAnswer, isStaleOutcome, plannerBadgeText, recipientToSend, UNEXPECTED_ANSWER,
+} from "@/lib/dashboard-view";
 import { getErrorMessage } from "@/lib/errors";
 import { prioritiesSubtitle } from "@/lib/priorities";
 
@@ -41,16 +46,30 @@ function DashboardPage() {
   const [request, setRequest] = useState<PlanRequestView | null>(null);
   const planPoll = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [busyAction, setBusyAction] = useState<number | null>(null);
+  const [busyTask, setBusyTask] = useState<number | null>(null);
   // Fallback cards (in-app assistant) the user saved or dismissed on this page.
   const [handledCards, setHandledCards] = useState<Set<string>>(new Set());
+  // Why the first load failed: the page shows it with "Try again" instead of a spinner forever.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // A failed or interrupted request whose banner the user closed, or that an attempt refused
+  // before storing a new request would otherwise show as "the last" request again.
+  const [hiddenOutcome, setHiddenOutcome] = useState<string | null>(null);
+  // Recipients typed for planner email drafts, by action id.
+  const [recipients, setRecipients] = useState<Record<number, string>>({});
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<DashboardData | null> => {
     try {
       const next = await fetchDashboard({ data: { timeZone } });
+      if (!isDashboardAnswer(next)) throw new Error(UNEXPECTED_ANSWER);
       setData(next);
       setRequest(next.planRequest);
+      setLoadError(null);
+      return next;
     } catch (error: unknown) {
-      toast.error(getErrorMessage(error, "Could not load the dashboard"));
+      const message = getErrorMessage(error, "Could not load the dashboard.");
+      setLoadError(message);
+      toast.error(message);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -67,7 +86,10 @@ function DashboardPage() {
     let stopped = false;
     const check = async () => {
       try {
-        const { request: latest } = await fetchPlanRequest();
+        const answer: unknown = await fetchPlanRequest();
+        // An odd answer is retried like a failed one, instead of clearing the request.
+        if (!isPlanPollAnswer(answer)) throw new Error(UNEXPECTED_ANSWER);
+        const latest = answer.request;
         if (stopped) return;
         if (latest?.status === "running") {
           planPoll.current = setTimeout(check, PLAN_POLL_MS);
@@ -89,17 +111,27 @@ function DashboardPage() {
   async function plan() {
     const text = input.trim();
     if (text.length < 3 || planning || serverRunning) return;
+    const previous = request;
+    const previousId = previous?.id ?? null;
     setPlanning(true);
     setRequest({ id: "pending", input: text, status: "running", startedAt: new Date().toISOString(), finishedAt: null, result: null, error: null });
     try {
       // The planner service, or the in-app assistant when the service is down (both on the server).
-      const { request: done } = await runChaosPlan({ data: { input: text, timeZone } });
-      setRequest(done);
+      const answer: unknown = await runChaosPlan({ data: { input: text, timeZone } });
+      // An answer that is not a stored request (an error page, an out-of-date page after an
+      // update) must not look like success: the text stays, and the user sees why.
+      if (!isPlanRequestAnswer(answer)) throw new Error(UNEXPECTED_ANSWER);
+      setRequest(answer.request);
       setInput("");
       await refresh();
     } catch (error: unknown) {
-      void refresh();
       toast.error(getErrorMessage(error, "Planning failed"));
+      const next = await refresh();
+      // Without a fresh state the "pending" placeholder would read as a request still running.
+      if (!next) setRequest(previous);
+      // Refused before a request was stored (a limit, one already running): the newest stored
+      // request is still the earlier one, and its old failure is not the answer to this attempt.
+      if (!next || next.planRequest?.id === previousId) setHiddenOutcome(previousId);
     } finally {
       setPlanning(false);
     }
@@ -121,7 +153,10 @@ function DashboardPage() {
   async function run(action: PlannerAction) {
     setBusyAction(action.id);
     try {
-      const r = await executeBackendAction({ data: { id: action.id, timeZone } });
+      // Only a recipient the user typed or cleared is sent; untouched, the planner's address is used.
+      const to = action.action_type === "email_draft" ? recipientToSend(recipients[action.id]) : undefined;
+      const r: unknown = await executeBackendAction({ data: { id: action.id, timeZone, ...(to !== undefined ? { to } : {}) } });
+      if (!isActionRunAnswer(r)) throw new Error(UNEXPECTED_ANSWER);
       if (r.ok) toast.success(r.message);
       else toast.error(r.message);
       await refresh();
@@ -133,15 +168,30 @@ function DashboardPage() {
   }
 
   async function completeTask(id: number) {
+    setBusyTask(id);
     try {
       await completeBackendTask({ data: { id } });
       await refresh();
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, "Could not complete the task"));
+    } finally {
+      setBusyTask(null);
     }
   }
 
-  if (loading || !data) {
+  const view = dashboardViewState(loading, data !== null);
+  if (view === "loading" || !data) {
+    if (view === "error") {
+      return (
+        <DashboardLoadError
+          message={loadError}
+          onRetry={() => {
+            setLoading(true);
+            void refresh();
+          }}
+        />
+      );
+    }
     return <div className="grid place-items-center py-24"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>;
   }
 
@@ -151,6 +201,8 @@ function DashboardPage() {
   const planner = data.planner.online ? data.planner.data : null;
   const actions = planner ? [...planner.actions].sort((a, b) => statusOrder(a.status) - statusOrder(b.status) || b.id - a.id) : [];
   const executed = actions.filter((a) => a.status === "executed");
+  // Failed and interrupted outcomes are shown for a day, until closed, and not next to a new refusal.
+  const showOutcome = !!request && !busy && request.id !== hiddenOutcome && !isStaleOutcome(request, Date.now());
 
   return (
     <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-6 space-y-6" data-testid="dashboard">
@@ -161,9 +213,9 @@ function DashboardPage() {
         </div>
         <div className="flex flex-wrap gap-2 text-[11px]">
           <Badge tone={ws.googleConnected ? "green" : "amber"}>{ws.googleConnected ? "Google connected" : "Demo inbox & calendar"}</Badge>
-          <Badge tone="slate"><Bot className="h-3 w-3" /> {ws.aiProvider.provider} · {ws.aiProvider.model}</Badge>
+          <Badge tone={ws.aiProvider.configured ? "slate" : "amber"} testId="ai-status"><Bot className="h-3 w-3" /> {ws.aiProvider.label}</Badge>
           <Badge tone={data.planner.online ? "green" : "amber"} testId="planner-status">
-            {data.planner.online ? "Planner service online" : "Planner service offline — in-app assistant"}
+            {plannerBadgeText(data.planner)}
           </Badge>
         </div>
       </div>
@@ -171,7 +223,7 @@ function DashboardPage() {
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Metric icon={<ListChecks className="h-4 w-4" />} label="Ranked priorities" value={ws.priorities.length} />
         <Metric icon={<Calendar className="h-4 w-4" />} label="Events next 7 days" value={ws.eventsNext7Days} />
-        <Metric icon={<Sparkles className="h-4 w-4" />} label="Plan blocks approved" value={`${ws.approvedItems}/${ws.plannedItems}`} />
+        <Metric icon={<Sparkles className="h-4 w-4" />} label="Plan blocks approved" value={`${ws.approvedItems ?? "—"}/${ws.plannedItems}`} />
         <Metric icon={<Mail className="h-4 w-4" />} label="Drafts saved (unsent)" value={ws.draftCount} />
         <Metric icon={<MessageSquare className="h-4 w-4" />} label="Chat messages" value={ws.chatMessages} />
         <Metric icon={<ShieldCheck className="h-4 w-4" />} label="Actions awaiting approval" value={planner ? planner.metrics.pending_actions : "—"} />
@@ -186,6 +238,7 @@ function DashboardPage() {
               rows={4}
               placeholder={EXAMPLE}
               maxLength={4000}
+              aria-label="Everything on your mind"
               data-testid="chaos-input"
               className="w-full rounded-md border border-input bg-background px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-ring"
             />
@@ -199,24 +252,30 @@ function DashboardPage() {
                 className="inline-flex items-center gap-2 rounded-md bg-gradient-brand px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {busy ? "Planning… (a local model can take a few minutes)" : "Plan it"}
+                {busy
+                  ? ws.aiProvider.local
+                    ? "Planning… (a local model can take a few minutes)"
+                    : "Planning… (this can take a minute or two)"
+                  : "Plan it"}
               </button>
             </div>
 
             {serverRunning && request && (
               <div className="mt-4 rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground" data-testid="plan-running">
                 <Loader2 className="inline h-3 w-3 animate-spin mr-1" />
-                Still planning “{shorten(request.input, 120)}” (started {fmtClock(request.startedAt)}). The result appears here when it is ready.
+                Still planning “{shorten(request.input, 120)}” (started {formatRequestTime(request.startedAt)}). The result appears here when it is ready.
               </div>
             )}
-            {request?.status === "failed" && !busy && (
-              <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800" data-testid="plan-failed">
-                Planning “{shorten(request.input, 80)}” failed: {request.error}
+            {request?.status === "failed" && showOutcome && (
+              <div className="mt-4 flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800" data-testid="plan-failed">
+                <span>Planning “{shorten(request.input, 80)}” (started {formatRequestTime(request.startedAt)}) failed: {request.error}</span>
+                <DismissButton onClick={() => setHiddenOutcome(request.id)} />
               </div>
             )}
-            {request?.status === "interrupted" && !busy && (
-              <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900" data-testid="plan-interrupted">
-                The plan for “{shorten(request.input, 80)}” (started {fmtClock(request.startedAt)}) did not finish: the request was cut off, for example by a server restart. Plan it again.
+            {request?.status === "interrupted" && showOutcome && (
+              <div className="mt-4 flex items-start justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900" data-testid="plan-interrupted">
+                <span>The plan for “{shorten(request.input, 80)}” (started {formatRequestTime(request.startedAt)}) did not finish: the request was cut off, for example by a server restart. Plan it again.</span>
+                <DismissButton onClick={() => setHiddenOutcome(request.id)} />
               </div>
             )}
 
@@ -226,7 +285,7 @@ function DashboardPage() {
                 <div className="mt-1 text-xs text-muted-foreground">
                   {planResult.tasks} tasks and {planResult.actions} proposed actions ·{" "}
                   {planResult.planner === "llm" ? "planned by the AI model" : "keyword planner (no model answer)"}
-                  {request?.finishedAt ? ` · ${fmtClock(request.finishedAt)}` : ""}
+                  {request?.finishedAt ? ` · ${formatRequestTime(request.finishedAt)}` : ""}
                 </div>
                 {planResult.note && <div className="mt-1 text-xs text-amber-800">{planResult.note}</div>}
               </div>
@@ -266,7 +325,7 @@ function DashboardPage() {
             )}
           </Card>
 
-          <Card title="Action approval center" subtitle="Proposed by the planner. Approve, then run: calendar blocks are checked for conflicts, emails become drafts only.">
+          <Card title="Action approval center" subtitle="Proposed by the planner. Approve, then run: calendar blocks and reminders are checked for conflicts and added to your calendar, emails become drafts only.">
             {!planner ? (
               <Empty icon={<CircleSlash className="h-6 w-6" />} text={data.planner.online ? "" : data.planner.error} />
             ) : actions.length === 0 ? (
@@ -292,13 +351,37 @@ function DashboardPage() {
                               : fmtNaive(action.start_time)
                             : null}
                           {/* The planner keeps only addresses the user wrote; an unknown one is left for the user. */}
-                          {action.action_type === "email_draft"
+                          {action.action_type === "email_draft" && !canEditRecipient(action)
                             ? `Draft to ${action.email_to?.trim() || "(recipient to fill in)"}: ${action.email_subject ?? action.title}`
+                            : null}
+                          {action.action_type === "email_draft" && canEditRecipient(action)
+                            ? `Draft: ${action.email_subject ?? action.title}`
                             : null}
                           {!action.start_time && action.action_type !== "email_draft" ? action.description : null}
                         </div>
+                        {/* The recipient can be filled in here before Run (the planner leaves an unknown one empty). */}
+                        {action.action_type === "email_draft" && canEditRecipient(action) && (
+                          <RecipientField
+                            value={recipients[action.id] ?? action.email_to ?? ""}
+                            onChange={(value) => setRecipients((prev) => ({ ...prev, [action.id]: value }))}
+                            disabled={busyAction === action.id}
+                            testId={`action-${action.id}-to`}
+                          />
+                        )}
                       </div>
                       <div className="flex shrink-0 gap-1.5">
+                        {action.status === "failed" && (
+                          <button onClick={() => decide(action, "approve")} disabled={busyAction === action.id}
+                            className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-60">
+                            <Check className="h-3 w-3" /> Approve again
+                          </button>
+                        )}
+                        {action.status === "failed" && (
+                          <button onClick={() => decide(action, "reject")} disabled={busyAction === action.id}
+                            className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-60">
+                            <X className="h-3 w-3" /> Reject
+                          </button>
+                        )}
                         {action.status === "pending" && (
                           <>
                             <button onClick={() => decide(action, "approve")} disabled={busyAction === action.id}
@@ -339,7 +422,7 @@ function DashboardPage() {
                   <li key={action.id} className="flex items-center gap-2">
                     <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
                     <span className="font-medium">{action.title}</span>
-                    <span className="text-muted-foreground">→ {action.provider ?? "?"}{action.external_id ? ` (${action.external_id.slice(0, 12)})` : ""}</span>
+                    <span className="text-muted-foreground">→ {executionProviderLabel(action.provider)}{action.external_id ? ` (${action.external_id.slice(0, 12)})` : ""}</span>
                   </li>
                 ))}
               </ul>
@@ -353,8 +436,8 @@ function DashboardPage() {
               <Empty icon={<Inbox className="h-6 w-6" />} text="Ask the Workspace chat to check your emails." />
             ) : (
               <ol className="space-y-2" data-testid="priority-list">
-                {ws.priorities.slice(0, 5).map((p) => (
-                  <li key={`${p.priority_rank}-${p.title}`} className="flex gap-3">
+                {ws.priorities.slice(0, 5).map((p, index) => (
+                  <li key={`${index}-${p.priority_rank}-${p.title}`} className="flex gap-3">
                     <span className="shrink-0 h-6 w-6 rounded-md grid place-items-center text-[11px] font-mono font-semibold text-primary-foreground" style={{ background: "var(--gradient-brand)" }}>#{p.priority_rank ?? "?"}</span>
                     <div className="min-w-0">
                       <div className="text-sm font-medium leading-snug">
@@ -400,7 +483,7 @@ function DashboardPage() {
                           Priority {task.priority}/5 · ~{task.estimated_minutes} min{task.deadline ? ` · due ${fmtNaive(task.deadline)}` : ""}
                         </div>
                       </div>
-                      <button onClick={() => completeTask(task.id)} className="shrink-0 text-[11px] rounded-md border border-border px-2 py-1 hover:bg-muted">Done</button>
+                      <TaskDoneButton busy={busyTask === task.id} onClick={() => completeTask(task.id)} />
                     </li>
                   ))}
                 </ul>
@@ -436,8 +519,17 @@ function shorten(text: string, max: number) {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
-function fmtClock(iso: string) {
-  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/** An email draft's recipient can be typed while the action can still be run. */
+function canEditRecipient(action: PlannerAction) {
+  return action.status === "pending" || action.status === "approved";
+}
+
+function DismissButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} aria-label="Hide this message" className="shrink-0 rounded p-0.5 opacity-70 hover:opacity-100">
+      <X className="h-3.5 w-3.5" />
+    </button>
+  );
 }
 
 function statusOrder(status: string) {

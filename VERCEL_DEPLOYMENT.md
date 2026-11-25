@@ -388,7 +388,9 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
   answers in seconds. Monthly limits (active CPU, invocations, memory) pause features for up to 30 days when
   exceeded. Waiting for the model counts as I/O, not CPU. Not verified: whether Vercel keeps a function
   running after the browser disconnects; a request cut off that way stays "running" until the stale window
-  (`LLM_TIMEOUT_MS` plus 2 minutes) has passed and then shows "did not finish".
+  has passed and then shows "did not finish". The window is twice `LLM_TIMEOUT_MS` plus 2 minutes for a chat
+  turn and a week plan (240 s with the settings above), and for "Plan it" the planner timeout plus a chat turn
+  plus 1 minute, capped at 300 s on the hosted site.
 - Supabase free: 500 MB database, pauses after 7 days without database activity.
 - Cloudflare Workers AI free: 10,000 neurons a day for the whole account (shared with the ai-scientist demo),
   no card; above it nothing runs until the next day. The caps in section 4 are sized for it (not yet run).
