@@ -364,6 +364,33 @@ describe("an answer and another request in one message", () => {
     ]);
   });
 
+  it("prepares the answer when the other request prepares nothing, and says nothing untrue", () => {
+    // Review of 25 Nov 2026 (second pass): the note said "I did not prepare that one" although no
+    // change was prepared at all.
+    const previous = asked("Move the dentist appointment to 4");
+    const dentistAt4pm = {
+      kind: "update",
+      event: event("dentist"),
+      next: { starts_at: zrh("2026-11-26", 16), ends_at: zrh("2026-11-26", 17, 30) },
+      byRule: true,
+    };
+    // Not a calendar request.
+    const subscription = reconcile("4 pm please, and cancel my subscription", [], previous);
+    expect(subscription.changes).toEqual([dentistAt4pm]);
+    expect(subscription.note).toBeUndefined();
+    // An event that is not in the calendar: what was said about it stays.
+    const yoga = reconcile("4 pm please, and cancel the yoga class", [], previous);
+    expect(yoga.changes).toEqual([dentistAt4pm]);
+    expect(yoga.note).toMatch(/^I could not find an event matching "the yoga class"/);
+    expect(yoga.note).not.toMatch(/also answers my question/);
+    // A question back about the other event: it is asked, and the answer is prepared.
+    const lecture = reconcile("4 pm please, and move the lecture to 8", [], previous);
+    expect(lecture.changes).toEqual([dentistAt4pm]);
+    expect(lecture.note).toBe(
+      "Did you mean 8:00 AM or 8:00 PM for **Lecture — Distributed Systems**?",
+    );
+  });
+
   it("adds no such note when the request is about the event asked about, or nothing came before it", () => {
     const previous = asked("Move the dentist appointment to 4");
     expect(reconcile("Cancel the lecture", [], previous).note).toBeUndefined();

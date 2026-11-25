@@ -263,16 +263,119 @@ describe("numeric and impossible dates (finding 3)", () => {
   });
 
   it("does not read a fraction as a date after 'for' either, and still reads real dates", () => {
-    expect(parse("Move the dentist appointment to Friday for 3/4 of an hour")).toMatchObject({
+    const quarters = parse("Move the dentist appointment to Friday for 3/4 of an hour");
+    expect(quarters).toMatchObject({
       day: { dates: ["2026-11-27"] },
+      durationMin: 45,
       dayUnclear: false,
     });
+    // Review of 25 Nov 2026 (second pass): its "3" was read as a clock time ("3:00 AM or 3:00 PM?").
+    expect(quarters?.start).toBeUndefined();
+    for (const model of [[], [update("dentist", "2026-11-27", [14, 0], [15, 30])]]) {
+      const result = reconcile("Move the dentist appointment to Friday for 3/4 of an hour", model);
+      expect(result.note).toBeUndefined();
+      expect(result.changes).toEqual([
+        {
+          kind: "update",
+          event: event("dentist"),
+          next: { starts_at: zrh("2026-11-27", 14), ends_at: zrh("2026-11-27", 14, 45) },
+          byRule: true,
+        },
+      ]);
+    }
+    // A length with a new day only is kept too ("for half an hour" kept the 90 minutes).
+    expect(
+      reconcile("Move the dentist appointment to Friday for half an hour").changes[0].next,
+    ).toEqual({ starts_at: zrh("2026-11-27", 14), ends_at: zrh("2026-11-27", 14, 30) });
     expect(parse("Move the team sync to 8 pm, 2/3 of us cannot make 7")).toMatchObject({
       start: { minutes: [1200] },
       dayUnclear: false,
     });
     // A pair that is a date is still asked about ("4 pm, 3/12"), see above.
     expect(parse("Move the dentist appointment to 4 pm, 3/12")?.dayUnclear).toBe(true);
+  });
+
+  it.each([
+    ["Move the team sync to 8 pm for 1/2 an hour", [20, 0], [20, 30]],
+    ["Move the team sync back by 1/2 an hour", [19, 30], [20, 30]],
+    ["Move the team sync 1/2 an hour later", [19, 30], [20, 30]],
+    ["Postpone the team sync 1/2 hr", [19, 30], [20, 30]],
+    ["Move the team sync 1/2 an hour earlier", [18, 30], [19, 30]],
+    ["Move the team sync forward by 1/4 of an hour", [18, 45], [19, 45]],
+  ] as [string, [number, number], [number, number]][])(
+    "reads a fraction of an hour as minutes: %s",
+    (message, from, to) => {
+      // "1/2 an hour later" was an hour, "for 1/2 an hour" kept the old length, and "back by 1/2
+      // an hour" asked which day and time (review of 25 Nov 2026, second pass).
+      const result = reconcile(message);
+      expect(result.note).toBeUndefined();
+      expect(result.changes).toEqual([
+        {
+          kind: "update",
+          event: event("sync"),
+          next: { starts_at: zrh("2026-11-24", ...from), ends_at: zrh("2026-11-24", ...to) },
+          byRule: true,
+        },
+      ]);
+    },
+  );
+
+  // Review of 25 Nov 2026 (second pass): a determiner after the pair made any pair a fraction, so
+  // a date that can only be a date was thrown away and the event's own day used.
+  it.each([
+    ["Move the dentist appointment to 2 pm on 30/11 my day off", "2026-11-30", 14],
+    ["Move the dentist appointment to 2 pm on 30/11 a day I am free", "2026-11-30", 14],
+    ["Move the dentist appointment to 4 pm on 27/11 your time", "2026-11-27", 16],
+    ["Move the dentist appointment to 4 pm on 27/11 the Friday", "2026-11-27", 16],
+    ["Move the dentist appointment to 27/11 the same time", "2026-11-27", 14],
+    ["Move the dentist appointment to 4 pm on 27/11 of this year", "2026-11-27", 16],
+  ] as [string, string, number][])(
+    "keeps a slash date before a determiner: %s",
+    (message, date, hour) => {
+      for (const model of [[], [update("dentist", "2026-11-27", [18, 0], [19, 30])]]) {
+        const result = reconcile(message, model);
+        expect(result.note, message).toBeUndefined();
+        expect(result.changes, message).toEqual([
+          {
+            kind: "update",
+            event: event("dentist"),
+            next: { starts_at: zrh(date, hour), ends_at: zrh(date, hour + 1, 30) },
+            byRule: true,
+          },
+        ]);
+      }
+    },
+  );
+
+  it("still asks which day for a slash date that can be read both ways before a determiner", () => {
+    for (const model of [[], [update("dentist", "2026-11-27", [14, 0], [15, 30])]]) {
+      const result = reconcile("Move the dentist appointment to 4/12 the same time", model);
+      expect(result.changes).toEqual([]);
+      expect(result.note).toBe(
+        "Which day did you mean for **Dentist appointment**: Fri, Dec 4, 2026 or Mon, Apr 12, 2027?",
+      );
+    }
+    expect(reconcile("Move the team sync to 1/12 the same time").note).toBe(
+      "Which day did you mean for **Team sync — demo walkthrough**: Tue, Dec 1, 2026 or Tue, Jan 12, 2027?",
+    );
+    // "3/4 the same time" is a date too (only "of" or "a"/"an" and a unit make a fraction).
+    expect(parse("Move the dentist appointment to 3/4 the same time")?.day).toMatchObject({
+      dates: ["2027-04-03", "2027-03-04"],
+    });
+  });
+
+  it("reads '1/2 the team is ...' after the time as a reason, not as a date", () => {
+    const result = reconcile("Move the team sync to 8 pm, 1/2 the team is away", [
+      update("sync", "2026-11-24", [20, 0], [21, 0]),
+    ]);
+    expect(result.note).toBeUndefined();
+    expect(result.changes[0].next).toEqual({
+      starts_at: zrh("2026-11-24", 20),
+      ends_at: zrh("2026-11-24", 21),
+    });
+    // "half the team is away tonight": "tonight" is the reason's, not the new day.
+    const half = parse("Move the team sync to Friday, half the team is away tonight");
+    expect(half?.day).toMatchObject({ dates: ["2026-11-27"] });
   });
 
   it("does not read a dotted number in a name or an amount as a leftover date", () => {

@@ -260,13 +260,24 @@ const REASON_SENTENCE =
 // After a colon, a bracket or a dash: a pronoun or such a sentence ("(I have a lecture at 3 pm)",
 // ": the lecture is at 3 pm"); "(the 27th)" and ": this Friday at 3 pm" are part of the request.
 const REASON_SUBJECT = `(?:(?:i|i'm|im|we|we're|it|it's|there|he|she|they|since|because|as|due)\\b|${REASON_SENTENCE})`;
+/**
+ * A pair that can be a fraction: smaller over a small denominator ("1/2", "3/4", "2/3", "1/10").
+ * It is one only with a quantity after it (FRACTION_FOLLOWER); "27/11", "30/11" and "4/12" are
+ * always dates (review of 25 Nov 2026: "to 2 pm on 30/11 my day off" lost its date).
+ */
+const PROPER_FRACTION = `(?:${[2, 3, 4, 5, 6, 8, 10].flatMap((d) => Array.from({ length: d - 1 }, (_, i) => `${i + 1}/${d}`)).join("|")})(?![\\d/])`;
+/** What makes such a pair a quantity: "3/4 of the team", "2/3 of us", "1/2 an hour", "1/2 a day". */
+const FRACTION_FOLLOWER = "\\s+(?:of|an?\\s+(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?))\\b";
+/** Right after a day/month pair: the pair is a fraction (see PROPER_FRACTION), not a date. */
+const AFTER_FRACTION = `(?<=(?<![\\d.:/])${PROPER_FRACTION})(?=${FRACTION_FOLLOWER})`;
 const REASON_RE = new RegExp(
   "\\s(?:because|since|so|if|unless|when|while|although|though|but|due to|in case|otherwise|or else|'?cause|cuz|coz|bc|b/c|as (?:i|we|it|there|he|she|they|my|the))\\s" +
     `|,\\s*(?!${RELATIVE_APPOSITIVE})(?:it|i|we|that|which|she|he|they|there)\\b` +
     `|,\\s*(?=${REASON_SENTENCE})` +
-    // ", 3/4 of the team is away tonight", ", half of us cannot make it" (review of 25 Nov 2026:
-    // "tonight" there was read as the new day).
-    "|,\\s*(?=(?:\\d{1,2}/\\d{1,2}|half|most|some|all|many|few|none|several|both)\\s+of\\s+(?:us|them|you|the|my|our|his|her|their|your)\\b)" +
+    // ", 3/4 of the team is away tonight", ", half of us cannot make it", ", 1/2 the team is away"
+    // (review of 25 Nov 2026: "tonight" there was read as the new day, and "1/2" as a date).
+    `|,\\s*(?=(?:${PROPER_FRACTION}|half|most|some|all|many|few|none|several|both)\\s+(?:of\\s+(?:us|them|you|the|my|our|his|her|their|your)\\b|` +
+    "(?:the|my|our|his|her|their|your)\\s+(?:[a-z'-]+\\s+){0,2}?(?:is|are|was|were|has|have|can|cannot|can't|could|couldn't|will|won't)\\b))" +
     `|\\s*:\\s*(?=${REASON_SUBJECT})|\\s\\(\\s*(?=${REASON_SUBJECT})|\\s-\\s(?=${REASON_SUBJECT})`,
 );
 
@@ -390,8 +401,12 @@ const AMOUNT_NUMBER = "(?:\\d+(?:\\.\\d+)?|an?|one|two|three|four|five|six|seven
 const AMOUNT_UNIT = "(?:hours?|hrs?|h|minutes?|mins?|m)";
 // A number word needs a space and a whole unit word: "a" + "m" is "am", not a minute. Hours and
 // minutes together ("1 hour 30 minutes", "an hour and 15 minutes", "1h 30m") are one amount.
+// A fraction of an hour ("1/2 an hour", "3/4 of an hour", "1/4 hour") is one too: its numerator was
+// read as a clock time ("for 3/4 of an hour" asked "3:00 AM or 3:00 PM?") and "1/2 an hour later"
+// as an hour (review of 25 Nov 2026).
 const AMOUNT =
   "(?:(?:\\d+ ?(?:hours?|hrs?|h)|(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (?:hours?|hrs?)),? (?:and )?\\d{1,2} ?(?:minutes?|mins?|m)" +
+  `|(?<![\\d.:/])${PROPER_FRACTION} ?(?:(?:of )?an? )?(?:hours?|hrs?|h)` +
   "|\\d{1,2}h\\d{2}" +
   `|\\d+(?:\\.\\d+)?(?: and a half)? ?${AMOUNT_UNIT}(?: and a half)?` +
   "|(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half an?|a half)(?: and a half)? (?:hours?|hrs?|minutes?|mins?)(?: and a half)?)";
@@ -400,6 +415,9 @@ const AMOUNT_PARTS_RE = new RegExp(`^(${AMOUNT_NUMBER})( and a half)? ?(${AMOUNT
 /** Minutes in an AMOUNT ("an hour and a half" = 90, "1h30" = 90), or undefined. */
 function amountToMinutes(amount: string): number | undefined {
   const text = amount.trim();
+  // "3/4 of an hour" (AMOUNT reads fractions of an hour only).
+  const fraction = /^(\d{1,2})\/(\d{1,2})\b/.exec(text);
+  if (fraction) return Math.round((Number(fraction[1]) / Number(fraction[2])) * 60);
   const hoursMinutes = /^(\d{1,2})h(\d{2})$/.exec(text);
   if (hoursMinutes) return Number(hoursMinutes[1]) * 60 + Number(hoursMinutes[2]);
   // "1 hour 30 minutes", "an hour and 15 minutes", "1h 30m".
@@ -571,9 +589,9 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     cut(m);
     return numericDate(m, Number(m[2]), Number(m[3]));
   }
-  // "for 3/4 of an hour" is a fraction (FRACTION_NOUN), not 3 April.
+  // "for 3/4 of an hour" and "3/4 of the team" are fractions (AFTER_FRACTION), not 3 April.
   const slashDate = (lead: string, year: string) =>
-    new RegExp(`${lead}(\\d{1,2})/(\\d{1,2})${year}(?![\\d/])(?!\\s?(?:hours?|hrs?|h|minutes?|mins?|an?\\s+hour)\\b)(?!${FRACTION_NOUN})`);
+    new RegExp(`${lead}(\\d{1,2})/(\\d{1,2})${year}(?![\\d/])(?!\\s?(?:hours?|hrs?|h|minutes?|mins?|an?\\s+hour)\\b)(?!${AFTER_FRACTION})`);
   m = take(slashDate(numericLead, "/(\\d{4}|\\d{2})")) ?? take(slashDate(weakNumericLead, ""));
   if (m) {
     const [first, second] = [Number(m[2]), Number(m[3])];
@@ -690,8 +708,6 @@ const TIME_AFTER_DATE_RE =
   /^\s*,?\s*(?:(?:at|@|from|between|around)\s*)?(?:\d{1,2}(?:[:.h]\d{2})?\s?(?:am|pm)\b|\d{1,2}(?:[:h]\d{2}|\.(?:1[3-9]|[2-5]\d))\b|noon\b|midday\b|midnight\b)|^\s*,?\s*(?:at|@)\s*\d{1,2}\b/;
 /** Where an hour may start: not inside another number ("8.15 pm" is not "15 pm", "1.12.2026" holds no time). */
 const HOUR_START = "(?<![\\d.:/])";
-/** What follows a fraction, not a date: "1/2 an hour", "3/4 of the team", "2/3 of us", "1/2 a day". */
-const FRACTION_NOUN = "\\s+(?:of|an?|the|my|our|your|their|his|her|its|us|them|people)\\b";
 /** Minutes after the hour: "16:00", "8.15" (British and Swiss), "14h30" (French and Swiss). */
 const MINUTES = "(?:[:.h](\\d{2}))";
 
@@ -730,7 +746,7 @@ export function parseClock(text: string): {
   // Fractions as the text has them, before an amount is cut out of it: "1/2" in "back by 1/2 an
   // hour" is left alone in the text once "an hour" is read as a shift (see the day.month check below).
   const fractions = new Set(
-    [...rest.matchAll(new RegExp(`(?<![\\d.:/])(\\d{1,2}[./]\\d{1,2})(?=${FRACTION_NOUN}|\\s?${AMOUNT_UNIT}\\b)`, "g"))].map((m) => m[1]),
+    [...rest.matchAll(new RegExp(`(?<![\\d.:/])(${PROPER_FRACTION})(?=${FRACTION_FOLLOWER}|\\s?${AMOUNT_UNIT}\\b)`, "g"))].map((m) => m[1]),
   );
 
   // Duration: "for an hour", "for 90 minutes", "for 1.5 hours", "for half an hour", "for an hour
@@ -864,8 +880,10 @@ export function parseClock(text: string): {
           minutes = bareClock(clock[1], minute);
         }
       } else {
+        // The first number of a pair ("for 3/4 of a day", "at 3/4") is no hour: the pair is a
+        // date or a fraction.
         single =
-          /(?:^|\s)(?:at|to|for|around|@) ?(\d{1,2})(?!\d|:|\.\d| ?(?:hours?|hrs?|minutes?|mins?|days?|weeks?|people|st|nd|rd|th)| ?(?:am|pm)\b)\b/.exec(rest) ??
+          /(?:^|\s)(?:at|to|for|around|@) ?(\d{1,2})(?!\d|:|\.\d|\/\d| ?(?:hours?|hrs?|minutes?|mins?|days?|weeks?|people|st|nd|rd|th)| ?(?:am|pm)\b)\b/.exec(rest) ??
           /^\s*(\d{1,2})\s*$/.exec(rest);
         if (single && validClock(Number(single[1]), 0)) minutes = bareClock(single[1], 0);
       }
@@ -884,9 +902,9 @@ export function parseClock(text: string): {
   // Whatever time was read, a day.month pair left over may be the new date ("4 pm, 3.12"); until
   // the review of 24 Nov 2026 it was dropped and the event moved on its own day by rule. A number
   // in a name or an amount has a word in front of it ("Python 3.12", "the 2.5 km run"), and a
-  // fraction a noun after it ("by 1/2 an hour", "3/4 of the team"; review of 25 Nov 2026: these
-  // asked which date was meant).
-  for (const pair of rest.matchAll(new RegExp(`(?<![\\d.:/])(\\d{1,2})[./](\\d{1,2})(?![\\d./])(?!\\s?(?:%|am|pm|hours?|hrs?|h|minutes?|mins?|m|km|kg|mi|miles?|days?|weeks?)\\b)(?!${FRACTION_NOUN})`, "g"))) {
+  // fraction a quantity after it ("by 1/2 a day", "3/4 of the team"; review of 25 Nov 2026: these
+  // asked which date was meant). "27/11 the same time" is a date (AFTER_FRACTION).
+  for (const pair of rest.matchAll(new RegExp(`(?<![\\d.:/])(\\d{1,2})[./](\\d{1,2})(?![\\d./])(?!\\s?(?:%|am|pm|hours?|hrs?|h|minutes?|mins?|m|km|kg|mi|miles?|days?|weeks?)\\b)(?!${AFTER_FRACTION})`, "g"))) {
     const [dayNumber, month] = [Number(pair[1]), Number(pair[2])];
     if (dayNumber < 1 || dayNumber > 31 || month < 1 || month > 12 || fractions.has(pair[0])) continue;
     const word = /([a-z']+)\s*$/.exec(rest.slice(0, pair.index))?.[1];
@@ -1460,11 +1478,13 @@ export function resolveMove(
         readings.push({ starts_at: startIso, ends_at: endIso });
       });
     } else if (!request.vagueTime) {
-      // A new day only: same clock time, same length. Not at a time the reason rules out ("to
-      // tomorrow, I'm busy at 7 pm" for a 7 pm event).
+      // A new day only: same clock time, same length unless one is given ("to Friday for half an
+      // hour" kept its 90 minutes until the review of 25 Nov 2026). Not at a time the reason rules
+      // out ("to tomorrow, I'm busy at 7 pm" for a 7 pm event).
       const startIso = at(date, original.minutes);
+      const lengthMs = request.durationMin !== undefined ? request.durationMin * 60_000 : durationMs;
       if (atReasonTime(startIso)) ruledOut = true;
-      else readings.push({ starts_at: startIso, ends_at: new Date(Date.parse(startIso) + durationMs).toISOString() });
+      else readings.push({ starts_at: startIso, ends_at: new Date(Date.parse(startIso) + lengthMs).toISOString() });
     }
   }
   const allowed = readings.filter((reading) => inBounds(reading.starts_at));
@@ -1601,21 +1621,57 @@ const TENTATIVE_RE =
  * Until the review of 25 Nov 2026 any "do it" counted, so "Should I cancel the team sync? I'll do it
  * myself later", "Let me do it later" and "Maybe, do it if it clashes" kept the model's cancel card.
  */
+// "Then do it", "Ok, then do it", "Definitely do it", "Yes, and do it now" are go-aheads too (review
+// of 25 Nov 2026: they lost the model's card).
 const GO_AHEAD_START_RE = new RegExp(
-  "^(?:(?:please|pls|yes|yeah|yep|sure|ok|okay|alright|so|just)[,!]?\\s+)*" +
+  "^(?:(?:please|pls|yes|yeah|yep|sure|ok|okay|alright|so|just|then|and|now|definitely|absolutely|certainly|of course|fine)[,!]?\\s+)*" +
     "(?:(do (?:it|that|this)|go ahead|go for it|make it so|make that change)|" +
     "(?:move|reschedule|postpone|cancel|call off|delete|remove|push|shift|delay|scrap)\\s+(?:it|that|this|them|the|my|our))" +
     "\\b(.*)$",
 );
+/**
+ * "if"/"when" about being able to, not a condition: "do it if you can", "when you can", "if
+ * possible" are go-aheads (in the same clause or the next one, review of 25 Nov 2026).
+ */
+const CONDITION = "(?:if(?! (?:you can|you could|possible)\\b)|when(?:ever)?(?! (?:you can|you could|possible)\\b)|unless|once|in case)";
 /** Words after a go-ahead that make it a maybe or a condition, or the user's own doing: "do it if it clashes", "do it myself". */
-const NOT_NOW_RE =
-  /\b(?:myself|ourselves|maybe|perhaps|probably|possibly|if(?! (?:you can|possible)\b)|when(?! you can\b)|whenever|unless|once|in case)\b/;
-/** After "do it" or "go ahead", a later time puts it off ("do it later", "do it next week"); after "move it" it is where to. */
-const LATER_RE = /\b(?:later|tomorrow|next|another time|other time|sometime|some ?day|eventually|after(?! all\b))\b/;
+const NOT_NOW_RE = new RegExp(`\\b(?:myself|ourselves|maybe|perhaps|probably|possibly|${CONDITION})\\b`);
+/**
+ * After "do it" or "go ahead", a later time puts it off ("do it later", "do it next week"); after
+ * "move it" it is where to. "Not later" and "not tomorrow" say now (review of 25 Nov 2026: "Do it
+ * now, not later" lost the model's card).
+ */
+const LATER_RE = /(?<!\b(?:not|no)\s)\b(?:later|tomorrow|next|another time|other time|sometime|some ?day|eventually|after(?! all\b))\b/;
+/** "Not now" and "not yet" put any go-ahead off ("Do it, but not yet", "Cancel it, not now"). */
+const NOT_YET_RE = /\bnot (?:now|yet|right now|just yet)\b/;
 /** A clause right before the go-ahead that makes it a maybe or a condition ("Maybe, do it", "If it clashes, do it"); "If so, do it" is a go-ahead. */
-const HEDGE_CLAUSE_RE = /^(?:maybe|perhaps|probably|possibly|(?:only )?if\b(?! (?:so|possible|you can)$)|when\b|whenever\b|unless\b|once\b|in case\b)/;
+const HEDGE_CLAUSE_RE = /^(?:maybe|perhaps|probably|possibly|(?:only )?if\b(?! (?:so|possible|you can|you could)$)|when(?:ever)?\b(?! (?:possible|you can|you could)$)|unless\b|once\b|in case\b)/;
 /** A clause right after the go-ahead that does the same ("Do it, if it clashes", "Cancel it, maybe"). */
-const HEDGE_AFTER_RE = /^(?:(?:but|and|or)\s+)?(?:only\s+)?(?:if|when|whenever|unless|once|in case|maybe|perhaps|probably|possibly)\b/;
+const HEDGE_AFTER_RE = new RegExp(`^(?:(?:but|and|or)\\s+)?(?:only\\s+)?(?:${CONDITION}|maybe|perhaps|probably|possibly)\\b`);
+/**
+ * A sentence that only says yes, after the question the message asks: "Yes.", "Yes please",
+ * "Yes, thanks", "Yes that's right", "Sure, why not".
+ */
+const BARE_YES_RE =
+  /^(?:yes|yeah|yep|sure)(?:[\s,!]+(?:please|pls|thanks|thank you|thx|why not|that's right|that is right|that's correct|right|correct|exactly|of course|definitely|absolutely))*$/;
+/** "Go ahead, next time ask first": an instruction for next time, not a put-off. */
+const NEXT_TIME_INSTRUCTION_RE = /^(?:(?:and|but)\s+)?next time\s+(?!(?:please|pls|then|maybe|perhaps|though)$)\S/;
+
+/** A change asked for on a condition or for later: "cancel it if Alicia agrees", "go ahead and cancel it if it clashes", "cancel it, but not now". */
+const CONDITIONAL_CHANGE_RE = new RegExp(
+  `\\b(?:move|reschedule|postpone|cancel|call off|delete|remove|push|shift|delay|scrap|do (?:it|that|this)|go ahead)\\b[^.?!;\\n]*?(?:\\b${CONDITION}\\b|${NOT_YET_RE.source})`,
+);
+
+/** An advice question or a thought ("Should I cancel ...?", "I'm thinking about moving ..."), whatever else the message says. */
+function asksOrMuses(text: string, raw: string): boolean {
+  return ADVICE_QUESTION_RE.test(text) || (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) || TAG_QUESTION_RE.test(raw) || TENTATIVE_RE.test(text);
+}
+
+/** Does a sentence of the message that is not a question ask for a change on a condition (CONDITIONAL_CHANGE_RE)? */
+function changesOnCondition(message: string): boolean {
+  const raw = (message ?? "").trim().toLowerCase().replace(/[‘’ʼ]/g, "'");
+  return (raw.match(/[^.?!;\n]+[.?!;\n]*/g) ?? []).some((sentence) => !/\?/.test(sentence) && CONDITIONAL_CHANGE_RE.test(sentence));
+}
 
 /** Does the message say to go ahead (see GO_AHEAD_START_RE)? A sentence that is a question does not. */
 function saysGoAhead(message: string): boolean {
@@ -1625,15 +1681,17 @@ function saysGoAhead(message: string): boolean {
     if (/\?/.test(whole)) return false;
     const sentence = whole.replace(/[.?!;\n]+$/, "").trim();
     // "Should I cancel the team sync? Yes.": an answer to the question the message asks.
-    if (index > 0 && /^(?:yes|yeah|yep|sure)(?:[\s,!]+(?:please|pls))?$/.test(sentence)) return true;
+    if (index > 0 && BARE_YES_RE.test(sentence)) return true;
     const clauses = sentence.split(/\s*,\s*|\s+[-–—]\s+/).map((clause) => clause.trim());
     return clauses.some((clause, i) => {
       const go = GO_AHEAD_START_RE.exec(clause);
-      if (!go || NOT_NOW_RE.test(go[2]) || (go[1] && LATER_RE.test(go[2]))) return false;
+      if (!go || NOT_NOW_RE.test(go[2]) || NOT_YET_RE.test(go[2]) || (go[1] && LATER_RE.test(go[2]))) return false;
       if (i > 0 && HEDGE_CLAUSE_RE.test(clauses[i - 1])) return false;
       const next = clauses[i + 1] ?? "";
-      // "Do it, but later": put off (the first words of the next clause).
-      return !HEDGE_AFTER_RE.test(next) && !(go[1] && LATER_RE.test(next.split(/\s+/).slice(0, 3).join(" ")));
+      // "Do it, but later", "Do it, but not yet": put off (the first words of the next clause).
+      const nextStart = next.split(/\s+/).slice(0, 3).join(" ");
+      const putOff = NOT_YET_RE.test(nextStart) || (go[1] && !NEXT_TIME_INSTRUCTION_RE.test(next) && LATER_RE.test(nextStart));
+      return !HEDGE_AFTER_RE.test(next) && !putOff;
     });
   });
 }
@@ -1910,8 +1968,10 @@ function readFollowUp(
 /**
  * "4 pm please, and cancel the team sync" after "Did you mean 4:00 AM or 4:00 PM for **Dentist
  * appointment**?": the message answers MONDAY's question and then asks for a change of another
- * event. One change is prepared per message, so the answer is asked about again, in a form the
- * next message can answer with "yes" (review of 25 Nov 2026: it was dropped without a word).
+ * event. One change is prepared per message: when the other request prepares one, the answer is
+ * asked about again (`note`), in a form the next message can answer with "yes" (review of 25 Nov
+ * 2026: it was dropped without a word); when it prepares none ("cancel my subscription", an event
+ * that is not in the calendar), the answer is the change (`target`, `request`).
  */
 function answerBeforeRequest(
   previous: PreviousTurn,
@@ -1920,7 +1980,7 @@ function answerBeforeRequest(
   events: KnownEvent[],
   today: string,
   timeZone: string,
-): string | undefined {
+): { target: KnownEvent; request: ChangeRequest; note: string } | undefined {
   const asked = ASKED_EVENT_RE.exec(previous.assistant ?? "");
   const askedTitle = asked?.slice(1).find(Boolean);
   const askedEvent = askedTitle ? events.find((e) => sameTitle(e.title, askedTitle)) : undefined;
@@ -1940,7 +2000,11 @@ function answerBeforeRequest(
     resolved.status === "resolved"
       ? `Did you mean ${describeLocal(resolved.starts_at, timeZone, today.slice(0, 4))} for **${askedEvent.title}**?`
       : resolved.question;
-  return `Your message also answers my question about **${askedEvent.title}**, but I prepare one change per message, so I did not prepare that one. ${again}`;
+  return {
+    target: askedEvent,
+    request: answer.request,
+    note: `Your message also answers my question about **${askedEvent.title}**, but I prepare one change per message, so I did not prepare that one. ${again}`,
+  };
 }
 
 /**
@@ -1992,8 +2056,8 @@ export function reconcileCalendarChanges(opts: {
   const request = parseChangeRequest(message, opts.today);
   /** The request the result is built from: the message's own, or an answer read into an earlier one. */
   let active = request;
-  /** A note about an answer to MONDAY's question that the message also gives (see answerBeforeRequest). */
-  let alsoAnswered: string | undefined;
+  /** An answer to MONDAY's question about another event that the message also gives (see answerBeforeRequest). */
+  let alsoAnswered: ReturnType<typeof answerBeforeRequest>;
   /**
    * The proposals that are left, as the user will see them: a reminder the model titled exactly
    * like the event it is about is called "Reminder: ..." (QA round 4's "Set a reminder for my
@@ -2002,6 +2066,16 @@ export function reconcileCalendarChanges(opts: {
    * a second one.
    */
   const result = (base: Omit<Reconciled, "proposals" | "sameTitleAs" | "log" | "request">): Reconciled => {
+    const answer = alsoAnswered;
+    if (answer && base.changes.length === 0) {
+      // The other request prepared nothing, so "I did not prepare that one" would not be true:
+      // the answer is this message's one change, and what was said about the request stays.
+      alsoAnswered = undefined;
+      log.push(`the other request gave no change; prepared the answer about "${answer.target.title}" instead`);
+      active = answer.request;
+      const fromAnswer = changeEvent(answer.target, answer.request, true);
+      return { ...fromAnswer, note: [base.note, fromAnswer.note].filter(Boolean).join(" ") || undefined };
+    }
     const sameTitleAs: Reconciled["sameTitleAs"] = [];
     const shown = proposals.map((proposal) => {
       const same = events.find((event) => sameTitle(event.title, proposal.title));
@@ -2013,7 +2087,7 @@ export function reconcileCalendarChanges(opts: {
       sameTitleAs.push({ title: proposal.title, event: same });
       return proposal;
     });
-    const note = alsoAnswered ? [base.note, alsoAnswered].filter(Boolean).join(" ") : base.note;
+    const note = answer ? [base.note, answer.note].filter(Boolean).join(" ") : base.note;
     return { request: active, ...base, note, proposals: shown, sameTitleAs, log };
   };
 
@@ -2077,11 +2151,7 @@ export function reconcileCalendarChanges(opts: {
     const question =
       /^(?:what|when|where|which|who|whose|how|why)\b/.test(text) ||
       (/\?\s*$/.test(raw) && /^(?:is|are|was|were|do|does|did|am|has|have)\b/.test(text)) ||
-      ((ADVICE_QUESTION_RE.test(text) ||
-        (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) ||
-        TAG_QUESTION_RE.test(raw) ||
-        TENTATIVE_RE.test(text)) &&
-        !saysGoAhead(message));
+      (asksOrMuses(text, raw) && !saysGoAhead(message));
     // "Move on", "moving forward with ..." and "Push workout" are not about changing an event.
     const withoutIdioms = text.replace(NOUN_USE_RE, " ").replace(/\bmov(?:e|ing) (?:on|over|out|along|away|in|(?:forward|ahead) with)\b/g, " ");
     const asksChange = acceptChanges && !creating && !negated && !question && (Boolean(followUp) || CHANGE_WORD_ANYWHERE.test(withoutIdioms));
@@ -2248,12 +2318,20 @@ export function reconcileCalendarChanges(opts: {
     }
   }
   // "4 pm please, and cancel the team sync" after MONDAY's question about the dentist appointment:
-  // the cancel is read as usual, and the answer is asked about again.
+  // the cancel is read as usual, and the answer is asked about again (or prepared, when the
+  // cancel prepares nothing; see result()).
   if (opts.previousTurn && request && !unnamedRequest) {
     alsoAnswered = answerBeforeRequest(opts.previousTurn, text, request, events, opts.today, timeZone);
-    if (alsoAnswered) log.push("the message also answers MONDAY's question about another event; asked about it again");
+    if (alsoAnswered) log.push("the message also answers MONDAY's question about another event");
   }
   if (!request) return withoutRequest();
+  // "Should I cancel the team sync? Cancel it if Alicia agrees": next to the question, a change on
+  // a condition or for later is no more a go-ahead than "If it clashes, do it", so the question
+  // decides, as without a request (review of 25 Nov 2026: it kept the model's cancel card).
+  if (asksOrMuses(text, message.trim().toLowerCase().replace(/[‘’ʼ]/g, "'")) && !saysGoAhead(message) && changesOnCondition(message)) {
+    log.push("a change on a condition next to a question or a thought: not read as a request");
+    return withoutRequest();
+  }
 
   const readable = request.day !== undefined || request.start !== undefined || request.shiftMin !== undefined || request.weekStart !== undefined;
 
@@ -2393,14 +2471,17 @@ export function asksToSend(message: string): boolean {
 const FORWARD_RE = new RegExp(`${MESSAGE_START}(?:forward|fwd)\\b(?!\\s+me\\b)`);
 /**
  * A send verb whose "to" names a day or a time ("Send the team sync to next week", "Text it to 5
- * pm"). "To today's attendees" and "to Friday's meeting" name people, not a day.
+ * pm"). "To today's attendees" and "to Friday's meeting" name people, not a day; "to Friday's 2 pm
+ * slot" is a time again (review of 25 Nov 2026).
  */
 const SEND_TO_DAY_RE = new RegExp(
-  `\\bto\\s+(?:(?:the\\s+)?(?:same\\s+day|day after|${WEEKDAY_RE}|${MONTH_RE})|today|tonight|tomorrow|next\\s+(?:week|month|${WEEKDAY_RE})|this\\s+(?:week|month|${WEEKDAY_RE})|noon|midnight|\\d{1,2}(?:[:.h]\\d{2})?\\s?(?:am|pm)|\\d{1,2}[:h]\\d{2})\\b(?!'s\\b)`,
+  `\\bto\\s+(?:(?:the\\s+)?(?:same\\s+day|day after|${WEEKDAY_RE}|${MONTH_RE})|today|tonight|tomorrow|next\\s+(?:week|month|${WEEKDAY_RE})|this\\s+(?:week|month|${WEEKDAY_RE})|noon|midnight|\\d{1,2}(?:[:.h]\\d{2})?\\s?(?:am|pm)|\\d{1,2}[:h]\\d{2})\\b(?!'s\\b(?!\\s+(?:\\d|(?:slot|time|morning|afternoon|evening|noon)\\b)))`,
 );
 /**
  * Where the words to send start: "... that the team sync moved", "... saying I'm late", "Email
- * Sam: ...". "Send that meeting to Friday" is not one: "that" there is the thing to send.
+ * Sam: ...", and a person followed by a new subject ("Tell Alicia I will move the team sync to 8
+ * pm", "Text the team we're late"; review of 25 Nov 2026). "Send that meeting to Friday" is not
+ * one: "that" there is the thing to send.
  */
 const SEND_CONTENT_RE =
-  /\s(?:that\s+(?=(?:i|i'm|i'll|i've|i'd|we|we're|we'll|we've|you|you're|he|she|they|it|it's|there|the|my|our|his|her|their|your)\b)|saying\s|to say\s|and (?:say|tell|ask)\s)|:\s/;
+  /\s(?:that\s+(?=(?:i|i'm|i'll|i've|i'd|we|we're|we'll|we've|you|you're|he|she|they|it|it's|there|the|my|our|his|her|their|your)\b)|saying\s|to say\s|and (?:say|tell|ask)\s)|:\s|(?<=\b(?:tell|text|message|email|e-mail|mail|ask|notify|let)\s+(?:[a-z'-]+\s+)?[a-z'-]+)\s(?=(?:i|i'm|i'll|i've|i'd|we|we're|we'll|we've|he|she|they|it|it's|it'll)\s)/;

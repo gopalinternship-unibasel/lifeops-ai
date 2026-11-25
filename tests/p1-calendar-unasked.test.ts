@@ -186,10 +186,65 @@ describe("questions, thoughts and messages to others (finding 23)", () => {
     ["Should the team sync move to 8 pm? Do it later.", syncTo8],
     ["Should the team sync move to 8 pm? Go ahead, but only if Alicia agrees.", syncTo8],
     ["Should the team sync move to 8 pm? Yes?", syncTo8],
+    // Put off, or on a condition, also with other lead words (review of 25 Nov 2026, second pass).
+    ["Should I cancel the team sync? Do it, but not yet", cancelSync],
+    ["Should I cancel the team sync? Then do it later", cancelSync],
+    ["Should I cancel the team sync? Yes, thanks, but not yet", cancelSync],
+    ["Should I cancel the team sync? Go ahead, next week", cancelSync],
+    ["Should I cancel the team sync? And do it myself", cancelSync],
+    ["Should the team sync move to 8 pm? Do it whenever Alicia agrees", syncTo8],
+    // A change request on a condition next to the question (pre-existing, same review).
+    ["Should I cancel the team sync? Cancel it if Alicia agrees", cancelSync],
+    ["Should I cancel the team sync? Go ahead and cancel it if it clashes", cancelSync],
+    ["Should I cancel the team sync? Cancel it, but not now", cancelSync],
   ])("a go-ahead word that is not one does not keep the change: %s", (message, change) => {
     const result = reconcile(message, [change]);
     expect(result.changes).toHaveLength(0);
     expect(result.unasked).toBe(true);
+  });
+
+  // Review of 25 Nov 2026 (second pass): the first go-ahead rule of this round dropped these clear
+  // go-aheads, which the older rule had kept.
+  it.each([
+    ["Should I cancel the team sync? Then do it", cancelSync],
+    ["Should I cancel the team sync? Ok, then do it", cancelSync],
+    ["Should I cancel the team sync? Definitely do it", cancelSync],
+    ["Should I cancel the team sync? Yes, and do it now", cancelSync],
+    ["Should I cancel the team sync? Do it now, not later", cancelSync],
+    ["Should I cancel the team sync? Do it, not tomorrow", cancelSync],
+    ["Should I cancel the team sync? Sure, why not", cancelSync],
+    ["Should I cancel the team sync? Yes, thanks", cancelSync],
+    ["Should I cancel the team sync? Yes that's right", cancelSync],
+    ["Should I cancel the team sync? Do it, if you can", cancelSync],
+    ["Should I cancel the team sync? Do it if you can", cancelSync],
+    ["Should I cancel the team sync? When you can, do it.", cancelSync],
+    ["Should I cancel the team sync? Cancel it", cancelSync],
+    ["Should I cancel the team sync? Yes, cancel it if you can", cancelSync],
+    ["Should the team sync move to 8 pm? Yes, do it - when you can", syncTo8],
+    ["Should the team sync move to 8 pm? Do it whenever you can", syncTo8],
+    ["Should the team sync move to 8 pm? Go ahead, next time ask first", syncTo8],
+    ["Should the team sync move to 8 pm? Absolutely, go ahead", syncTo8],
+    ["Should the team sync move to 8 pm? Fine, do it", syncTo8],
+  ])("keeps the model's change for a go-ahead after the question: %s", (message, change) => {
+    const result = reconcile(message, [change]);
+    expect(result.changes).toEqual([
+      change.kind === "delete"
+        ? { kind: "delete", event: event("sync"), byRule: false }
+        : {
+            kind: "update",
+            event: event("sync"),
+            next: { starts_at: change.starts_at, ends_at: change.ends_at },
+            byRule: false,
+          },
+    ]);
+    expect(result.note).toBeUndefined();
+    expect(result.unasked).toBeFalsy();
+  });
+
+  it("still prepares a change on a condition that is not next to a question", () => {
+    expect(reconcile("Cancel the team sync if it clashes", [cancelSync]).changes).toEqual([
+      { kind: "delete", event: event("sync"), byRule: true },
+    ]);
   });
 });
 
@@ -210,6 +265,10 @@ describe("a request to send something (finding 86, calendar part)", () => {
     "Email Alicia that I need to cancel the team sync",
     "Send the slides to today's attendees",
     "Email Sam: the team sync moves to Friday",
+    // What to write starts with a new subject after the person (review of 25 Nov 2026, second pass).
+    "Tell Alicia I will move the team sync to 8 pm",
+    "Text the team we're moving the sync to Friday",
+    "Tell Sam it moves to Friday",
   ])("asksToSend: %s", (message) => {
     expect(asksToSend(message)).toBe(true);
     expect(asksForAction(message)).toBe(true);
@@ -232,6 +291,10 @@ describe("a request to send something (finding 86, calendar part)", () => {
     // "that" naming the thing to send, and a day with its own word boundary.
     "Send that meeting to Friday",
     "Send the team sync to tomorrow",
+    // A day's time slot is a time, not a day's people.
+    "Send the dentist appointment to Friday's 2 pm slot",
+    "Send the team sync to tomorrow's 3 pm slot",
+    "Text it to 5 pm",
   ])("not a send request: %s", (message) => {
     expect(asksToSend(message)).toBe(false);
   });
