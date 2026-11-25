@@ -199,7 +199,7 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
     setBusy(true);
     try {
       const r = isDelete
-        ? await removeCalendarEvent({ data: { eventId: change.event_id, cardId: change.id } })
+        ? await removeCalendarEvent({ data: { eventId: change.event_id, cardId: change.id, originalStartsAt: change.original.starts_at, originalEndsAt: change.original.ends_at } })
         : await updateCalendarEvent({ data: {
             cardId: change.id,
             eventId: change.event_id,
@@ -207,6 +207,9 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
             starts_at: change.next?.starts_at,
             ends_at: change.next?.ends_at,
             timeZone: getBrowserTimeZone(),
+            // The server refuses the card when the event no longer has these times (out of date).
+            originalStartsAt: change.original.starts_at,
+            originalEndsAt: change.original.ends_at,
           } });
       if (r.alreadyHandled) {
         // Handled before (another tab, or before a reload): just take the card away.

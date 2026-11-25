@@ -3,8 +3,34 @@ import { getValidAccessToken } from "./oauth.server";
 const BASE = "https://gmail.googleapis.com/gmail/v1";
 const GOOGLE_API_TIMEOUT_MS = 20_000;
 
+const DRAFT_WITHOUT_ID =
+  "Gmail did not confirm the draft. Please check your Gmail drafts before saving it again.";
+
 function googleApiSignal() {
   return AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS);
+}
+
+/**
+ * fetch() for the Gmail API. Its errors reach users (toasts, card errors), so a network failure or
+ * a timeout becomes a sentence and the details go to the server log.
+ */
+async function gmailFetch(url: string, init: RequestInit, action: string): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: googleApiSignal() });
+  } catch (error) {
+    console.error(`[google] Gmail: could not ${action}:`, error);
+    throw new Error(`Gmail could not be reached to ${action}. Please try again in a moment.`);
+  }
+}
+
+/** A failed Gmail API answer as a sentence; Google's answer body goes to the server log only. */
+async function gmailError(res: Response, action: string): Promise<Error> {
+  const body = await res.text().catch(() => "");
+  console.error(`[google] Gmail: could not ${action}: HTTP ${res.status}: ${body.slice(0, 500)}`);
+  if (res.status === 401 || res.status === 403) {
+    return new Error(`Gmail did not allow MONDAY to ${action}. Please connect Google again from your profile.`);
+  }
+  return new Error(`Gmail could not ${action} right now (HTTP ${res.status}). Please try again in a moment.`);
 }
 
 async function mapWithConcurrency<T, R>(
@@ -97,20 +123,18 @@ function extractBody(payload: GmailPayload | undefined): string {
 
 async function fetchMessagesByQuery(accessToken: string, query: string, maxResults: number): Promise<GmailMsg[]> {
   const cappedMaxResults = Math.max(1, Math.min(maxResults, 50));
-  const listRes = await fetch(`${BASE}/users/me/messages?maxResults=${cappedMaxResults}&q=${encodeURIComponent(query)}`, {
+  const listRes = await gmailFetch(`${BASE}/users/me/messages?maxResults=${cappedMaxResults}&q=${encodeURIComponent(query)}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
-    signal: googleApiSignal(),
-  });
-  if (!listRes.ok) throw new Error(`Gmail list failed: ${listRes.status} ${await listRes.text()}`);
+  }, "load your inbox");
+  if (!listRes.ok) throw await gmailError(listRes, "load your inbox");
   const list = (await listRes.json()) as { messages?: { id: string }[] };
   const ids = list.messages ?? [];
   if (ids.length === 0) return [];
 
   const msgs = await mapWithConcurrency(ids, 8, async ({ id }) => {
-    const r = await fetch(`${BASE}/users/me/messages/${id}?format=full`, {
+    const r = await gmailFetch(`${BASE}/users/me/messages/${id}?format=full`, {
       headers: { Authorization: `Bearer ${accessToken}` },
-      signal: googleApiSignal(),
-    });
+    }, "load your inbox");
     if (!r.ok) return null;
     const m = (await r.json()) as GmailApiMessage;
     const headers = m.payload?.headers ?? [];
@@ -141,10 +165,9 @@ export async function listUnreadMessages(userId: string, maxResults = 50): Promi
 
 export async function getMessage(userId: string, messageId: string): Promise<GmailMsg | null> {
   const { accessToken } = await getValidAccessToken(userId);
-  const r = await fetch(`${BASE}/users/me/messages/${encodeURIComponent(messageId)}?format=full`, {
+  const r = await gmailFetch(`${BASE}/users/me/messages/${encodeURIComponent(messageId)}?format=full`, {
     headers: { Authorization: `Bearer ${accessToken}` },
-    signal: googleApiSignal(),
-  });
+  }, "read the email");
   if (!r.ok) return null;
   const m = (await r.json()) as GmailApiMessage;
   const headers = m.payload?.headers ?? [];
@@ -194,11 +217,10 @@ function buildRawReply(opts: { to: string; subject: string; body: string; inRepl
 export async function createDraftReply(userId: string, params: { messageId: string; replyBody: string }): Promise<{ draftId: string; subject: string; to: string }> {
   const { accessToken } = await getValidAccessToken(userId);
   // Fetch original to copy thread + headers
-  const origRes = await fetch(`${BASE}/users/me/messages/${encodeURIComponent(params.messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`, {
+  const origRes = await gmailFetch(`${BASE}/users/me/messages/${encodeURIComponent(params.messageId)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Message-ID&metadataHeaders=References`, {
     headers: { Authorization: `Bearer ${accessToken}` },
-    signal: googleApiSignal(),
-  });
-  if (!origRes.ok) throw new Error(`Could not fetch original message: ${origRes.status}`);
+  }, "read the email you are replying to");
+  if (!origRes.ok) throw await gmailError(origRes, "read the email you are replying to");
   const orig = (await origRes.json()) as GmailApiMessage;
   const headers = orig.payload?.headers ?? [];
   const from = header(headers, "From");
@@ -213,15 +235,14 @@ export async function createDraftReply(userId: string, params: { messageId: stri
     references: refs || undefined,
   });
 
-  const draftRes = await fetch(`${BASE}/users/me/drafts`, {
+  const draftRes = await gmailFetch(`${BASE}/users/me/drafts`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { raw, threadId: orig.threadId } }),
-    signal: googleApiSignal(),
-  });
-  if (!draftRes.ok) throw new Error(`Draft create failed: ${draftRes.status} ${await draftRes.text()}`);
+  }, "save the draft");
+  if (!draftRes.ok) throw await gmailError(draftRes, "save the draft");
   const draft = (await draftRes.json()) as GmailDraftApiResponse;
-  if (!draft.id) throw new Error("Gmail returned a draft without an ID");
+  if (!draft.id) throw new Error(DRAFT_WITHOUT_ID);
   return { draftId: draft.id, subject, to: from };
 }
 
@@ -235,14 +256,13 @@ export async function createDraft(
 ): Promise<{ draftId: string }> {
   const { accessToken } = await getValidAccessToken(userId);
   const raw = buildRawReply({ to: params.to, subject: params.subject, body: params.body, isReply: false });
-  const draftRes = await fetch(`${BASE}/users/me/drafts`, {
+  const draftRes = await gmailFetch(`${BASE}/users/me/drafts`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ message: { raw } }),
-    signal: googleApiSignal(),
-  });
-  if (!draftRes.ok) throw new Error(`Draft create failed: ${draftRes.status} ${await draftRes.text()}`);
+  }, "save the draft");
+  if (!draftRes.ok) throw await gmailError(draftRes, "save the draft");
   const draft = (await draftRes.json()) as GmailDraftApiResponse;
-  if (!draft.id) throw new Error("Gmail returned a draft without an ID");
+  if (!draft.id) throw new Error(DRAFT_WITHOUT_ID);
   return { draftId: draft.id };
 }

@@ -7,7 +7,8 @@ import { isHostedDeployment } from "@/server/deployment.server";
  * Every provider is reached through the OpenAI-compatible
  * `POST {LLM_BASE_URL}/chat/completions` API, so switching provider is an env change:
  *
- *   Local Ollama (default)   LLM_BASE_URL=http://localhost:11434/v1        LLM_MODEL=llama3.1:8b
+ *   Local Ollama (default    LLM_BASE_URL=http://localhost:11434/v1        LLM_MODEL=llama3.1:8b
+ *    for a local run only)
  *   Cloudflare Workers AI    LLM_BASE_URL=https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1
  *     (hosted demo)          LLM_MODEL=@cf/zai-org/glm-4.7-flash  LLM_STRUCTURED_OUTPUT=tools_required
  *                            LLM_FALLBACK_MODEL=@cf/google/gemma-4-26b-a4b-it
@@ -100,13 +101,57 @@ class HttpStatusError extends Error {
   }
 }
 
+/**
+ * The provider answered (HTTP 200) but the answer could not be read: not JSON, or JSON of an
+ * unexpected shape. Kept apart from network failures, so the user is not told the provider
+ * "could not be reached" when it did answer, and so the fallback model can be tried.
+ */
+export class UnreadableAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnreadableAnswerError";
+  }
+}
+
+/** The provider's name at the start of a sentence ("the AI provider" for an unknown host). */
+function sentenceName(provider: string): string {
+  return provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
+/** A model server on this machine (local Ollama, a test double), not a hosted provider. */
+export function isLocalBaseUrl(baseUrl: string): boolean {
+  return /^https?:\/\/(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|0\.0\.0\.0|host\.docker\.internal)(:\d+)?(\/|$)/i.test(
+    baseUrl.trim(),
+  );
+}
+
+/**
+ * Whether error messages may carry developer detail (the model address, setting names, docker
+ * hints): only on a local run against a model on this machine, where the reader is the person who
+ * runs it. A hosted site, or any hosted provider, gets plain sentences for its users, and the
+ * detail goes to the server log. A hosted provider's address can also hold an account id (the
+ * Cloudflare one does), which must not reach users.
+ */
+export function developerWording(baseUrl: string, hosted: boolean = isHostedDeployment()): boolean {
+  return !hosted && isLocalBaseUrl(baseUrl);
+}
+
 /** The first message-like string in a parsed error body ({"error":{"message":...}} and similar). */
 function findErrorText(value: unknown, depth = 0): string | undefined {
   if (depth > 4) return undefined;
   if (typeof value === "string") return value.trim() || undefined;
   if (Array.isArray(value)) return findErrorText(value[0], depth + 1);
   if (isRecord(value)) {
-    for (const key of ["message", "error", "detail", "error_description", "msg", "title"]) {
+    // "errors" is the Cloudflare v4 envelope: {"success":false,"errors":[{"code":..,"message":..}]}.
+    for (const key of [
+      "message",
+      "error",
+      "errors",
+      "detail",
+      "error_description",
+      "msg",
+      "title",
+    ]) {
       const found = findErrorText(value[key], depth + 1);
       if (found) return found;
     }
@@ -236,11 +281,14 @@ export function resolveLLMConfig(
 
   const structured = envValue(env, "LLM_STRUCTURED_OUTPUT");
   const temperature = Number.parseFloat(envValue(env, "LLM_TEMPERATURE") ?? "");
+  const configured = !!explicitBaseUrl || useLegacyHf || !hosted;
 
   return {
-    configured: !!explicitBaseUrl || useLegacyHf || !hosted,
-    provider: providerName(baseUrl),
-    baseUrl,
+    configured,
+    // A hosted site without a provider has no model server at all: it is not "Ollama" (the
+    // localhost default is for a local run), and no address is kept that a call could reach.
+    provider: configured ? providerName(baseUrl) : "the AI provider",
+    baseUrl: configured ? baseUrl : "",
     apiKey,
     model,
     fallbackModel: fallbackModel && fallbackModel !== model ? fallbackModel : null,
@@ -258,7 +306,8 @@ export function resolveLLMConfig(
 
 /** Strip ```json fences and return the first JSON object found in a model's text answer. */
 export function extractJsonObject(text: string | null | undefined): Record<string, unknown> | null {
-  if (!text) return null;
+  // The answer is parsed JSON from the provider, so a "string" field can hold anything.
+  if (typeof text !== "string" || !text) return null;
   const unfenced = text
     .replace(/^\s*```(?:json)?\s*/i, "")
     .replace(/\s*```\s*$/i, "")
@@ -294,16 +343,34 @@ function unwrapToolEnvelope(
   return value;
 }
 
+/**
+ * Tool-call arguments as the JSON string callers expect. Some providers (Cloudflare's native
+ * format) send the arguments as an object instead of a string.
+ */
+function argumentsText(value: unknown): string | undefined {
+  if (typeof value === "string") return value || undefined;
+  if (isRecord(value)) return JSON.stringify(value);
+  return undefined;
+}
+
 /** Ensure the completion carries the structured answer as a tool call for `toolName`. */
 export function normalizeToolCompletion(
   completion: AIChatCompletion,
   toolName: string,
 ): AIChatCompletion {
-  const choice = completion.choices?.[0];
-  const message = choice?.message;
-  const existing = message?.tool_calls?.find((call) => call.function?.arguments);
-  if (existing?.function?.arguments) {
-    const parsed = extractJsonObject(existing.function.arguments);
+  // The completion is parsed JSON from the provider: check each level instead of trusting the type.
+  const choice = Array.isArray(completion.choices) ? completion.choices[0] : undefined;
+  const message = isRecord(choice) && isRecord(choice.message) ? choice.message : undefined;
+  const calls: unknown[] = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  const existingArguments = calls
+    .map((call) =>
+      isRecord(call) && isRecord(call.function)
+        ? argumentsText(call.function.arguments)
+        : undefined,
+    )
+    .find((text): text is string => !!text);
+  if (existingArguments) {
+    const parsed = extractJsonObject(existingArguments);
     if (!parsed) return completion;
     const args = unwrapToolEnvelope(parsed, toolName);
     return {
@@ -319,7 +386,9 @@ export function normalizeToolCompletion(
       ],
     };
   }
-  const fromContent = extractJsonObject(message?.content);
+  const fromContent = extractJsonObject(
+    typeof message?.content === "string" ? message.content : null,
+  );
   if (!fromContent) return completion;
   const args = unwrapToolEnvelope(fromContent, toolName);
   return {
@@ -427,23 +496,75 @@ async function singleCall(opts: {
   }
 
   const responseText = await res.text();
-  let completion: AIChatCompletion & {
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
+  return readCompletion(responseText, opts, startedAt);
+}
+
+/** Every tool call's arguments as a JSON string, whatever form the provider sent them in. */
+function withStringArguments(completion: Record<string, unknown>): AIChatCompletion {
+  if (!Array.isArray(completion.choices)) return completion as AIChatCompletion;
+  const choices = completion.choices.map((choice: unknown) => {
+    if (
+      !isRecord(choice) ||
+      !isRecord(choice.message) ||
+      !Array.isArray(choice.message.tool_calls)
+    ) {
+      return choice;
+    }
+    const toolCalls = choice.message.tool_calls.map((call: unknown) => {
+      if (!isRecord(call) || !isRecord(call.function) || !isRecord(call.function.arguments))
+        return call;
+      return {
+        ...call,
+        function: { ...call.function, arguments: JSON.stringify(call.function.arguments) },
+      };
+    });
+    return { ...choice, message: { ...choice.message, tool_calls: toolCalls } };
+  });
+  return { ...completion, choices } as AIChatCompletion;
+}
+
+/**
+ * Read a 200 answer. Anything that goes wrong here happens after the provider answered, so it
+ * becomes an UnreadableAnswerError, never a TypeError that would read as "could not be reached".
+ */
+function readCompletion(
+  responseText: string,
+  opts: { config: LLMConfig; model: string; tools?: AITool[]; toolChoice?: ToolChoice },
+  startedAt: number,
+): AIChatCompletion {
+  const who = sentenceName(opts.config.provider);
+  const label = `[llm] ${opts.config.provider} ${opts.model}`;
+  let parsed: unknown;
   try {
-    completion = JSON.parse(responseText) as typeof completion;
+    parsed = JSON.parse(responseText);
   } catch {
-    console.error(
-      `[llm] ${opts.config.provider} ${opts.model}: answer is not JSON: ${responseText.slice(0, 300)}`,
+    console.error(`${label}: answer is not JSON: ${responseText.slice(0, 300)}`);
+    throw new UnreadableAnswerError(
+      `${who} sent an answer that is not valid JSON. Try again in a moment.`,
     );
-    const who = opts.config.provider.charAt(0).toUpperCase() + opts.config.provider.slice(1);
-    throw new Error(`${who} sent an answer that is not valid JSON. Try again in a moment.`);
   }
-  console.info(
-    `[llm] ${opts.config.provider} ${opts.model}: ${completion.usage?.prompt_tokens ?? "?"} prompt + ${completion.usage?.completion_tokens ?? "?"} completion tokens in ${((Date.now() - startedAt) / 1000).toFixed(1)} s`,
-  );
-  const toolName = forcedToolName(opts.tools, opts.toolChoice);
-  return toolName ? normalizeToolCompletion(completion, toolName) : completion;
+  const unreadable = () =>
+    new UnreadableAnswerError(
+      `${who} sent an answer the app could not read. Try again in a moment.`,
+    );
+  if (!isRecord(parsed)) {
+    console.error(`${label}: answer is not a JSON object: ${responseText.slice(0, 300)}`);
+    throw unreadable();
+  }
+  try {
+    const usage = isRecord(parsed.usage) ? parsed.usage : {};
+    console.info(
+      `${label}: ${String(usage.prompt_tokens ?? "?")} prompt + ${String(usage.completion_tokens ?? "?")} completion tokens in ${((Date.now() - startedAt) / 1000).toFixed(1)} s`,
+    );
+    const completion = withStringArguments(parsed);
+    const toolName = forcedToolName(opts.tools, opts.toolChoice);
+    return toolName ? normalizeToolCompletion(completion, toolName) : completion;
+  } catch (error) {
+    console.error(
+      `${label}: answer of an unexpected shape (${String(error)}): ${responseText.slice(0, 300)}`,
+    );
+    throw unreadable();
+  }
 }
 
 export async function callAI(opts: {
@@ -461,7 +582,13 @@ export async function callAI(opts: {
     throw new AiNotConfiguredError();
   }
   if (config.provider === "Hugging Face" && !config.apiKey) {
-    throw new Error("HUGGINGFACE_API_KEY (or LLM_API_KEY) is not configured");
+    // The setting names are for the person running the server, not for visitors of a hosted site.
+    if (!isHostedDeployment())
+      throw new Error("HUGGINGFACE_API_KEY (or LLM_API_KEY) is not configured");
+    console.warn(
+      "[llm] HUGGINGFACE_API_KEY (or LLM_API_KEY) is not set; the request was not sent.",
+    );
+    throw new AiNotConfiguredError();
   }
   const primary = opts.model ?? config.model;
 
@@ -470,15 +597,27 @@ export async function callAI(opts: {
   } catch (e: unknown) {
     const status = errorStatus(e);
     // 401/403 = gated/unauthorized for the primary model → try the fallback.
-    // 404 = model not available. 503 = cold-start; try fallback once.
-    // 429 = rate limit: hosted providers count it per model, so the fallback model can still answer.
+    // 404 = model not available. 429 = rate limit: hosted providers count it per model, so the
+    // fallback model can still answer. 500/502/503/504 = the model's server failed or is starting
+    // (cold start); another model may be served by a healthy one. An answer that could not be
+    // read is tried once more with the other model. Timeouts are not retried: the time is spent.
     const fallback = config.fallbackModel;
     const shouldFallback =
       !!fallback &&
       primary !== fallback &&
-      (status === 401 || status === 403 || status === 404 || status === 429 || status === 503);
+      (e instanceof UnreadableAnswerError ||
+        status === 401 ||
+        status === 403 ||
+        status === 404 ||
+        status === 429 ||
+        status === 500 ||
+        status === 502 ||
+        status === 503 ||
+        status === 504);
     if (shouldFallback && fallback) {
-      console.warn(`[llm] ${primary} failed (${status}); falling back to ${fallback}`);
+      console.warn(
+        `[llm] ${primary} failed (${status ?? "unreadable answer"}); falling back to ${fallback}`,
+      );
       try {
         return await singleCall({ ...opts, config, model: fallback });
       } catch (e2: unknown) {
@@ -495,41 +634,75 @@ function fetchCauseCode(e: unknown): string | undefined {
   return isRecord(cause) && typeof cause.code === "string" ? cause.code : undefined;
 }
 
+/** What users of a hosted site read when the provider refuses the site's key or model setting. */
+const NOT_SET_UP_CORRECTLY =
+  "The AI assistant is not set up correctly on this site right now. Please try again later.";
+
+/**
+ * The sentence a user reads for a failed AI call. Its message reaches users as-is (chat history,
+ * plan banners, toasts), so it never names an address, a setting or a command unless this is a
+ * local run against a model on this machine (see developerWording); the detail is logged instead.
+ */
 export function friendly(
   e: unknown,
   config: Pick<LLMConfig, "provider" | "baseUrl" | "timeoutMs">,
+  hosted: boolean = isHostedDeployment(),
 ): Error {
-  // The provider's name at the start of a sentence ("the AI provider" for an unknown host).
-  const who = config.provider.charAt(0).toUpperCase() + config.provider.slice(1);
+  const who = sentenceName(config.provider);
+  const developer = developerWording(config.baseUrl, hosted);
+  /** The developer sentence on a local run; otherwise the visitor sentence, with `log` logged. */
+  const pick = (developerText: string, visitorText: string, log: string = developerText): Error => {
+    if (developer) return new Error(developerText);
+    console.error(`[llm] ${log}`);
+    return new Error(visitorText);
+  };
+
+  if (e instanceof UnreadableAnswerError) return new Error(e.message);
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) {
-    return new Error(
-      `${who} did not answer within ${Math.round(config.timeoutMs / 1000)} s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again.`,
+    const seconds = Math.round(config.timeoutMs / 1000);
+    return pick(
+      `${who} did not answer within ${seconds} s. A local model on CPU can be slow; raise LLM_TIMEOUT_MS or try again.`,
+      `${who} did not answer within ${seconds} s. Please try again in a moment.`,
+      `${config.provider} did not answer within LLM_TIMEOUT_MS (${seconds} s).`,
     );
   }
   const causeCode = fetchCauseCode(e);
   if (causeCode === "UND_ERR_HEADERS_TIMEOUT" || causeCode === "UND_ERR_BODY_TIMEOUT") {
     // Node's own fetch limit (5 minutes without response headers), not LLM_TIMEOUT_MS. The dev
     // server lifts it (vite.config.ts); other Node hosts need the same Agent settings.
-    return new Error(
+    return pick(
       `${who} took longer than Node's 5-minute fetch limit to start answering (it may be busy or still loading the model). Try again in a moment.`,
+      `${who} took too long to start answering. Please try again in a moment.`,
+      `${config.provider} hit Node's 5-minute fetch limit (${causeCode}).`,
     );
   }
   const status = errorStatus(e);
   if (status === undefined && e instanceof TypeError) {
-    return new Error(
+    // Only fetch itself throws a TypeError here: answers are read in readCompletion, which turns
+    // every failure into an UnreadableAnswerError.
+    return pick(
       `Could not reach ${config.provider} at ${config.baseUrl}. Is it running? (For local Ollama: docker ps shows the Ollama container on port 11434.)`,
+      `${who} could not be reached. Please try again in a moment.`,
+      `Could not reach ${config.provider} at ${config.baseUrl}: ${e.message}${causeCode ? ` (${causeCode})` : ""}`,
     );
   }
   if (status === 429)
     return new Error(`${who} rate limit reached. Please wait a moment and try again.`);
   if (status === 401 || status === 403)
-    return new Error(
+    return pick(
       config.provider === "Hugging Face"
         ? "Hugging Face rejected the API key. Make sure HUGGINGFACE_API_KEY is valid and that you've accepted the Llama 3.1 license at https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct."
         : `${who} rejected the API key (LLM_API_KEY).`,
+      NOT_SET_UP_CORRECTLY,
+      `${config.provider} rejected the API key (HTTP ${status}); check ${config.provider === "Hugging Face" ? "HUGGINGFACE_API_KEY or " : ""}LLM_API_KEY.`,
     );
   if (status === 402) return new Error(`${who} credits exhausted for this token.`);
-  if (status === 404) return new Error(`${who} does not serve the configured model (LLM_MODEL).`);
+  if (status === 404)
+    return pick(
+      `${who} does not serve the configured model (LLM_MODEL).`,
+      NOT_SET_UP_CORRECTLY,
+      `${config.provider} does not serve the configured model (HTTP 404); check LLM_MODEL and LLM_FALLBACK_MODEL.`,
+    );
   if (status !== undefined) {
     // Every other HTTP status: a sentence with the provider's own message (never its raw body).
     const detail = e instanceof HttpStatusError ? e.detail : "";
@@ -541,5 +714,10 @@ export function friendly(
     }
     return new Error(`${who} could not process the request (${code}).`);
   }
-  return e instanceof Error ? e : new Error(String(e));
+  // A plain Error carries a sentence written for users; anything else (a RangeError, a thrown
+  // object) is an internal fault whose text is only for the log.
+  if (e instanceof Error && e.name === "Error" && e.message) return e;
+  if (developer) return e instanceof Error ? e : new Error(String(e));
+  console.error(`[llm] ${config.provider}: unexpected error:`, e);
+  return new Error(`${who} could not answer this request. Please try again in a moment.`);
 }

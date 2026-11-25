@@ -6,12 +6,54 @@ import { MondayMark } from "@/components/MondayMark";
 import { Stepper } from "./onboarding.profile";
 import { AlertTriangle, ArrowRight, Check, FlaskConical, Loader2, Mail, Calendar, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
-import { chooseDemoData, getGoogleConnectionStatus, disconnectGoogle, getGoogleOAuthUrl } from "@/functions/google.functions";
+import { chooseDemoData, completeGoogleOAuth, getGoogleConnectionStatus, disconnectGoogle, getGoogleOAuthUrl } from "@/functions/google.functions";
 import { getErrorMessage } from "@/lib/errors";
 
 export const Route = createFileRoute("/onboarding/connectors")({
   component: ConnectorsOnboarding,
 });
+
+/**
+ * sessionStorage key for the browser key of a Google sign-in this tab started. The server only
+ * finishes a sign-in for the browser that holds this key (see src/server/google/callback.server.ts).
+ */
+const GOOGLE_SIGN_IN_KEY = "lifeops.googleSignInKey";
+
+/** Google's code and state as the callback route hands them to this page, or null. */
+export function googleReturnParams(search: string): { code: string; state: string } | null {
+  const params = new URLSearchParams(search);
+  const code = params.get("google_code");
+  const state = params.get("google_state");
+  return code && state ? { code, state } : null;
+}
+
+/**
+ * Whether the user can go on to the workspace: Google connected, demo data chosen, or a demo
+ * (anonymous) visitor, whom the workspace already treats as using the demo data.
+ */
+export function canEnterWorkspace(status: { connected: boolean; demoMode: boolean; isAnonymous: boolean }): boolean {
+  return status.connected || status.demoMode || status.isAnonymous;
+}
+
+function saveSignInKey(key: string): boolean {
+  try {
+    sessionStorage.setItem(GOOGLE_SIGN_IN_KEY, key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The kept key, removed at once: a key is used for one sign-in only. "" when there is none. */
+function takeSignInKey(): string {
+  try {
+    const key = sessionStorage.getItem(GOOGLE_SIGN_IN_KEY) ?? "";
+    sessionStorage.removeItem(GOOGLE_SIGN_IN_KEY);
+    return key;
+  } catch {
+    return "";
+  }
+}
 
 function ConnectorsOnboarding() {
   const { user, loading } = useAuth();
@@ -41,23 +83,41 @@ function ConnectorsOnboarding() {
   useEffect(() => {
     if (loading) return;
     if (!user) { navigate({ to: "/login" }); return; }
-    refreshStatus();
-    // Notice ?google=connected after callback
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("google") === "connected") {
-      toast.success("Google account connected");
-      url.searchParams.delete("google");
-      window.history.replaceState({}, "", url.pathname);
+    // Back from Google (through the callback route): finish the sign-in as the signed-in user.
+    const returned = googleReturnParams(window.location.search);
+    if (returned) {
+      // Take the code out of the address bar at once, so it is not bookmarked, shared or re-sent.
+      const url = new URL(window.location.href);
+      url.searchParams.delete("google_code");
+      url.searchParams.delete("google_state");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      setBusy(true);
+      void (async () => {
+        try {
+          const result = await completeGoogleOAuth({ data: { ...returned, browserKey: takeSignInKey() } });
+          toast.success(result.email ? `Google account connected (${result.email})` : "Google account connected");
+        } catch (error: unknown) {
+          const message = getErrorMessage(error, "Could not finish connecting Google");
+          setOauthError(message);
+          toast.error(message);
+        } finally {
+          setBusy(false);
+          await refreshStatus();
+        }
+      })();
+      return;
     }
+    refreshStatus();
   }, [user, loading, navigate]);
 
   async function startOAuth() {
     if (!user) return;
     setBusy(true);
     try {
-      const { url } = await getGoogleOAuthUrl({
-        data: { returnTo: "/onboarding/connectors" },
-      });
+      const { url, browserKey } = await getGoogleOAuthUrl();
+      if (!saveSignInKey(browserKey)) {
+        throw new Error("This browser did not let the page store the sign-in details it needs. Please allow site data for this site and try again.");
+      }
       window.location.assign(url);
     } catch (error: unknown) {
       const message = getErrorMessage(error, "Could not start Google connection");
@@ -89,6 +149,54 @@ function ConnectorsOnboarding() {
   if (loading || !hydrated) {
     return <div className="min-h-screen grid place-items-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>;
   }
+
+  return (
+    <ConnectorsView
+      connected={connected}
+      email={email}
+      demoMode={demoMode}
+      oauthConfigured={oauthConfigured}
+      oauthError={oauthError}
+      busy={busy}
+      isAnonymous={!!user?.is_anonymous}
+      onConnect={startOAuth}
+      onDisconnect={handleDisconnect}
+      onUseDemo={startDemo}
+      onEnter={() => navigate({ to: "/app" })}
+    />
+  );
+}
+
+/**
+ * The page as it looks once the connection status is known. Kept apart from the data loading so
+ * it can be rendered in tests with given states (tests/p3-ai-google-connectors-page.test.ts).
+ */
+export function ConnectorsView({
+  connected,
+  email,
+  demoMode,
+  oauthConfigured,
+  oauthError,
+  busy,
+  isAnonymous,
+  onConnect,
+  onDisconnect,
+  onUseDemo,
+  onEnter,
+}: {
+  connected: boolean;
+  email: string | null;
+  demoMode: boolean;
+  oauthConfigured: boolean;
+  oauthError: string | null;
+  busy: boolean;
+  isAnonymous: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onUseDemo: () => void;
+  onEnter: () => void;
+}) {
+  const canEnter = canEnterWorkspace({ connected, demoMode, isAnonymous });
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -123,7 +231,7 @@ function ConnectorsOnboarding() {
               <div className="flex items-center gap-2 text-sm text-emerald-900">
                 <Check className="h-4 w-4" /> Connected{email ? ` as ${email}` : ""}
               </div>
-              <button onClick={handleDisconnect} disabled={busy}
+              <button onClick={onDisconnect} disabled={busy}
                 className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-900 hover:bg-emerald-100 transition disabled:opacity-50">
                 {busy ? "…" : "Disconnect"}
               </button>
@@ -136,11 +244,12 @@ function ConnectorsOnboarding() {
                   <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700" />
                   <span>
                     {oauthError ??
-                      "Google connection is not set up on this server yet (no Google OAuth client configured). You can use the demo inbox and calendar below; everything else works the same."}
+                      "Connecting a Google account is not available on this site yet. You can use the demo inbox and calendar below; everything else works the same."}
                   </span>
                 </div>
               )}
-              <button onClick={startOAuth} disabled={busy}
+              {/* Without an OAuth client the button could only fail; the notice above says why. */}
+              <button onClick={onConnect} disabled={busy || !oauthConfigured}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60">
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <GoogleLogo />}
                 Connect Google
@@ -161,7 +270,7 @@ function ConnectorsOnboarding() {
                 </p>
               </div>
             </div>
-            <button onClick={startDemo} disabled={busy}
+            <button onClick={onUseDemo} disabled={busy}
               className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-md border border-border bg-background px-4 py-2.5 text-sm font-medium hover:bg-muted transition disabled:opacity-60">
               {demoMode ? "Continue with demo data" : "Use demo inbox & calendar"}
             </button>
@@ -169,13 +278,13 @@ function ConnectorsOnboarding() {
         )}
 
         <button
-          disabled={!connected && !demoMode}
-          onClick={() => navigate({ to: "/app" })}
+          disabled={!canEnter}
+          onClick={onEnter}
           className="mt-8 w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Enter AI Workspace <ArrowRight className="h-4 w-4" />
         </button>
-        {!connected && !demoMode && (
+        {!canEnter && (
           <p className="mt-3 text-center text-xs text-muted-foreground">Connect Google or choose demo data to continue.</p>
         )}
       </main>
