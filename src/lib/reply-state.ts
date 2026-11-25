@@ -41,8 +41,12 @@ export const SIGNED_OUT_NOTE =
 export const INTERRUPTED_NOTE =
   "⚠️ No answer was stored for this message because the request stopped before it finished. Please send it again.";
 
-/** Bullet characters a model writes at the start of a line (CommonMark only knows -, * and +). */
-const BULLET_CHARACTER = /^([ \t]*)[•●▪◦‣▸·][ \t]*(?=\S)/;
+/**
+ * Bullet characters a model writes at the start of a line (CommonMark only knows -, * and +),
+ * followed by a space or tab: "▸Details" or a "· · ·" separator line is not a list item. The
+ * middle dot is a separator ("9:00 · Standup"), not a bullet.
+ */
+const BULLET_CHARACTER = /^([ \t]*)[•●▪◦‣▸][ \t]+(?=\S)/;
 
 /**
  * An assistant reply as Markdown the chat can render. Models often write lists as "• item"

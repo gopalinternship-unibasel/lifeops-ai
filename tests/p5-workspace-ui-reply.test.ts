@@ -129,7 +129,7 @@ describe("bullet lines in assistant replies", () => {
     expect(normalizeBullets("**📬 Inbox (2 unread)**\n\n• **A** — *x*\n• **B** — *y*")).toBe(
       "**📬 Inbox (2 unread)**\n\n- **A** — *x*\n- **B** — *y*",
     );
-    expect(normalizeBullets("  ● nested\n▪item")).toBe("  - nested\n- item");
+    expect(normalizeBullets("  ● nested\n▪ item")).toBe("  - nested\n- item");
   });
 
   it("leaves '- ' lists, ordinary text and code blocks alone", () => {

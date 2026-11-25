@@ -35,7 +35,7 @@ import type { CardState } from "@/types/panel";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
 import { getBrowserTimeZone } from "@/lib/date";
-import { getErrorMessage, isAuthFailure } from "@/lib/errors";
+import { getErrorMessage, getVisitorErrorMessage, isAuthFailure } from "@/lib/errors";
 
 export const Route = createFileRoute("/app/")({
   component: Workspace,
@@ -214,8 +214,9 @@ function Workspace() {
     } catch (err: unknown) {
       if (!mounted.current) return;
       // Stay on the page with the reason and a way to try again (the load used to fail silently,
-      // leaving "initializing…" on screen for good).
-      setBootError(getErrorMessage(err, "Please try again."));
+      // leaving "initializing…" on screen for good). An expired sign-in gets a sentence, not the
+      // sign-in check's "Unauthorized: Invalid token".
+      setBootError(getVisitorErrorMessage(err, "Please try again."));
       toast.error("Could not load your workspace.");
     }
   }

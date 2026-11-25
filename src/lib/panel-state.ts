@@ -112,7 +112,16 @@ export function normalizeAlternatives(value: unknown): Alternatives | undefined 
  * what can I make?" counts through its question.
  */
 const ASKS_FOR_ALTERNATIVES =
-  /\b(?:(?:have|has|had|got|there's|there is|there are)\s+no|no\s+[\w-]+(?:\s+[\w-]+)?\s+(?:left|at home|in the (?:fridge|house|kitchen|pantry|cupboard))|don't have|do not have|doesn't have|does not have|didn't have|did not have|haven't got|out of(?!\s+(?:the\s+)?office)|ran out|run out|running out|without|missing|lack|lacks|lacking|instead of|substitut\w*|replacement|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find|what (?:else )?(?:can|could|should) I (?:use|make|cook|bake))\b/i;
+  /\b(?:(?:have|has|had|got|there's|there is|there are)\s+no|no\s+[\w-]+(?:\s+[\w-]+)?\s+(?:left|at home|in the (?:fridge|house|kitchen|pantry|cupboard))|don't have|do not have|doesn't have|does not have|didn't have|did not have|haven't got|out of(?!\s+(?:the\s+)?office)|ran out|run out|running out|missing|lack|lacks|lacking|substitut\w*|replacement|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find|what (?:else )?(?:can|could|should) I (?:use|make|cook|bake))\b/i;
+
+/**
+ * "without" and "instead of" also describe a calendar entry ("Add lunch without onions", "Move
+ * the sync to Friday instead of Thursday"): they count only when the message is not a calendar
+ * command, as in "How do I bake a cake without eggs?".
+ */
+const MAY_ASK_FOR_ALTERNATIVES = /\b(?:without|instead of)\b/i;
+const CALENDAR_COMMAND =
+  /^\W*(?:(?:please|pls|can you|could you|would you|will you)\s+)?(?:please\s+)?(?:add|schedule|book|block|move|reschedule|shift|push|postpone|cancel|delete|remove|set up)\b/i;
 
 /** The user asks for a summary, an overview, preparation or a plan. */
 const ASKS_FOR_SUMMARY =
@@ -121,11 +130,12 @@ const ASKS_FOR_SUMMARY =
 /**
  * The user asks for something to read or use other than a calendar entry: ideas, a list, steps,
  * tips, suggestions, a post or other text ("Make a packing list for Zurich", "List restaurants
- * in Basel", "Write a LinkedIn post"). "List my events" and "list the meetings" ask about the
- * calendar, and "a post office trip" is an event, not a post.
+ * in Basel", "Write a LinkedIn post"). "List my events", "list the meetings" and "list unread
+ * emails" (up to two words before the emails, messages or events) ask about the calendar or the
+ * inbox, and "a post office trip" is an event, not a post.
  */
 const ASKS_FOR_CONTENT =
-  /\b(?:ideas?|brainstorm\w*|suggest\w*|recommend\w*|tips?|advice|steps|checklist|list of|(?:a|an|my)\s+(?:[\w-]+\s+){0,2}list|list(?!\s+(?:all\s+)?(?:my|the|today's|tomorrow's|this|next|events?|meetings?|appointments?|tasks?|emails?|messages?)\b)|template|examples?|pack(?:ing)?|how (?:do|can|could|should) I|write|draft|compose)\b|\b(?:a|the|my)\s+(?:[\w-]+\s+)?post(?![\w-])(?!\s+office)/i;
+  /\b(?:ideas?|brainstorm\w*|suggest\w*|recommend\w*|tips?|advice|steps|checklist|list of|(?:a|an|my)\s+(?:[\w-]+\s+){0,2}list|list(?!\s+(?:all\s+)?(?:my|the|today's|tomorrow's|this|next|(?:[\w'-]+\s+){0,2}(?:events?|meetings?|appointments?|tasks?|e-?mails?|mails?|messages?|inbox))\b)|template|examples?|pack(?:ing)?|how (?:do|can|could|should) I|write|draft|compose)\b|\b(?:a|the|my)\s+(?:[\w-]+\s+)?post(?![\w-])(?!\s+office)/i;
 
 /** A reply to an email: the reply draft card is the content then, not a summary card. */
 const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ying)|respond|response)\b/i;
@@ -134,7 +144,8 @@ const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ying)|respond|response)\b/i;
  * Keep the model's optional cards only where the request calls for them. A small model fills
  * these optional fields on ordinary turns ("Friday Alternatives: No other events" for "What's on
  * Friday?"), which cluttered the panel and pulled it to the Insights tab.
- * - alternatives only when the user says something is missing or asks for a substitute;
+ * - alternatives only when the user says something is missing or asks for a substitute
+ *   ("without" and "instead of" only outside a calendar command);
  * - a "summary" insight only when the user asks for a summary, an overview, prep or a plan, or
  *   for other content such as ideas, a list or a post (not when it is about an email reply).
  *   "summary" is also the kind any unknown kind becomes (see normalizeInsightCard), so this
@@ -156,8 +167,10 @@ export function gateModelCards(
     (cards.insight.kind !== "summary" || asksForCard)
       ? cards.insight
       : undefined;
+  const asksForAlternatives =
+    ASKS_FOR_ALTERNATIVES.test(text) || (MAY_ASK_FOR_ALTERNATIVES.test(text) && !CALENDAR_COMMAND.test(text));
   const alternatives =
-    cards.alternatives && cards.alternatives.bullets.length > 0 && ASKS_FOR_ALTERNATIVES.test(text)
+    cards.alternatives && cards.alternatives.bullets.length > 0 && asksForAlternatives
       ? cards.alternatives
       : undefined;
   return { insight, alternatives };
