@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import { Check, Calendar as CalIcon, Pencil, X as XIcon } from "lucide-react";
 import { minutesOnDay } from "@/lib/calendar-grid";
-import { canEditPlanItem, editedItemTimes, localHM, planDayStatus } from "@/lib/plan-state";
+import { canEditPlanItem, editedItemTimes, localHM, planDayStatus, planItemEmoji } from "@/lib/plan-state";
 
 interface Props {
   plan: WeekPlan | null;
@@ -144,7 +144,9 @@ function PlanItemRow({ item, added, editable, onSave }: {
 
   return (
     <li className="group flex items-start gap-2.5" data-testid="plan-item" data-added={added ? "true" : "false"}>
-      <span className="text-base leading-none mt-0.5">{item.emoji}</span>
+      {/* The stored emoji is kept as it is for matching calendar events (an empty one, or an
+          older " hal"); only the icon shown is the first real emoji, or a bullet. */}
+      <span className="text-base leading-none mt-0.5">{planItemEmoji(item.emoji)}</span>
       <div className="flex-1 min-w-0">
         <div className="text-[13px] text-foreground truncate flex items-center gap-1.5">
           <span className="text-muted-foreground">●</span>

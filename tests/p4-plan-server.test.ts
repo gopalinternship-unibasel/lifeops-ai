@@ -563,6 +563,138 @@ describe("a refinement keeps the saved plan when the model's answer is not usabl
   });
 });
 
+describe("a request to remove something may empty only what it names (finding 8, round 2)", () => {
+  /** The saved plan with a hike on Saturday instead of the reading. */
+  function planWithHike(): WeekPlan {
+    const plan = savedPlan();
+    plan.days[5].items = [
+      { emoji: "🥾", title: "Hike", starts_at: at(SAT, 10), ends_at: at(SAT, 14), notes: null },
+    ];
+    return plan;
+  }
+
+  it("'remove the hike on Saturday' answered with seven empty days is refused", async () => {
+    storePlan(planWithHike());
+    mockedCallAI.mockResolvedValue(answerDays(week({}), "Removed the hike."));
+
+    await expect(refine("remove the hike on Saturday")).rejects.toThrow(
+      "The AI's answer would have removed everything planned on Tuesday, Wednesday, Thursday, Friday and Sunday, which your request did not ask for, so your plan was not changed.",
+    );
+
+    expect(storedPlan()).toEqual(planWithHike());
+    expect(h.upserts).toHaveLength(0);
+    expect(requests()[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("the same request answered by emptying Saturday only is accepted", async () => {
+    storePlan(planWithHike());
+    mockedCallAI.mockResolvedValue(answerDays([{ date: SAT, items: [] }], "Removed the hike."));
+
+    const result = await refine("remove the hike on Saturday");
+
+    expect(storedPlan().days[5].items).toEqual([]);
+    expect(storedPlan().days.filter((day) => day.date !== SAT)).toEqual(
+      planWithHike().days.filter((day) => day.date !== SAT),
+    );
+    expect(result.reply).toBe("Removed the hike.");
+  });
+
+  it("a request that names only an activity may empty the days whose items are that activity", async () => {
+    storePlan(planWithHike());
+    mockedCallAI.mockResolvedValue(answerDays([{ date: SAT, items: [] }]));
+    await refine("remove the hike");
+    expect(storedPlan().days[5].items).toEqual([]);
+
+    // Emptying Sunday too (its reading was not named) is refused.
+    storePlan(planWithHike());
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: SAT, items: [] },
+        { date: SUN, items: [] },
+      ]),
+    );
+    await expect(refine("remove the hike")).rejects.toThrow(
+      "would have removed everything planned on Sunday, which your request did not ask for",
+    );
+    expect(storedPlan()).toEqual(planWithHike());
+  });
+
+  it("a range of days may be emptied, but not the days outside it", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: WED, items: [] },
+        { date: THU, items: [] },
+        { date: FRI, items: [] },
+      ]),
+    );
+    await refine("clear wed-fri");
+    expect(storedPlan().days.slice(2, 5).every((day) => day.items.length === 0)).toBe(true);
+    expect(storedPlan().days[5]).toEqual(savedPlan().days[5]);
+
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({})));
+    await expect(refine("Clear Wednesday to Friday")).rejects.toThrow(
+      "would have removed everything planned on Tuesday, Saturday and Sunday",
+    );
+    expect(storedPlan()).toEqual(savedPlan());
+  });
+
+  it("'remove everything on Saturday' answered with seven empty days is refused", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({})));
+    await expect(refine("remove everything on Saturday")).rejects.toThrow(
+      "would have removed everything planned on Tuesday, Wednesday, Thursday, Friday and Sunday",
+    );
+    expect(storedPlan()).toEqual(savedPlan());
+  });
+
+  it("a request to clear everything but something keeps the guard against an emptied plan", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({})));
+    await expect(refine("Cancel everything except Saturday")).rejects.toThrow(
+      /would have removed every remaining item from your plan without adding any/,
+    );
+    expect(storedPlan()).toEqual(savedPlan());
+  });
+
+  it("'remove everything', as the refusal suggests, may still empty the plan", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({}), "Cleared your week."));
+    const result = await refine("remove everything");
+    expect(storedPlan().days.slice(1).every((day) => day.items.length === 0)).toBe(true);
+    expect(result.reply).toBe("Cleared your week.");
+  });
+});
+
+describe("a stored item without an emoji keeps matching its calendar event (finding 49, round 2)", () => {
+  it("shows as added, is not approved again, and an edit of another item keeps it as stored", async () => {
+    const plan = savedPlan();
+    // Approved under its title alone ("Read 3"), as the approval of a row without an emoji did.
+    delete (plan.days[2].items[0] as { emoji?: string }).emoji;
+    storePlan(plan);
+    h.calendar.events.push({
+      id: "ev-wed",
+      title: "Read 3",
+      starts_at: at(WED, 18),
+      ends_at: at(WED, 19),
+      notes: null,
+      source: "plan",
+    });
+
+    const loaded = await fetchPlan();
+    expect(loaded.addedItems).toEqual({ [WED]: [0] });
+    expect(loaded.busyEvents).toEqual([]);
+
+    const result = await approve({ dayDate: WED });
+    expect(result).toMatchObject({ created: 0, skipped: 1, conflicts: 0 });
+    expect(createEvent).not.toHaveBeenCalled();
+
+    await updateItem({ dayDate: THU, itemIndex: 0, starts_at: at(THU, 19), ends_at: at(THU, 20) });
+    expect(storedPlan().days[2].items[0].emoji).toBe("");
+  });
+});
+
 describe("a regeneration keeps the saved plan where its answer is partial (finding 8)", () => {
   it("days the answer leaves out stay as they were", async () => {
     storePlan(savedPlan());
