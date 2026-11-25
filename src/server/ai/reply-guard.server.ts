@@ -257,10 +257,11 @@ export function unquoted(sentence: string): string {
 
 /**
  * Words that report what an email or a person said: "Alicia's email says the team sync has been
- * moved to 7 PM", "Stripe says your invoice has been sent", "according to Sam's message ...".
+ * moved to 7 PM", "Stripe says your invoice has been sent", "according to Sam's message ...",
+ * "per Sam's email, ...".
  */
 const ATTRIBUTION =
-  /\b(?:says?|said|wrote|writes|mentions?|mentioned|according\s+to|per\s+(?:the|his|her|their|your)\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
+  /\b(?:says?|said|wrote|writes|mentions?|mentioned|according\s+to|per\s+(?:the|his|her|their|your|[\w.-]+(?:'s|’s))\b[^.!?]*\b(?:e-?mail|message)|(?:e-?mail|message|subject|note|invitation|invite)\b[^.!?]*\b(?:says?|reads?|states?|mentions?))\b/i;
 /** "Alicia's email: the team sync has been moved ...", "Email from Sam: ...". */
 const ATTRIBUTION_COLON =
   /\b[\p{L}\p{N}.-]+(?:'s|’s)\s+(?:(?:latest|last|new|recent|earlier)\s+)?(?:e-?mail|message|note|reply|invitation|invite)\s*(?:\*\*|__)?\s*:|\b(?:e-?mail|message|note)\s+from\s+[^:.!?\n]{1,60}:/iu;
@@ -287,20 +288,31 @@ const FIRST_PERSON_CLAIM = CLAIMS[1];
  * deck", "Sam says I booked a table". "Sam wrote back, I have sent the reply" is the model's.
  */
 const INTRODUCES_FIRST_PERSON = /\b(?:says?|said|wrote|writes|mentions?|mentioned)\s*[:,]?\s*(?:that\s+)?I\b/i;
+/**
+ * What happened to the user, as the email that the sentence opens with tells it: "Per Sam's
+ * email, the event has been moved; you have been added to the call", "Alicia says the room has
+ * been booked, so you have been moved to room 4" (review of the fix, 25 Nov 2026: these were
+ * removed). "Your lunch has been booked" and "your lunch is now booked" stay the model's own.
+ */
+const HAPPENED_TO_YOU = /^\s*you(?:\s+have|['’]ve)\s+(?:now\s+|already\s+|also\s+|just\s+)?been\b/i;
 
 /**
  * Does the sentence report what an email or a person said where it makes this claim? A line of
  * an inbox summary or a colon attribution reports all of it; otherwise the part of the sentence
  * with the claim must hold the attribution (before or after the claim), and a first-person claim
- * must be introduced by it.
+ * must be introduced by it. A later part that says what happened to the user ("you have been
+ * added") is covered by an attribution in the first part (HAPPENED_TO_YOU).
  */
 function reportsClaim(sentence: string, claim: RegExp): boolean {
   if (INBOX_BULLET.test(sentence) || ATTRIBUTION_COLON.test(sentence)) return true;
-  const parts = sentence.split(OWN_VOICE_BREAK).filter((part) => claim.test(part));
+  const all = sentence.split(OWN_VOICE_BREAK);
+  const opensReported = ATTRIBUTION.test(all[0].replace(USER_SPEECH, " "));
+  const parts = all.filter((part) => claim.test(part));
   if (parts.length === 0) return false;
   return parts.every((part) => {
     const words = part.replace(USER_SPEECH, " ");
-    return claim === FIRST_PERSON_CLAIM ? INTRODUCES_FIRST_PERSON.test(words) : ATTRIBUTION.test(words);
+    if (claim === FIRST_PERSON_CLAIM) return INTRODUCES_FIRST_PERSON.test(words);
+    return ATTRIBUTION.test(words) || (opensReported && part !== all[0] && HAPPENED_TO_YOU.test(part));
   });
 }
 
@@ -386,8 +398,12 @@ export function resolveRefs(text: string, refs: ReplyRefs): { text: string; remo
   // Only the kinds of id the prompt used: Gmail message ids are long, not "e3".
   const kinds = [refs.events ? "E\\d{1,3}" : "", refs.emails ? "e\\d{1,2}" : ""].filter(Boolean).join("|") || "(?!)";
   const idPattern = new RegExp(`\\b(${kinds})\\b`, "g");
-  // "__E1__" is bold too; "_" is a word character, so the id is only found as "**E1**".
-  const boldIds = (text ?? "").replace(new RegExp(`__(${kinds})__`, "g"), "**$1**");
+  // "__E1__" is bold too; "_" is a word character, so the id is only found as "**E1**". A bold
+  // label with its separator inside ("**E1:**", "**E1 —**", "__E1:__") is read as "**E1**:": the
+  // id was dropped from between the markers and left "****" (review of the fix, 25 Nov 2026).
+  const boldIds = (text ?? "")
+    .replace(new RegExp(`__(${kinds})(\\s*[:.)\\-–—]\\s*)?__`, "g"), (_, id: string, separator = "") => `**${id}**${separator}`)
+    .replace(new RegExp(`\\*\\*(${kinds})(\\s*[:.)\\-–—]\\s*)\\*\\*(?!\\*)`, "g"), "**$1**$2");
   const result = removeSentences(boldIds, (sentence) => [...sentence.matchAll(idPattern)].some((m) => !known(m[1])));
   // An id in bold ("**E1**") is taken with its markers: dropping only the id left "****",
   // which shows as literal asterisks (review of the fix, 25 Nov 2026). Group 1 is the marker;
@@ -652,8 +668,15 @@ const TIMES_LABEL = /\b(?:slots?|times?|openings?|windows?|availability)\s*:\s*$
 const LIST_BETWEEN = /^(?:\s*,\s*|\s*,?\s+(?:and|or)\s+)$/i;
 /** Between the two ends of a range: "14:00–15:30", "13:00 to 14:00", "19:00 until 20:00". */
 const RANGE_BETWEEN = /^\s*[–—-]\s*$|^\s+(?:to|until|till|til|through|thru)\s+$/i;
-/** After a number that is an amount, not a time: "14:50 CHF", "16:10 ratio". */
-const AMOUNT_AFTER = /^\s*(?:chf|eur|usd|gbp|fr\.?|francs?|euros?|dollars?|€|\$|£|%|ratio|aspect)/i;
+/** After a number that is an amount, not a time: "14:50 CHF", "16:10 ratio", "01:30 hours". */
+const AMOUNT_AFTER = /^\s*(?:chf|eur|usd|gbp|fr\.?|francs?|euros?|dollars?|€|\$|£|%|ratio|aspect|(?:h|hrs?|hours?|mins?|minutes?)\b)/i;
+/**
+ * Before a number that is a duration, not a time: "lasts 01:30", "it ran 01:15", "takes 00:45"
+ * (review of the fix, 25 Nov 2026: these became "1:30 AM"). "For" only before an hour with a
+ * leading zero ("for 02:00"): "rescheduled for 15:00" is a time.
+ */
+const DURATION_BEFORE = /\b(?:lasts?|lasted|lasting|ran|runs|running|takes?|took|taking|duration(?:\s+of)?|length(?:\s+of)?)\s*:?\s*$/i;
+const SHORT_DURATION_BEFORE = /\bfor\s*$/i;
 
 /**
  * The reply's 24-hour clock times ("14:00", "14:00–15:30") written the way the cards and pages
@@ -740,10 +763,20 @@ function lineToTwelveHourClock(line: string): string {
   );
   // A sentence with a converted time is on the 24-hour clock: its other times that can only be
   // 24-hour times are converted as well, so one sentence never mixes the two clocks (review of
-  // the fix, 25 Nov 2026). An amount ("14:50 CHF") stays.
+  // the fix, 25 Nov 2026). An amount ("14:50 CHF") and a duration ("lasts 01:30 hours") stay.
   const convertedSentences = new Set(found.filter((_, i) => converts[i]).map((time) => time.sentence));
+  const isDuration = (time: (typeof found)[number]) => {
+    const before = masked.slice(0, time.start);
+    return DURATION_BEFORE.test(before) || (time.hour.startsWith("0") && SHORT_DURATION_BEFORE.test(before));
+  };
   found.forEach((time, i) => {
-    if (!converts[i] && isStrictly24h(time.hour) && convertedSentences.has(time.sentence) && !AMOUNT_AFTER.test(masked.slice(time.end))) {
+    if (
+      !converts[i] &&
+      isStrictly24h(time.hour) &&
+      convertedSentences.has(time.sentence) &&
+      !AMOUNT_AFTER.test(masked.slice(time.end)) &&
+      !isDuration(time)
+    ) {
       converts[i] = true;
     }
   });

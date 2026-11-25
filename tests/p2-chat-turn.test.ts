@@ -707,6 +707,18 @@ describe("reply drafts only when asked for (88, 111)", () => {
     },
   );
 
+  it.each(["Decline the 3pm meeting", "Accept the meeting at 3pm", "Draft my week"])(
+    "a calendar answer or text for the chat gets no draft and no note (88, review of round 2): %s",
+    async (message) => {
+      for (const email_reply of [{ message_id: "e3", body: "Hi Sam, ..." }, { message_id: "e99", body: "Hi" }]) {
+        mocks.callAI.mockResolvedValue(answer({ reply: "Here is what I found.", email_reply }));
+        const result = await runChatTurn(context, { sessionId: SESSION, message, timeZone: ZRH });
+        expect(result.panel.emailDraft).toBeUndefined();
+        expect(result.reply).not.toMatch(/not in your inbox|draft suggestion/);
+      }
+    },
+  );
+
   it("advice about replying gets no draft and no note (88, round 2)", async () => {
     for (const email_reply of [{ message_id: "e1", body: "Dear Prof. Marlow, ..." }, { message_id: "e99", body: "Hi" }]) {
       mocks.callAI.mockResolvedValue(answer({ reply: "Start with Prof. Marlow: the paper is due soonest.", email_reply }));

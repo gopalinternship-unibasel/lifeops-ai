@@ -397,12 +397,14 @@ const ATTENDANCE_WORDS = new Set([
  * walkthrough"), with at least two such words unless both are the same single word. Two shared
  * words were enough until the review of 24 Nov 2026, so a separate preparation task ("Prepare
  * demo walkthrough slides") was folded into the meeting and lost. Words that only say that the
- * user takes part ("Attend team sync at 7 PM", "Join the team sync") are left out of the
- * priority's title for this comparison (ATTENDANCE_WORDS).
+ * user takes part ("Attend team sync at 7 PM", "Join the team sync") are left out of both titles
+ * for this comparison (ATTENDANCE_WORDS): left out of the priority's title only, a priority with
+ * the event's own title "Join standup call" no longer matched it (review of the fix, 25 Nov 2026).
  */
 function namesSameCommitment(title: string, reference: string): boolean {
-  const a = new Set([...significantWords(title)].filter((word) => !ATTENDANCE_WORDS.has(word)));
-  const b = significantWords(reference);
+  const identifying = (text: string) => new Set([...significantWords(text)].filter((word) => !ATTENDANCE_WORDS.has(word)));
+  const a = identifying(title);
+  const b = identifying(reference);
   const [shorter, longer] = a.size <= b.size ? [a, b] : [b, a];
   if (shorter.size === 0) return false;
   if (shorter.size < 2 && longer.size !== shorter.size) return false;

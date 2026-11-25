@@ -2,7 +2,7 @@
  * Round 2 of the chat fixes: the points the review of the round-1 fixes left open (25 Nov 2026)
  * in the reply-draft reading (88), the 12-hour times (111), the folding of priorities (16), the
  * day answer (10), the id clean-up (17), the inbox line after a failed Gmail fetch (99) and the
- * reported-speech rule (83).
+ * reported-speech rule (83), with the points the review of round 2 found in them.
  */
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -90,6 +90,79 @@ describe("a draft asked for in other words than 'reply' (88)", () => {
   );
 });
 
+describe("declining a meeting or drafting text for the chat is not a reply (88, review of round 2)", () => {
+  it.each([
+    // Answered in the calendar, not by email.
+    "Decline the team sync on Friday",
+    "Decline the 3pm meeting",
+    "Accept the meeting at 3pm",
+    "Accept the calendar invite for Friday",
+    "Say no to the gym on Friday",
+    "Accept that the meeting moved",
+    "Turn down the volume",
+    "Decline Sam's 3pm meeting",
+    "Check my calendar and decline the 3pm meeting",
+    // Text for the chat.
+    "Draft my week",
+    "Draft the priorities for today",
+    "Please draft my priorities",
+    "Draft a study timetable",
+    "Draft a workout routine",
+    "Draft a routine",
+    "Draft tasks for tomorrow",
+    "Draft tasks for Monday",
+    "Draft my goals for this week",
+    "Draft a budget",
+    "Draft a cover letter",
+    "Draft a cover letter for Acme",
+    "Compose a timeline for my project",
+    "draft some ideas for my weekend",
+    "Draft it",
+  ])("is not a request for a reply: %s", (message) => {
+    expect(asksForEmailReply(message)).toBe(false);
+    // A placeholder email_reply gives neither a draft card nor the "not in your inbox" note.
+    expect(emailReplyFromModel({ raw: { message_id: "e3", body: "Hi Sam, ..." }, emails: inbox, message })).toEqual({});
+    expect(emailReplyFromModel({ raw: { message_id: "e99", body: "Hi" }, emails: inbox, message })).toEqual({});
+  });
+
+  it.each([
+    // An email or a person is answered.
+    "Decline the recruiter's offer",
+    "Turn down the job offer from Acme",
+    "Accept Alicia's meeting invite",
+    "Decline the invitation in Sam's email",
+    "Say no to my manager",
+    "Decline Sam",
+    "say yes to sam",
+    "Say yes to Jean-Luc",
+    "Draft something for Jean‐Luc",
+    // A message, named by what it says or by whom it is for.
+    "Draft a letter to Prof. Marlow",
+    "Draft an apology to Sam",
+    "Draft this for Sam",
+    "draft something for ana",
+    "Which emails need a reply, and can you draft them?",
+  ])("is a request for a reply: %s", (message) => {
+    expect(asksForEmailReply(message)).toBe(true);
+  });
+
+  it("titles with a dot, a request after a question in the same sentence, and 'if so'", () => {
+    for (const message of [
+      "Write Prof. Marlow saying I will be late",
+      "Write Dr. Lee that I agree",
+      "Which email from Ana has the deadline, and draft a reply to it",
+      "Do I need to reply to Sam? If so draft it",
+      "Do I need to reply to Sam? If so, draft it.",
+    ]) {
+      expect(asksForEmailReply(message), message).toBe(true);
+    }
+    // A question that goes on with another question is still advice.
+    for (const message of ["Who should I reply to first, and why?", "Should I reply to Sam, and what should I say?"]) {
+      expect(asksForEmailReply(message), message).toBe(false);
+    }
+  });
+});
+
 describe("24-hour times in a sentence or range are converted together (111)", () => {
   it.each([
     ["The window is 13:00 to 14:00.", "The window is 1:00 PM to 2:00 PM."],
@@ -111,8 +184,15 @@ describe("24-hour times in a sentence or range are converted together (111)", ()
     for (const text of ["Price 12:50 CHF.", "The screen has a 16:10 ratio.", "The match ended 12:10.", "The ratio is 16:10 at most."]) {
       expect(toTwelveHourClock(text), text).toBe(text);
     }
-    // In a sentence with a converted time, an amount stays as well.
+    // In a sentence with a converted time, an amount stays as well, and so does a duration.
     expect(toTwelveHourClock("Lunch at 13:00 costs 14:50 CHF.")).toBe("Lunch at 1:00 PM costs 14:50 CHF.");
+    expect(toTwelveHourClock("The call at 14:00 lasts 01:30 hours.")).toBe("The call at 2:00 PM lasts 01:30 hours.");
+    expect(toTwelveHourClock("From 14:00 for 02:00 hours you are busy.")).toBe("From 2:00 PM for 02:00 hours you are busy.");
+    expect(toTwelveHourClock("Team sync at 19:00, it ran 01:15 last time.")).toBe("Team sync at 7:00 PM, it ran 01:15 last time.");
+    expect(toTwelveHourClock("The lecture at 13:00 takes 01:45.")).toBe("The lecture at 1:00 PM takes 01:45.");
+    expect(toTwelveHourClock("Lunch at 13:00, then 00:45 min of reading.")).toBe("Lunch at 1:00 PM, then 00:45 min of reading.");
+    // "For" before a time that can only be a clock time still converts with the sentence.
+    expect(toTwelveHourClock("The dentist at 13:00 is rescheduled for 15:00.")).toBe("The dentist at 1:00 PM is rescheduled for 3:00 PM.");
     expect(toTwelveHourClock("Lunch at 12:30 costs 12:50 CHF.")).toBe("Lunch at 12:30 PM costs 12:50 CHF.");
     expect(toTwelveHourClock('Sam wrote "see you 13:00 to 14:00".')).toBe('Sam wrote "see you 13:00 to 14:00".');
   });
@@ -139,6 +219,24 @@ describe("taking part in a meeting is the meeting (16)", () => {
     ];
     expect(foldSameCommitments(rows, ctx).priorities).toEqual(rows);
   });
+
+  it.each(["Join standup call", "Sit-in exam"])(
+    "an event whose own title has an attendance word folds a row with the same title: %s",
+    (title) => {
+      const event = { title, starts_at: zonedDateTimeToISO(TODAY, { hour: 19, minute: 0 }, ZRH), ends_at: zonedDateTimeToISO(TODAY, { hour: 20, minute: 0 }, ZRH) };
+      const email = { from: "Alicia (manager)", subject: `${title} moved to 7 PM today`, snippet: `${title} has been moved to 7 PM today.`, unread: true, extractedTask: { title, importance: "high" as const } };
+      const { priorities, folded } = foldSameCommitments(
+        [
+          { rank: 1, title, reason: "60 min block today" },
+          { rank: 2, title: "Prepare the budget review", reason: "Due Friday" },
+          { rank: 3, title, reason: "From Alicia's email" },
+        ],
+        { todayEvents: [event], emails: [email], timeZone: ZRH },
+      );
+      expect(priorities.map((p) => p.title)).toEqual([title, "Prepare the budget review"]);
+      expect(folded).toEqual([`"${title}" is the same commitment as "${title}"`]);
+    },
+  );
 });
 
 describe("the answer about one day (10)", () => {
@@ -184,6 +282,11 @@ describe("an id in bold or before its own title (17)", () => {
     ["E1 (Team sync — demo walkthrough) is at 19:00.", "Team sync — demo walkthrough is at 19:00."],
     ["You have **E1** at 7 PM.", "You have **Team sync — demo walkthrough** at 7 PM."],
     ["- **E1 Team sync — demo walkthrough** at 7 PM", "- **Team sync — demo walkthrough** at 7 PM"],
+    // A bold label with the separator inside the markers (review of round 2).
+    ["- **E1:** Team sync — demo walkthrough", "- Team sync — demo walkthrough"],
+    ["**E1:** 19:00–20:00 Team sync — demo walkthrough", "19:00–20:00 Team sync — demo walkthrough"],
+    ["- **E1 —** Team sync — demo walkthrough", "- Team sync — demo walkthrough"],
+    ["- __E1:__ Team sync — demo walkthrough", "- Team sync — demo walkthrough"],
   ])("%s", (input, expected) => {
     const out = clean(input);
     expect(out).toBe(expected);
@@ -219,7 +322,13 @@ describe("the inbox line when only the unread emails could not be fetched (99)",
 describe("an attribution covers only its own part of the sentence (83)", () => {
   const answer = (modelReply: string) => composeReply({ modelReply, timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], actionRequest: false, askedForAction: false, year: 2026 });
 
-  it.each(["Sam wrote back and I have sent the reply.", "Sam said yes, and your lunch is now booked.", "Sam wrote back, I have sent the reply.", "Ana says the deck is fine; I have sent it to the team."])(
+  it.each([
+    "Sam wrote back and I have sent the reply.",
+    "Sam said yes, and your lunch is now booked.",
+    "Sam wrote back, I have sent the reply.",
+    "Ana says the deck is fine; I have sent it to the team.",
+    "Sam said yes, and your lunch has been booked.",
+  ])(
     "the model's own claim after the attribution is removed: %s",
     (sentence) => {
       expect(answer(sentence)).toBe(NOTHING_ANSWERED);
@@ -231,6 +340,10 @@ describe("an attribution covers only its own part of the sentence (83)", () => {
     "Alicia's email says the team sync has been moved, so you have time to prepare.",
     "Alicia says the team sync has been moved and the room has been changed.",
     "The team sync has been moved to 7 PM today, according to Alicia's email.",
+    // What happened to the user, after an attribution that opens the sentence (review of round 2).
+    "Per Sam's email, the event has been moved; you have been added to the call.",
+    "Alicia says the room has been booked, so you have been moved to room 4.",
+    "Per Sam's email, the event has been moved.",
   ])("reported speech stays: %s", (sentence) => {
     expect(answer(sentence)).toBe(sentence);
   });

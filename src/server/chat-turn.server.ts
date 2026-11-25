@@ -1374,19 +1374,19 @@ const DRAFT_TO_MAX = 320;
 
 /**
  * What may stand before a request verb: the start of the message or of a sentence, "please",
- * "can you", "help me", "I'd like you to", "and", "how do I" ... ("Should I" and "do I" ask for
- * advice; see ADVICE_QUESTION.)
+ * "can you", "help me", "I'd like you to", "and", "how do I", "if so" ... ("Should I" and "do I"
+ * ask for advice; see ADVICE_QUESTION.)
  */
 const REQUEST_LEAD =
-  "(?:^|[.!?;:,]\\s*|\\b(?:please|pls|kindly|can you|could you|would you|will you|help me|(?:i'd|i would|i)\\s+(?:like|want|need)\\s+(?:you\\s+)?to|i have to|let's|lets|and|then|also|just|now|(?:how|what)\\s+(?:do|should|can|could|would|shall)\\s+i|can i|(?:is|would)\\s+it\\s+(?:be\\s+)?possible\\s+(?:for\\s+you\\s+)?to)\\s+)(?:please\\s+)?";
+  "(?:^|[.!?;:,]\\s*|\\b(?:please|pls|kindly|can you|could you|would you|will you|help me|(?:i'd|i would|i)\\s+(?:like|want|need)\\s+(?:you\\s+)?to|i have to|let's|lets|and|then|also|just|now|if so|(?:how|what)\\s+(?:do|should|can|could|would|shall)\\s+i|can i|(?:is|would)\\s+it\\s+(?:be\\s+)?possible\\s+(?:for\\s+you\\s+)?to)\\s+)(?:please\\s+)?";
 /** Up to four words between a verb and its object, not across "of", "about", "for" ... */
 const OBJECT_WORDS = "(?:\\s+(?!(?:of|about|on|in|from|for|with|to)\\b)[\\w'’-]+){0,4}?";
 /**
  * Text for the chat, not a message to someone: "Draft a plan for my day", "Compose a summary of
- * my emails", "Draft me a short LinkedIn post".
+ * my emails", "Draft me a short LinkedIn post", "Draft my week", "Draft a cover letter".
  */
 const CHAT_TEXT_OBJECT =
-  "\\s+(?:me\\s+|us\\s+)?(?:(?:a|an|the|my|our|some|this|that|today's|tomorrow's)\\s+)?(?:[\\w'’-]+\\s+){0,2}?(?:summary|summaries|list|lists|overview|digest|recap|report|breakdown|outline|plan|plans|agenda|schedule|itinerary|checklist|to-?do|post|tweet|essay|article|paragraph|poem|story|bio|caption|speech|proposal|presentation|slides?|document|doc|resume|cv|abstract|blog|thesis|chapter|paper|assignment|homework|code|script)\\b";
+  "\\s+(?:me\\s+|us\\s+)?(?:(?:a|an|the|my|our|some|this|that|today's|tomorrow's)\\s+)?(?:[\\w'’-]+\\s+){0,2}?(?:summary|summaries|list|lists|overview|digest|recap|report|breakdown|outline|plan|plans|agenda|schedule|itinerary|checklist|to-?do|post|tweet|essay|article|paragraph|poem|story|bio|caption|speech|proposal|presentation|slides?|document|doc|resume|cv|abstract|blog|thesis|chapter|paper|assignment|homework|code|script|week|weekend|day|days|morning|evening|priorities|priority|timetable|routines?|tasks?|goals?|budget|ideas?|timeline|cover\\s+letter|motivation\\s+letter|letter\\s+of\\s+motivation)\\b";
 const REPLY_REQUESTS: RegExp[] = [
   // "Reply to Sam's email", "respond to the recruiter", "write back to Ana", "reply yes".
   new RegExp(`${REQUEST_LEAD}(?:reply|respond|write\\s+back|get\\s+back)\\b`),
@@ -1394,19 +1394,161 @@ const REPLY_REQUESTS: RegExp[] = [
   new RegExp(`${REQUEST_LEAD}(?:draft|write|compose|prepare)${OBJECT_WORDS}\\s+(?:repl(?:y|ies)|responses?|answers?|e-?mails?|mails?|messages?|notes?)\\b`),
   // "Answer Sam's email", "answer the email from Ana".
   new RegExp(`${REQUEST_LEAD}answer${OBJECT_WORDS}\\s+(?:e-?mails?|mails?|messages?|notes?)\\b`),
-  // "Draft" or "compose" as a request is about a message, whatever it is called: "Can you draft
-  // a polite decline for Sam's lunch invite?", "Draft a follow-up to the recruiter", "Draft
-  // something for Ana", "Could you draft a short yes to Sam?" (review of the fix, 25 Nov 2026:
-  // these lost the model's draft for a real inbox email). Not the noun ("the final draft",
-  // "Draft due Friday?") and not text for the chat (CHAT_TEXT_OBJECT).
-  new RegExp(`${REQUEST_LEAD}(?:draft|compose)\\b(?!\\s+(?:due|deadline|is|was|are|were|of|version|status|copy|ready)\\b)(?!${CHAT_TEXT_OBJECT})`),
   // "Write to Sam ...", "Can you write to the recruiter?"; not "write to my calendar".
   new RegExp(`${REQUEST_LEAD}write\\s+to\\s+(?!(?:me|myself|my\\s+(?:calendar|schedule|notes?|file|journal|diary|planner))\\b)`),
   // "Write Sam that lunch on Saturday works", "write Prof. Marlow saying ...".
   new RegExp(`${REQUEST_LEAD}write\\s+(?!(?:a|an|the|my|our|your|me|myself|us|up|down|out|off|it|this|that|these|those|some|something|anything|code|about|in|on|into|for|back)\\b)[\\w'’.-]+(?:\\s+[\\w'’.-]+)?\\s+(?:that|saying|to\\s+say|and\\s+(?:say|tell|ask))\\b`),
-  // "Decline Sam's lunch invitation politely", "Accept the invite from Ana", "Say yes to Sam".
-  new RegExp(`${REQUEST_LEAD}(?:decline|accept|turn\\s+down|say\\s+(?:yes|no)\\s+to)\\b`),
 ];
+
+/**
+ * "Draft" or "compose" as a request ("Can you draft a polite decline for Sam's lunch invite?",
+ * "Draft a follow-up to the recruiter", "Draft something for Ana"). Not the noun ("the final
+ * draft", "Draft due Friday?") and not text for the chat (CHAT_TEXT_OBJECT). See draftsMessage.
+ */
+const DRAFT_VERB = new RegExp(
+  `${REQUEST_LEAD}(?:draft|compose)\\b(?!\\s+(?:due|deadline|is|was|are|were|of|version|status|copy|ready)\\b)(?!${CHAT_TEXT_OBJECT})`,
+  "g",
+);
+/** "Decline Sam's lunch invitation", "Accept the invite from Ana", "Say yes to Sam". See answersPerson. */
+const ANSWER_VERB = new RegExp(`${REQUEST_LEAD}(?:decline|accept|turn\\s+down|say\\s+(?:yes|no)\\s+to)\\b`, "g");
+/** A message by what it says: "a polite decline", "a follow-up", "a thank-you", "a short yes". */
+const MESSAGE_OBJECT =
+  /\b(?:follow-?ups?|thank-?yous?|thanks|declines?|refusals?|rejections?|acceptances?|apolog(?:y|ies)|yes|no|rsvp|confirmations?|e-?mails?|mails?|messages?|repl(?:y|ies)|responses?|answers?|notes?)\b/;
+/** Mail words: "Decline the offer in Ana's email". */
+const MAIL_WORD = /\b(?:e-?mails?|mails?|messages?|repl(?:y|ies)|inbox)\b/;
+/** A message to answer: "the invite from Ana", "Sam's lunch invitation", "the recruiter's offer". */
+const INVITE_NOUN = "(?:invitations?|invites?|offers?|requests?)";
+/** People one writes to, with or without a name: "the recruiter", "my manager", "Prof. Marlow". */
+const PERSON_NOUN = new RegExp(
+  "^(?:recruiters?|professors?|prof\\.?|dr\\.?|mr\\.?|mrs\\.?|ms\\.?|managers?|boss|colleagues?|co-?workers?|friends?|landlord|landlady|clients?|customers?|teachers?|tutors?|supervisors?|advis[oe]rs?|lecturers?|hr|mom|mum|dad|mother|father|parents?|sister|brother|partner|wife|husband|neighbou?rs?|sender|organi[sz]ers?|host|interviewers?)$",
+);
+/**
+ * What is answered in the calendar, not by email: "Decline the 3pm meeting", "Accept the meeting
+ * at 3pm", "Say no to the gym on Friday" (review of the fix, 25 Nov 2026).
+ */
+const CALENDAR_OBJECT =
+  "(?:meetings?|events?|calendar|syncs?|stand-?ups?|calls?|appointments?|slots?|times?|gym|class(?:es)?|lectures?|sessions?|seminars?|workouts?|shifts?|blocks?|bookings?|reservations?|reminders?|\\d{1,2}(?::\\d{2})?\\s?(?:am|pm)|\\d{1,2}:\\d{2}|noon|midnight)";
+const CALENDAR_WORD = new RegExp(`^${CALENDAR_OBJECT}$`);
+/** Words that stand where a name could, but are none: "for today", "to the", "for my", "for Friday". */
+const NOT_A_NAME = new Set([
+  "a", "an", "the", "my", "our", "your", "his", "her", "their", "its", "this", "that", "these", "those",
+  "it", "them", "him", "me", "us", "you", "i", "we", "they", "myself", "yourself", "ourselves",
+  "all", "any", "some", "every", "each", "everything", "everyone", "everybody", "anything", "anyone",
+  "something", "someone", "nothing", "nobody", "none", "one", "both", "more", "less", "what", "which",
+  "today", "tonight", "tomorrow", "yesterday", "now", "later", "soon", "next", "last", "morning",
+  "afternoon", "evening", "night", "noon", "midnight", "weekend", "week", "weekday", "month", "year", "day",
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+  "january", "february", "march", "april", "june", "july", "august", "september", "october", "november", "december",
+  "be", "do", "go", "get", "make", "see", "help", "say", "tell", "ask", "use", "keep", "have", "take", "finish", "start",
+  "politely", "kindly", "nicely", "gently", "graciously", "firmly", "quickly", "please",
+]);
+/** A word that leads a name or a person noun, with "Prof." and "Sam's": letters, dots, dashes. */
+const NAME_TOKEN = /^(?:(the|my|our|your)\s+)?([\p{L}][\p{L}.-]*)(?:'s)?/u;
+/** The same words in the message as typed, to see which are capitalised. */
+const TYPED_WORD = /\p{L}[\p{L}.-]*/gu;
+/** The rest of a clause after a verb: up to the next comma, semicolon or "and" / "then" / "but". */
+const CLAUSE_REST_END = /[,;:]|\s(?:and|then|but|so|or)\s/;
+/** "it", "one", "them" after the verb: "If so, draft it", "Can you draft one?" */
+const PRONOUN_OBJECT = /^\s+(?:it|one|them|that|this)\b/;
+/** The message is about a reply: "Do I need to reply to Sam? If so, draft it." */
+const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ied)|respond|answer|e-?mails?|mails?|messages?)\b/;
+/** "to" or "for" before whom a draft is for: "Draft something for Ana". */
+const TO_OR_FOR = /\b(?:to|for)\s+/g;
+/** Adverbs before the object: "Decline politely Sam's invitation". */
+const LEADING_ADVERB = /^\s+(?:(?:politely|kindly|nicely|gently|graciously|firmly)\s+)?/;
+/** "the invite from Ana", "the offer from the recruiter": group 1 is the sender. */
+const INVITE_FROM = new RegExp(`\\b${INVITE_NOUN}\\s+from\\s+(?:(?:the|my|our|your)\\s+)?(\\p{L}[\\p{L}.-]*)`, "u");
+/** "Sam's lunch invitation", "the recruiter's job offer": group 1 is the sender. */
+const INVITE_OWNER = new RegExp(`(?:^|\\s)(\\p{L}[\\p{L}.-]*)'s\\s+(?:[\\w-]+\\s+){0,3}?${INVITE_NOUN}\\b`, "u");
+/** A calendar object right after the person: "Sam's 3pm meeting", "the recruiter's call". */
+const CALENDAR_AFTER = new RegExp(`^\\s+(?:[\\w'-]+\\s+){0,2}?${CALENDAR_OBJECT}\\b`);
+
+/** Lowercase and without final dots, as the words of normalizeRequest's text ("Prof." -> "prof"). */
+function plainWord(word: string): string {
+  return word.toLowerCase().replace(/\.+$/, "");
+}
+
+/**
+ * Is this word a person's name in the message as typed? A name is capitalised there ("Ana",
+ * "Sam's"); in a message without any capital letter every word that can be a name counts.
+ * Days, months, pronouns and determiners never do.
+ */
+function nameTest(original: string): (word: string) => boolean {
+  // Plain dashes, as normalizeRequest writes them: "Jean‐Luc" is one word there.
+  const typed = (original ?? "").normalize("NFKC").replace(/[‐-―−]/g, "-");
+  const noCapitals = !/\p{Lu}/u.test(typed);
+  const capitalised = new Set((typed.match(TYPED_WORD) ?? []).filter((word) => /^\p{Lu}/u.test(word)).map(plainWord));
+  return (word: string) => {
+    const bare = plainWord(word);
+    if (!bare || NOT_A_NAME.has(bare) || CALENDAR_WORD.test(bare)) return false;
+    return noCapitals || capitalised.has(bare);
+  };
+}
+
+/** Who sent an invitation or an offer: a person noun or a word that can be a name. */
+function isSender(word: string): boolean {
+  const bare = plainWord(word);
+  return PERSON_NOUN.test(word) || (Boolean(bare) && !NOT_A_NAME.has(bare) && !CALENDAR_WORD.test(bare));
+}
+
+/** The words after a verb up to the end of its clause ("the invite from ana" in "accept the invite from ana, then ..."). */
+function clauseRest(rest: string): string {
+  const end = rest.search(CLAUSE_REST_END);
+  return end >= 0 ? rest.slice(0, end) : rest;
+}
+
+/** Does a name or a person noun start this text ("sam", "the recruiter", "prof. marlow")? Returns the length it takes. */
+function leadingPerson(text: string, isName: (word: string) => boolean): number {
+  const m = NAME_TOKEN.exec(text);
+  if (!m) return 0;
+  const [whole, determiner, word] = m;
+  if (PERSON_NOUN.test(word)) return whole.length;
+  return !determiner && isName(word) ? whole.length : 0;
+}
+
+/**
+ * A draft asked for in other words than "reply": its object says what the message is ("a polite
+ * decline", "a follow-up", "a thank-you", "a short yes"), or it names who the message is to or
+ * for ("to the recruiter", "for Ana", "for Sam's invite"), or it is "it" or "one" in a message
+ * about a reply ("Do I need to reply to Sam? If so, draft it"). Anything else is text for the
+ * chat: "Draft my week", "Draft a workout routine", "Draft tasks for tomorrow" (review of the
+ * fix, 25 Nov 2026: these counted, so a placeholder email_reply gave an unrequested draft card or
+ * the "not in your inbox" note).
+ */
+function draftsMessage(clause: string, text: string, isName: (word: string) => boolean): boolean {
+  for (const m of clause.matchAll(DRAFT_VERB)) {
+    const after = clause.slice((m.index ?? 0) + m[0].length);
+    if (PRONOUN_OBJECT.test(after) && ABOUT_A_REPLY.test(text)) return true;
+    const rest = clauseRest(after);
+    if (MESSAGE_OBJECT.test(rest)) return true;
+    for (const to of rest.matchAll(TO_OR_FOR)) {
+      if (leadingPerson(rest.slice((to.index ?? 0) + to[0].length), isName) > 0) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * "Decline", "accept", "turn down", "say yes/no to" ask for a reply when what is answered is an
+ * email or a person: mail words ("the offer in Ana's email"), an invitation or an offer from
+ * someone ("the invite from Ana", "Sam's lunch invitation", "the recruiter's offer"), or the
+ * person ("Say yes to Sam", "Decline the recruiter"). A meeting, an event, a time or anything
+ * else is not: "Decline the 3pm meeting", "Accept the calendar invite for Friday", "Say no to the
+ * gym on Friday", "Turn down the volume" (review of the fix, 25 Nov 2026).
+ */
+function answersPerson(clause: string, isName: (word: string) => boolean): boolean {
+  for (const m of clause.matchAll(ANSWER_VERB)) {
+    const rest = clauseRest(clause.slice((m.index ?? 0) + m[0].length)).replace(LEADING_ADVERB, "");
+    if (MAIL_WORD.test(rest)) return true;
+    const from = INVITE_FROM.exec(rest);
+    if (from && isSender(from[1])) return true;
+    const owner = INVITE_OWNER.exec(rest);
+    if (owner && isSender(owner[1])) return true;
+    const person = leadingPerson(rest, isName);
+    if (person > 0 && !CALENDAR_AFTER.test(rest.slice(person))) return true;
+  }
+  return false;
+}
 
 /**
  * A question that asks for advice about replying, not for a reply: "Who should I reply to
@@ -1426,6 +1568,13 @@ const ADVICE_QUESTION = new RegExp(
 );
 /** "When you have a moment, ...", "If possible, ...": the sentence starts after the comma. */
 const LEADING_CONDITION = /^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/;
+/** The end of a sentence, not the dot of a title: "Write Prof. Marlow saying ..." is one sentence. */
+const SENTENCE_END = /(?<=[.!?;])(?<!\b(?:prof|dr|mr|mrs|ms|st)\.)\s+/;
+/**
+ * Where a sentence goes on with a second request: "Which email from Ana has the deadline, and
+ * draft a reply to it". A question about replying covers only its own clause.
+ */
+const CLAUSE_BREAK = /,\s*(?=(?:and|then|but|so|also)\b)|\s+(?=and\s+then\b)/;
 
 /**
  * Does the message ask for a reply to an email ("Draft a reply to the recruiter", "Reply to
@@ -1434,15 +1583,19 @@ const LEADING_CONDITION = /^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/;
  * "The AI model referred to an email that is not in your inbox" (review of 24 Nov 2026). The
  * request must be one, with the verb as a request ("reply to ...", "can you draft a reply"):
  * any "reply", "draft" or "response" was enough at first, so "When is the final draft due?",
- * "Did Sam reply?" and "What is the response time of the planner?" counted too. A sentence that
- * asks for advice about replying (ADVICE_QUESTION) is not a request.
+ * "Did Sam reply?" and "What is the response time of the planner?" counted too. A clause that
+ * asks for advice about replying (ADVICE_QUESTION) is not a request (see CLAUSE_BREAK).
  */
 export function asksForEmailReply(message: string, previousAssistant?: string | null): boolean {
   const text = normalizeRequest(message);
+  const isName = nameTest(message);
   const requests = text
-    .split(/(?<=[.!?;])\s+/)
-    .filter((sentence) => !ADVICE_QUESTION.test(sentence.replace(LEADING_CONDITION, "")));
-  if (requests.some((sentence) => REPLY_REQUESTS.some((re) => re.test(sentence)))) return true;
+    .split(SENTENCE_END)
+    .flatMap((sentence) => sentence.split(CLAUSE_BREAK))
+    .filter((clause) => !ADVICE_QUESTION.test(clause.replace(LEADING_CONDITION, "")));
+  const asks = (clause: string) =>
+    REPLY_REQUESTS.some((re) => re.test(clause)) || draftsMessage(clause, text, isName) || answersPerson(clause, isName);
+  if (requests.some(asks)) return true;
   if (asksToSend(message)) return true;
   // A short answer to MONDAY's question about which email to answer.
   return Boolean(previousAssistant && /\bwhich email\b|\breply draft\b/i.test(previousAssistant) && text.split(" ").length <= 12);
