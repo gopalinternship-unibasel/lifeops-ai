@@ -173,6 +173,14 @@ describe("a time in the reason is not the new time", () => {
       zrh("2026-11-27", 14),
     ],
     ["Move the team sync (the meeting which is at 7 pm) to 8 pm", "sync", zrh("2026-11-24", 20)],
+    // Without the noun (review of 25 Nov 2026).
+    ["Move the team sync, which is at 7 pm, to 8 pm", "sync", zrh("2026-11-24", 20)],
+    [
+      "Move the dentist appointment, which is on Thursday, to Friday",
+      "dentist",
+      zrh("2026-11-27", 14),
+    ],
+    ["Move the team sync (which is at 7 pm) to 8 pm", "sync", zrh("2026-11-24", 20)],
   ])("reads a relative clause about the event as part of its name: %s", (message, id, start) => {
     const result = reconcile(message);
     expect(result.note).toBeUndefined();
@@ -181,6 +189,28 @@ describe("a time in the reason is not the new time", () => {
       event: { id },
       byRule: true,
       next: { starts_at: start },
+    });
+  });
+
+  it("asks for the day and time when a reason took the destination with it", () => {
+    // Review of 25 Nov 2026: such a request got no card and no note at all.
+    for (const message of [
+      "Move the team sync, it is at 7 pm, to 8 pm",
+      "Postpone the team sync, it is at 7 pm, to 8 pm",
+    ]) {
+      const result = reconcile(message);
+      expect(result.changes, message).toEqual([]);
+      expect(result.note, message).toBe(
+        "Which day and time should **Team sync — demo walkthrough** move to?",
+      );
+    }
+    // The model's own answer is still offered.
+    const withModel = reconcile("Move the team sync, it is at 7 pm, to 8 pm", [
+      update("sync", "2026-11-24", [20, 0], [21, 0]),
+    ]);
+    expect(withModel.changes[0]).toMatchObject({
+      byRule: false,
+      next: { starts_at: zrh("2026-11-24", 20) },
     });
   });
 

@@ -98,7 +98,11 @@ export function fetchMockEmails(requestedTimeZone?: string, nowMs: number = Date
   ];
 }
 
-/** Look up one demo email by id (e1…e5). The body is the snippet: demo emails are short. */
-export function getMockEmail(id: string, requestedTimeZone?: string): MockEmail | null {
-  return fetchMockEmails(requestedTimeZone).find((email) => email.id === id) ?? null;
+/**
+ * Look up one demo email by id (e1…e5). The body is the snippet: demo emails are short. Like
+ * fetchMockEmails, it is the inbox at `nowMs` (review of 25 Nov 2026: without it a test could not
+ * fix the moment, and "Lunch this Saturday?" became "Lunch next Saturday?" on Saturday afternoons).
+ */
+export function getMockEmail(id: string, requestedTimeZone?: string, nowMs: number = Date.now()): MockEmail | null {
+  return fetchMockEmails(requestedTimeZone, nowMs).find((email) => email.id === id) ?? null;
 }

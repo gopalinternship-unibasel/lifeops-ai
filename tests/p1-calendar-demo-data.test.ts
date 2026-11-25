@@ -369,8 +369,18 @@ describe("demo events that are over follow the demo inbox (finding 42)", () => {
       "Team sync moved to 7 PM today",
     ]);
     expect(emails.filter((e) => e.unread)).toHaveLength(4);
-    expect(getMockEmail("e3", ZRH)?.subject).toBe("Lunch this Saturday?");
+    expect(getMockEmail("e3", ZRH, TUESDAY)?.subject).toBe("Lunch this Saturday?");
     expect(getMockEmail("nope")).toBeNull();
+  });
+
+  it("getMockEmail is the inbox at the moment it is given, like fetchMockEmails (review of 25 Nov 2026)", () => {
+    // Sat 28 Nov 2026, 14:30 in Zurich: the lunch of today is over, so it is next Saturday's.
+    const saturdayAfternoon = Date.parse("2026-11-28T13:30:00Z");
+    expect(getMockEmail("e3", ZRH, saturdayAfternoon)).toEqual(
+      fetchMockEmails(ZRH, saturdayAfternoon).find((e) => e.id === "e3"),
+    );
+    expect(getMockEmail("e3", ZRH, saturdayAfternoon)?.subject).toBe("Lunch next Saturday?");
+    expect(getMockEmail("e3", ZRH, TUESDAY)?.subject).toBe("Lunch this Saturday?");
   });
 });
 

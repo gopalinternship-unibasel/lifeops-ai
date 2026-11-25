@@ -13,7 +13,7 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
   ];
 
   it("lists every unread demo email and today's events in local time, and says it is rule-based", () => {
-    const emails = fetchMockEmails();
+    const emails = fetchMockEmails(ZRH, now);
     const { reply } = buildRuleBasedBriefing({ emails, unreadCount: 4, todayEvents, timeZone: ZRH, reason: "Ollama did not answer within 900 s.", nowMs: now });
     expect(reply).toContain("The AI model did not answer (Ollama did not answer within 900 s.)");
     expect(reply).toContain("**📬 Inbox (4 unread)**");
@@ -24,7 +24,7 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
   });
 
   it("ranks today's remaining events by length, then email tasks by importance", () => {
-    const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(), unreadCount: 4, todayEvents, timeZone: ZRH, reason: "timeout", nowMs: now });
+    const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(ZRH, now), unreadCount: 4, todayEvents, timeZone: ZRH, reason: "timeout", nowMs: now });
     expect(priorities.map((p) => p.title)).toEqual([
       "Deep work", // 120 min
       "Team sync — demo walkthrough", // 60 min (Alicia's "Team sync at 7 PM" email is folded in)
@@ -38,7 +38,7 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
   it("ranks the team sync once: the 7 PM event and Alicia's email about it are one commitment", () => {
     // The demo calendar's only event today is the team sync (QA round 2 saw it ranked twice).
     const demoToday = [todayEvents[0]];
-    const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(), unreadCount: 4, todayEvents: demoToday, timeZone: ZRH, reason: "timeout", nowMs: now });
+    const { priorities } = buildRuleBasedBriefing({ emails: fetchMockEmails(ZRH, now), unreadCount: 4, todayEvents: demoToday, timeZone: ZRH, reason: "timeout", nowMs: now });
     expect(priorities.map((p) => p.title)).toEqual([
       "Team sync — demo walkthrough",
       "Write research paper final draft",
@@ -84,12 +84,15 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
 });
 
 describe("does the model's briefing cover the inbox and today? (first visit)", () => {
-  const emails = fetchMockEmails();
+  // The inbox of Monday 9 Nov 2026, 15:08 in Zurich: its texts depend on the day and the time
+  // ("Lunch next Saturday?" on a Saturday afternoon), so the test fixes the moment (review of 25
+  // Nov 2026: on the real clock it failed every Saturday from 13:00 UTC).
+  const emails = fetchMockEmails(ZRH, Date.parse("2026-11-09T14:08:00Z"));
   const today = [{ title: "Team sync — demo walkthrough", starts_at: "2026-11-09T18:00:00Z", ends_at: "2026-11-09T19:00:00Z" }];
 
   it("accepts a briefing that lists every unread email and today's event", () => {
     const reply =
-      "**📬 Inbox (4 unread)**\n• **Prof. Marlow** — *Research paper — final draft due Friday*\n• **Acme Recruiting** — *Onsite interview — next steps*\n" +
+      "**📬 Inbox (4 unread)**\n• **Prof. Marlow** — *Research paper — final draft due Wednesday*\n• **Acme Recruiting** — *Onsite interview — next steps*\n" +
       "• **Sam (friend)** — *Lunch this Saturday?*\n• **Alicia (manager)** — *Team sync moved to 7 PM today*\n**📅 Today**\n• 19:00 – 20:00 Team sync";
     expect(briefingCoversInbox({ reply, emails, unreadCount: 4, todayEvents: today })).toBe(true);
   });

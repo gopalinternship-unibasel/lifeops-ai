@@ -8,7 +8,10 @@ import { briefingCoversInbox, checkPriorityReasons, inboxSectionMatches } from "
 import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 
 const ZRH = "Europe/Zurich";
-const emails = fetchMockEmails();
+// The inbox of Tuesday 10 Nov 2026, 09:00 in Zurich, the day of the events below. Its texts depend
+// on the day and the time ("Lunch next Saturday?" on a Saturday afternoon), so the test fixes the
+// moment (review of 25 Nov 2026: on the real clock it failed every Saturday from 13:00 UTC).
+const emails = fetchMockEmails(ZRH, Date.parse("2026-11-10T08:00:00Z"));
 const todayEvents = [{ title: "Team sync — demo walkthrough", starts_at: "2026-11-10T18:00:00.000Z", ends_at: "2026-11-10T19:00:00.000Z" }];
 const upcomingEvents = [
   ...todayEvents,
@@ -18,7 +21,7 @@ const upcomingEvents = [
 
 const GOOD = [
   "**📬 Inbox (4 unread)**",
-  "- **Prof. Marlow** — *Research paper — final draft due Friday* — final draft due in 2 days",
+  "- **Prof. Marlow** — *Research paper — final draft due Thursday* — final draft due in 2 days",
   "- **Acme Recruiting** — *Onsite interview — next steps* — Monday at 10am",
   "- **Sam (friend)** — *Lunch this Saturday?* — around 1pm",
   "- **Alicia (manager)** — *Team sync moved to 7 PM today* — demo script",
