@@ -127,7 +127,7 @@ function LoginPage() {
             <span className="text-gradient-brand">one conversation at a time.</span>
           </h1>
           <p className="mt-4 text-sm text-muted-foreground leading-relaxed">
-            MONDAY ingests your context, ranks what matters, and writes the plan back to your calendar.
+            MONDAY ingests your context, ranks what matters, and writes the plan back to your calendar once you approve it.
           </p>
         </div>
         <p className="text-xs text-muted-foreground">© 2026 MONDAY · LifeOps AI</p>

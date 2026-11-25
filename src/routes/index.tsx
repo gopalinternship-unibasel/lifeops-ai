@@ -9,6 +9,13 @@ export const Route = createFileRoute("/")({
   component: Landing,
 });
 
+/**
+ * The hosted sites (Vercel, GitHub Pages) have no Google sign-in: every visitor works with the
+ * sample inbox and the app's own demo calendar, so the page says so instead of claiming to read
+ * the visitor's email. A local install with Google set up keeps the wording for real accounts.
+ */
+const HOSTED_DEMO = import.meta.env.VITE_HOSTED_DEMO === "true";
+
 function Landing() {
   const { user, loading } = useAuth();
 
@@ -36,16 +43,17 @@ function Landing() {
         <div className="max-w-3xl">
           <div className="inline-flex items-center gap-2 rounded-full border border-border bg-card/60 backdrop-blur-sm px-3 py-1 text-xs font-medium text-muted-foreground mb-8">
             <span className="h-1.5 w-1.5 rounded-full bg-gradient-brand" />
-            Now in private preview
+            {HOSTED_DEMO ? "Public demo with a sample inbox and calendar" : "Demo"}
           </div>
           <h1 className="text-5xl md:text-6xl font-semibold tracking-tight leading-[1.05]">
             Your AI <span className="text-gradient-brand">Chief of Staff</span>,
             <br />actively running your day.
           </h1>
           <p className="mt-6 text-lg text-muted-foreground max-w-2xl leading-relaxed">
-            MONDAY connects to your inbox and calendar, prioritizes what matters,
-            and rewires your schedule through conversation. Not a chatbot. Not a
-            to-do list. A decision and execution layer.
+            {HOSTED_DEMO
+              ? "MONDAY reads an inbox and a calendar, prioritizes what matters, and rewires your schedule through conversation. In this public demo it works with a sample inbox and a demo calendar of its own, so nothing connects to your real email or calendar."
+              : "MONDAY connects to your inbox and calendar, prioritizes what matters, and rewires your schedule through conversation."}{" "}
+            Not a chatbot. Not a to-do list. A decision and execution layer.
           </p>
           <div className="mt-10 flex items-center gap-4">
             <Link
@@ -64,17 +72,21 @@ function Landing() {
           <Feature
             icon={<Brain className="h-5 w-5" />}
             title="Reasons over your context"
-            body="Reads emails, calendar, and goals. Generates ranked priorities with explicit reasoning."
+            body={
+              HOSTED_DEMO
+                ? "Reads the sample inbox, the demo calendar and the goals in your profile. Generates ranked priorities with explicit reasoning."
+                : "Reads emails, calendar, and goals. Generates ranked priorities with explicit reasoning."
+            }
           />
           <Feature
             icon={<Sparkles className="h-5 w-5" />}
             title="Reorders on command"
-            body="Override priorities in chat. The plan recalculates instantly with new rationale."
+            body="Override priorities in chat. The plan is worked out again with new rationale."
           />
           <Feature
             icon={<Calendar className="h-5 w-5" />}
             title="Writes back to your day"
-            body="Block time for the gym, dinner, or meeting prep. MONDAY puts it on the calendar."
+            body="Block time for the gym, dinner, or meeting prep. MONDAY proposes it and puts it on the calendar once you approve."
           />
         </div>
       </main>
