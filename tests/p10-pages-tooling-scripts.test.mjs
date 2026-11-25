@@ -18,7 +18,13 @@ import {
   secretNamesFromList,
   staleSettingNames,
 } from "../scripts/pages/secrets.mjs";
-import { aiProviderConfigured, dashboardChecks } from "../scripts/pages/smoke-checks.mjs";
+import {
+  PLANNER_RETRY_WAIT_MS,
+  aiProviderConfigured,
+  dashboardChecks,
+  dashboardSmokeChecks,
+  plannerTimedOut,
+} from "../scripts/pages/smoke-checks.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -402,5 +408,75 @@ describe("smoke-edge.mjs dashboard checks", () => {
     expect(aiProviderConfigured({ configured: true, label: "Ollama · qwen", local: true })).toBe(false);
     expect(aiProviderConfigured({ configured: true, label: "Cloudflare Workers AI · @cf/x", local: false })).toBe(true);
     expect(aiProviderConfigured(undefined)).toBe(false);
+  });
+});
+
+describe("smoke-edge.mjs dashboard read after a planner timeout", () => {
+  const AI = { configured: true, label: "Cloudflare Workers AI · @cf/zai-org/glm-4.7-flash", local: false };
+  const answer = (planner) => ({ ok: true, detail: "status 200", value: { planner, workspace: { aiProvider: AI } } });
+  const timedOut = { online: false, reason: "timeout", error: "The planner service did not answer within 10 s." };
+  const online = { online: true, data: {} };
+
+  /** dashboardSmokeChecks with canned dashboard answers, one per read; records reads and waits. */
+  async function run(...answers) {
+    const reads = [];
+    const waits = [];
+    const logs = [];
+    const checks = await dashboardSmokeChecks(
+      async () => {
+        reads.push(reads.length);
+        return answers[Math.min(reads.length - 1, answers.length - 1)];
+      },
+      { sleep: async (ms) => waits.push(ms), log: (message) => logs.push(message) },
+    );
+    return { checks, reads: reads.length, waits, logs, failed: checks.filter((c) => !c.ok).map((c) => c.label) };
+  }
+
+  it("reads the dashboard once more when the planner only timed out, and passes when it then answers", async () => {
+    const result = await run(answer(timedOut), answer(online));
+    expect(result.reads).toBe(2);
+    expect(result.waits).toEqual([PLANNER_RETRY_WAIT_MS]);
+    expect(result.failed).toEqual([]);
+    expect(result.checks[0]).toMatchObject({ label: "fetchDashboard", ok: true, detail: "status 200, second read" });
+    expect(result.logs.join(" ")).toMatch(/timed out \(The planner service did not answer within 10 s\.\)/);
+  });
+
+  it("fails when the planner times out on the second read too", async () => {
+    const result = await run(answer(timedOut), answer(timedOut));
+    expect(result.reads).toBe(2);
+    expect(result.failed).toEqual(["planner reachable from the function"]);
+  });
+
+  it("fails at once, without a second read, for a planner that is off, refuses the token or cannot be reached", async () => {
+    for (const reason of ["off", "rejected", "unreachable", "failed"]) {
+      const result = await run(answer({ online: false, reason, error: "x" }), answer(online));
+      expect(result.reads, reason).toBe(1);
+      expect(result.waits, reason).toEqual([]);
+      expect(result.failed, reason).toEqual(["planner reachable from the function"]);
+    }
+    // An older server's answer without a reason is not retried either.
+    expect((await run(answer({ online: false, error: "x" }), answer(online))).reads).toBe(1);
+  });
+
+  it("reads once when the planner answers, and reports a failed call without the planner checks", async () => {
+    expect((await run(answer(online))).reads).toBe(1);
+    const failedCall = await run({ ok: false, detail: "status 500", value: undefined });
+    expect(failedCall.checks).toEqual([{ label: "fetchDashboard", ok: false, detail: "status 500" }]);
+  });
+
+  it("knows a timeout from the other reasons", () => {
+    expect(plannerTimedOut({ planner: timedOut })).toBe(true);
+    expect(plannerTimedOut({ planner: online })).toBe(false);
+    expect(plannerTimedOut({ planner: { online: false, reason: "rejected", error: "x" } })).toBe(false);
+    expect(plannerTimedOut(undefined)).toBe(false);
+  });
+
+  it("is what smoke-edge.mjs runs for fetchDashboard, and what the docs say", () => {
+    const script = read("scripts/pages/smoke-edge.mjs");
+    expect(script).toContain('import { dashboardSmokeChecks } from "./smoke-checks.mjs";');
+    expect(script).toMatch(/dashboardSmokeChecks\(\s*\(\) => call\("dashboard\.functions\.ts", "fetchDashboard"/);
+    const seconds = PLANNER_RETRY_WAIT_MS / 1000;
+    expect(script.replace(/\s*\*\s*/g, " ")).toContain(`one more read after ${seconds} s`);
+    expect(read("PAGES_DEPLOYMENT.md").replace(/\s+/g, " ")).toContain(`reads the dashboard once more ${seconds} s later`);
   });
 });

@@ -66,11 +66,16 @@ function textResponse(status: number, message: string, statusText = ""): Respons
   });
 }
 
-/** The sentence for a failed answer that carries no message meant for the visitor. */
-export function messageForStatus(status: number, body?: unknown): string {
-  // h3's answer to an error thrown outside a server function's own handler. TanStack throws one
-  // for a function id the server does not have; servers with serverFnStatusHandler answer 404.
-  if (status === 500 && isRecord(body) && body.unhandled === true) return SERVER_FN_MESSAGES.outdated;
+/**
+ * The sentence for a failed answer that carries no message meant for the visitor.
+ *
+ * A 500 gets the "failed" sentence, also h3's JSON answer `{ unhandled: true }` to an error thrown
+ * outside a server function's own handler. That answer used to mean an unknown function id (an
+ * out-of-date page), but serverFnStatusHandler now answers an unknown id with a plain-text 404 and
+ * the reload sentence on both editions (the same server bundle), so on a current server it means
+ * a real failure, for example in a request middleware, which a reload does not fix.
+ */
+export function messageForStatus(status: number): string {
   if (status === 504 || status === 546) return SERVER_FN_MESSAGES.slow;
   if (status === 429) return SERVER_FN_MESSAGES.busy;
   if (status === 413 || status === 414) return SERVER_FN_MESSAGES.tooLarge;
@@ -117,7 +122,7 @@ export async function guardServerFnResponse(response: Response): Promise<Respons
 
   const detail = text.replace(/\s+/g, " ").trim().slice(0, 200);
   console.warn(`[lifeops] A server function answered HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
-  return textResponse(response.status, messageForStatus(response.status, body), response.statusText);
+  return textResponse(response.status, messageForStatus(response.status), response.statusText);
 }
 
 /* ------------------------------------------------------------------------------------------

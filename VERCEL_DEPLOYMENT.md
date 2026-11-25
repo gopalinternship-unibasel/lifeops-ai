@@ -11,7 +11,7 @@ statement where the two differ.
 | -------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Web app              | <https://lifeops-ai-sigma.vercel.app> | Vercel project `lifeops-ai`, region fra1 (from the root `vercel.json`). The plain name `lifeops-ai.vercel.app` belongs to someone else's project.                                                                                                                                |
 | Planner              | <https://lifeops-planner.vercel.app>  | Vercel project `lifeops-planner`, framework preset FastAPI, region fra1. `/api/*` answers 401 without the token.                                                                                                                                                                 |
-| Database and sign-in | Supabase project in Frankfurt         | 13 migrations, the clean-up job, the planner role and schema. Site URL and redirect URLs point at the web address above.                                                                                                                                                         |
+| Database and sign-in | Supabase project in Frankfurt         | The 13 migrations of that day (four more were added on 24 Nov 2026; section 5.1 says how to apply them), the clean-up job, the planner role and schema. Site URL and redirect URLs point at the web address above.                                                               |
 | AI                   | Cloudflare Workers AI                 | Web app: `@cf/zai-org/glm-4.7-flash`, fallback `@cf/google/gemma-4-26b-a4b-it`, `LLM_STRUCTURED_OUTPUT=tools_required`. Planner: `@cf/google/gemma-4-26b-a4b-it` with `LLM_RESPONSE_FORMAT=none`. Both send `LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thinking":false}}`. |
 
 Checked on the live site that day, as an anonymous demo visitor in a browser: the first-visit
@@ -46,7 +46,7 @@ What the deployment taught, beyond the plan below:
 | ------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root             | One function for server rendering and server functions, static files from the CDN. Node 22.x.                                                                                                                     |
 | Planner (FastAPI)               | Vercel project `lifeops-planner`, root directory = `fastapi-backend`      | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it.                                                                                                                      |
-| Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 13 migrations (12 older ones plus the new grants migration), then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql`. The planner uses the same project through its own role and schema. |
+| Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 17 migrations, then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql` (section 5). The planner uses the same project through its own role and schema.                                   |
 | AI model                        | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. In use since 17 Nov 2026; see section 0 and section 2.                                                                                                                        |
 | Monitoring                      | GitHub Actions workflow `smoke.yml`                                       | Once a day.                                                                                                                                                                                                       |
 
@@ -210,9 +210,11 @@ present. With none set (the local default) nothing is limited and no extra queri
 The rule: a request is allowed while the number of uses already recorded in the window is below the
 limit, so a limit of 20 allows 20 and refuses the 21st. Each allowed request that calls the model
 records one use in a ledger table in the database that only the server can write (`public.ai_usage`);
-the check and the record are one database call, so requests sent at the same moment cannot pass a cap
-together. Work that makes no model call (such as the rule-based briefing) records nothing, and the caps
-no longer depend on how many chat messages, plans or planner requests are stored. When a limit is
+the check and the record are one database call (`public.ai_allowance`, which only the service role may
+run) that holds a lock, so parallel requests are counted one at a time and requests sent at the same
+moment cannot pass a cap together. Work that makes no model call (such as the rule-based briefing)
+records nothing, and the caps no longer depend on how many chat messages, plans or planner requests are
+stored. When a limit is
 reached the visitor gets a plain sentence, for example "You have reached this demo's limit of 20 chat
 messages per hour. Please try again later." or "This demo's AI allowance for today is used up. It starts
 again at midnight UTC. Please try again tomorrow." A refused request records no use and the model is not
@@ -237,8 +239,9 @@ week plan for the same week, or a second running "Plan it" for the same user, is
 database itself ("still being drafted" / "already running").
 
 Other protection that does not need code: the 4,000-character message cap, the 1,500-character cap for
-plan instructions, Supabase's limit of 30 anonymous sign-ins per hour per IP, no billing on any of the
-three free plans, and the clean-up job in section 5.2. A CAPTCHA (for example Cloudflare Turnstile) is not
+plan instructions, the size and row limits per account in the database (section 5.1), Supabase's limit
+of 30 anonymous sign-ins per hour per IP, no billing on any of the three free plans, and the clean-up
+jobs in section 5.2. A CAPTCHA (for example Cloudflare Turnstile) is not
 wired in; it would need a change in `src/routes/login.tsx` and another account.
 
 The sign-in page shows one line when `VITE_HOSTED_DEMO=true`: demo data only, messages go to a hosted AI
@@ -248,28 +251,100 @@ provider, do not enter personal information.
 
 ### 5.1 Migrations
 
-`supabase db push` applies the 13 files in `supabase/migrations` in order. The last one is new:
+`supabase db push` applies the 17 files in `supabase/migrations` in order. The newer ones:
 
 - `20261114120000_data_api_grants.sql` gives `authenticated` and `service_role` access to the tables
   (`service_role` alone for `google_oauth_tokens`; `anon` gets nothing). New Supabase projects no longer do
   this by themselves, and without it every query fails with "permission denied for table". Row level
   security still decides which rows a user sees. It does nothing where the roles do not exist, and it is
   harmless on the local stack and on an older project, where it repeats grants that are already there.
+- `20261124110000_ai_usage_ledger.sql`: the ledger `public.ai_usage` that the limits of section 4 count,
+  and `public.ai_allowance`, the only way to read and write it, which only the service role may run.
+  Visitors' tokens cannot reach the table. Without `AI_*` settings (a local install) nothing calls the
+  function and the ledger stays empty.
+- `20261124110100_text_and_row_limits.sql`: limits on what one account can store. Every text and JSON
+  column a signed-in user can write gets a length limit (for example 100 characters for the profile's
+  name, 2,000 for its goals, 300 for a task title, 200 for an event title, 12,000 for a chat message and
+  128 kB for a week plan). These constraints are `NOT VALID`: rows stored before stay as they are and
+  readable, every new or changed row is checked. Rows per account, counted for writes made with the
+  user's own token (the server's own writes are not limited): 1,000 calendar events, 1,000 handled chat
+  cards, 1,000 chat messages (the assistant's answers count too; clearing the chat history frees them),
+  100 chat sessions, 20 connected services, 100 email drafts, 200 "Plan it" requests and 300 week plan
+  requests; and 52 saved week plans, for every role. At a limit the database refuses the row with a
+  sentence for the visitor, for example "This demo account has reached its limit of 1000 stored chat
+  messages. Clear the chat history to continue." The file's header works out the most one account can
+  store: about 10 MB of text and up to about 10 MB of week plans.
+- `20261124110200_one_running_request.sql`: one running week plan request per user and week, and one
+  running "Plan it" per user, held by unique indexes; a second one gets the "still being drafted" or
+  "already running" sentence. Before each index is built, running rows older than an hour, and all but
+  the newest running row of a user (and week), are marked failed.
+- `20261124110300_server_written_rows.sql`: rows only the server writes. A visitor's token can no longer
+  write tasks, assistant messages, stored results, request times or new week plans. It inserts its own
+  chat messages (role `user`, no card, at most 4,000 characters) and the input columns of its plan
+  requests, edits its own week plans, and can mark its own running "Plan it" as failed.
+
+`supabase/tests/check-migrations.mjs` checks all migrations and the files in `supabase/hosted` in an
+in-process Postgres (PGlite). It is not part of `npm test`; its header says how to run it. Its header also
+says that on 24 Nov 2026 the same scenarios, a race of 30 parallel calls and the clean-up jobs ran against
+the `supabase/postgres` 17.11 image with PostgREST. Not yet run on the hosted project.
+
+#### Applying the migrations of 24 Nov 2026 to the hosted project
+
+The hosted project has the 13 older migrations. The new app code needs the four new ones: without
+`public.ai_allowance` it refuses every AI request, while an `AI_*` limit is set, with "The demo's usage
+limits could not be checked right now. Please try again in a moment." The code from before keeps working
+on the new schema (the database change checked its writes against the new grants), so the migrations go
+first. In this order:
+
+1. In the SQL Editor, run `supabase/hosted/check_before_20261124_migrations.sql`. It only reads, and shows
+   that the ledger does not exist yet, the running requests the migration will close, accounts already at
+   a new row limit (they can add nothing more to that table afterwards) and rows over the new length
+   limits (they stay readable). Expect zeros on the demo.
+2. `supabase db push --dry-run`, then `supabase db push`: the four new files, applied as `postgres`.
+3. Right before the deploy, run `supabase/hosted/close_stale_running_requests.sql` in the SQL Editor. It
+   closes requests that have been "running" for more than 15 minutes and can be run again. Then deploy
+   the new code to both editions together: the web app with `npx vercel@latest deploy --prod` (section 6,
+   step 11) and the Pages edition with `npm run release:pages` (`PAGES_DEPLOYMENT.md`). Keep the time
+   between steps 2 and 3 short: a week plan or a "Plan it" that a host cuts off in between stays
+   "running"; the old code shows it as interrupted, and the next request for that week, or the next
+   "Plan it", then fails with an error until this file or the new code closes the row.
+4. Run `supabase/hosted/cleanup_anonymous_users.sql` again (section 5.2). It replaces the job that the
+   earlier version scheduled; its last query should list two jobs.
+5. Check: the queries commented out at the end of the check file (who may read the ledger, who may run
+   `ai_allowance`, the two new indexes), and `curl -sI https://lifeops-ai-sigma.vercel.app/`, whose
+   answer should carry `X-Frame-Options: DENY`, a `Content-Security-Policy` with `frame-ancestors 'none'`,
+   `X-Content-Type-Options: nosniff` and a `Referrer-Policy` (set in the root `vercel.json`; not yet seen
+   on the live site). After the first night, `cron.job_run_details` should say `succeeded` for both
+   clean-up jobs (the query is at the end of the clean-up file).
 
 ### 5.2 Clean-up of old anonymous users (hosted project only)
 
 `supabase/hosted/cleanup_anonymous_users.sql` is not a migration, on purpose: the local stack's database
-image has `pg_cron` too, so as a migration the job would also run on every local database. Run the file
-once on the hosted project, after the migrations: paste it into the SQL Editor, or run it with `psql` as
-the `postgres` role. It enables `pg_cron` if needed, removes a job of the same name if one exists, and
-schedules `delete-old-anonymous-users`, a daily job (03:17 UTC) that deletes anonymous users older than
-7 days; their rows in the app's tables go with them through the foreign keys. Running it twice leaves one
-job. The last statement lists the job.
+image has `pg_cron` too, so as a migration the jobs would also run on every local database. Run the file
+on the hosted project after the migrations, and again whenever it changes: paste it into the SQL Editor,
+or run it with `psql` as the `postgres` role. It enables `pg_cron` if needed, removes jobs of the same
+names, and schedules two daily jobs:
 
-Checked on a throw-away container of the local image (`supabase/postgres` 17.11) as the `postgres` role:
-the file runs twice without error and leaves one job. Not verified on a hosted project: that the `postgres`
-role may delete from `auth.users` there (the job's first run is the test; `select * from
-cron.job_run_details order by start_time desc limit 5;` shows its result the next day).
+- `delete-old-anonymous-users` (03:17 UTC) deletes anonymous users that have not been used for 7 days:
+  the account is older than 7 days, and no sign-in, session or refresh token was created, refreshed or
+  updated in those 7 days. Their rows in the app's tables go with them through the foreign keys, their
+  AI usage rows included. (It used to delete by account age alone.) The sign-in page says that demo
+  accounts are deleted after 7 days without use.
+- `delete-orphaned-planner-rows` (03:47 UTC) deletes the planner's rows whose owner is a user id that no
+  longer exists, in every table of the `planner` schema with an `owner` column. The planner keeps them
+  without a foreign key, so the first job does not reach them. Rows of the shared "local" workspace stay.
+  Without a `planner` schema the job does nothing. It runs as `postgres`, which section 5.3 makes a member
+  of the planner role that owns those tables.
+
+Running it twice leaves the two jobs. The preview at the start counts the users the first job would
+delete now; it fails, and stops the script, if the project's auth tables lack a column the job reads.
+The last statement lists both jobs.
+
+The first version (one job) was checked on a throw-away container of the local image (`supabase/postgres`
+17.11) as the `postgres` role; the current file is covered by `supabase/tests/check-migrations.mjs`
+(section 5.1). Not verified on a hosted project: that the `postgres` role may delete from `auth.users`
+and from the planner's tables there (the first night is the test; the query at the end of the file shows
+the result).
 
 No SQL seed is needed: demo calendar events are created per user by the app, and the demo inbox lives in
 the code.
@@ -325,8 +400,9 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
    `supabase projects create`). Leave "Automatically expose new tables" off: the grants migration handles access.
 4. Merge this branch to `main` and let CI pass.
 5. `supabase link --project-ref PROJECT_REF`, then `supabase db push --dry-run`, then `supabase db push`. The
-   migration list should show 13 applied. Then apply `supabase/hosted/cleanup_anonymous_users.sql` once
-   (section 5.2).
+   migration list should show 17 applied. Then apply `supabase/hosted/cleanup_anonymous_users.sql` once
+   (section 5.2). A project that already has the 13 older migrations follows the order at the end of
+   section 5.1 instead.
 6. Push the auth settings of section 5.4 (dashboard, or `supabase config push` from a scratch folder that
    holds only the `[auth]` values; do not push the repository's own `config.toml`, whose Site URL is localhost).
 7. OWNER: create the planner role and schema (section 5.3) and build `DATABASE_URL`.
@@ -425,6 +501,13 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
 ## 10. Common errors
 
 - **"permission denied for table ..."**: the grants migration was not applied. Run `supabase db push`.
+- **"The demo's usage limits could not be checked right now. Please try again in a moment."** on every AI
+  request: the ledger function `public.ai_allowance` does not exist (the migrations of 24 Nov 2026 are not
+  applied; section 5.1) or the database did not answer. The runtime log has the database's error after
+  `[lifeops] AI allowance (chat)` (or `plan`, `planner`, `draft`).
+- **"This demo account has reached its limit of ..."**: one account reached a row limit of section 5.1;
+  clearing the chat history frees chat messages and sessions. Where the page shows "Could not ... Please
+  try again in a moment." instead, the runtime log says which limit (`Row limit N per user on public....`).
 - **"Missing Supabase environment variable"**: one of the five Supabase settings in section 3.1 is missing.
   `VITE_` settings are read at build time, so redeploy after changing them.
 - **The dashboard shows "Planner service offline — in-app assistant"** ("The planner service could not be

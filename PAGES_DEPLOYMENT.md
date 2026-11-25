@@ -104,6 +104,12 @@ calls the function's server functions by an id made from their file path and exp
    one until the workflow passes (`gh run rerun <id>`, or a new release from `main`). `--no-wait` only
    starts the workflow.
 
+When `supabase/migrations` has new files, apply them to the shared project before the release, in the
+order of `VERCEL_DEPLOYMENT.md`, section 5.1, and release both editions together: the server code
+expects them. Without the migrations of 24 Nov 2026, for example, the new code refuses every AI request
+while an `AI_*` limit is set ("The demo's usage limits could not be checked right now. Please try again
+in a moment.").
+
 The workflow checks that the commit it builds is on `main`; started by hand without `sha`, it builds
 the head of `main`. The script reads the public build values from the environment or from the
 repository variables `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. `npm run deploy:pages-function`
@@ -233,7 +239,11 @@ node scripts/pages/smoke-edge.mjs --url https://<project>.supabase.co/functions/
 calls real server functions. It also fails when the dashboard shows that the function cannot use the
 planner (offline, token refused or too slow: `FAIL planner reachable from the function`) or has no AI
 provider set up (`FAIL AI provider configured on the function`), without making an AI call: the
-dashboard itself answers 200 in both cases. A wrong `LLM_API_KEY` passes this check; only an AI call
+dashboard itself answers 200 in both cases. A planner that was idle needs a cold start and can miss the
+dashboard's 10 s (`LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS`), so when the planner only timed out, the
+smoke test prints a `WAIT` line and reads the dashboard once more 5 s later; a second timeout fails.
+Every other planner problem (switched off, not set up, token refused, unreachable, a server error)
+fails at once. A wrong `LLM_API_KEY` passes this check; only an AI call
 (`--chat`) shows it. `npm run release:pages` and the daily `smoke.yml` use `--demo-user`.
 `--chat` adds one chat turn (uses the AI allowance). CI (on every push to `main` and every pull request
 to it) builds the Pages edition, type-checks the function with Deno and runs the local Deno check (job
