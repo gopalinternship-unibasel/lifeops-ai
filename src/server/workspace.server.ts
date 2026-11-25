@@ -146,7 +146,12 @@ async function findDemoBlock(supabase: UserClient, userId: string, reference: st
  * A block the planner wrote with this title and time that carries no reference any more: editing
  * a demo event clears its seed_key (calendar.mock updateEvent), even when only its notes changed,
  * and blocks written before the tag existed never had one. Events of other sources (one the user
- * made in the chat, a demo seed event) are never taken for it.
+ * made in the chat, a demo seed event) are never taken for it. Known limit: an untagged planner
+ * block another action wrote with the same title and time (one whose tag a later run cleared, or
+ * one left from before a planner reset) cannot be told apart from this action's edited block, so
+ * it is reused too: nothing is written, the message ("Already in your demo calendar.") is true,
+ * and both actions record the one block's id (the id is only shown and stored; nothing deletes
+ * by it).
  */
 async function findUntaggedPlannerBlock(
   supabase: UserClient,
@@ -176,7 +181,11 @@ async function findUntaggedPlannerBlock(
  * A run refused as an overlap may still find its own block in the slot: one a run at the same
  * moment just wrote (the unique key on (user_id, seed_key) lets only one of them write it; the
  * other may also get a unique violation, 23505), or one that lost its tag (see
- * findUntaggedPlannerBlock). That block is returned instead of the overlap.
+ * findUntaggedPlannerBlock). That block is returned instead of the overlap. Known limit: both
+ * fallbacks only recognise a block with this run's instants. Of two runs at the same moment from
+ * zones with other offsets (Zurich and London), the second gets the unique violation and "Could
+ * not add the event to your calendar"; nothing more is written, and a later run from the first
+ * zone reuses the block.
  */
 async function createDemoPlannerBlock(
   supabase: UserClient,
@@ -247,6 +256,9 @@ async function createDemoPlannerBlock(
  * A planner block in Google Calendar, tagged with a line in its description. Only an event with
  * that tag and the block's title and time is the planner's block (see sameBlock); any other event
  * in the slot, a tagged one of an earlier action with the same id included, is an overlap.
+ * Known limit: two runs at the same moment can both find the slot free and both insert an event.
+ * Preventing that needs a claim row (as for Gmail drafts) or a deterministic event id in
+ * insertCalendarEvent (calendar.server.ts).
  */
 async function createGooglePlannerBlock(
   userId: string,
@@ -342,7 +354,10 @@ async function recordDraft(
  *
  * `timeZone`: the visitor's, as the chat's inbox list uses it. The demo emails are dated from the
  * visitor's today, so without it a Saturday-afternoon reply in Zurich was saved as "Re: Lunch
- * this Saturday?" while the inbox listed "Lunch next Saturday?" (finding 42).
+ * this Saturday?" while the inbox listed "Lunch next Saturday?" (finding 42). Without it the email
+ * is read in UTC, as before. The email is read when the draft is saved, so a reply card made
+ * before the dates move on (Saturday 1 PM for the lunch email) and saved after it gets the newer
+ * subject.
  */
 export async function saveReplyDraft(opts: {
   supabase: UserClient;
