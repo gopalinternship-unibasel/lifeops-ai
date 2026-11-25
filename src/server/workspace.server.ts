@@ -143,13 +143,49 @@ async function findDemoBlock(supabase: UserClient, userId: string, reference: st
 }
 
 /**
+ * A block the planner wrote with this title and time that carries no reference any more: editing
+ * a demo event clears its seed_key (calendar.mock updateEvent), even when only its notes changed,
+ * and blocks written before the tag existed never had one. Events of other sources (one the user
+ * made in the chat, a demo seed event) are never taken for it. Known limit: an untagged planner
+ * block another action wrote with the same title and time (one whose tag a later run cleared, or
+ * one left from before a planner reset) cannot be told apart from this action's edited block, so
+ * it is reused too: nothing is written, the message ("Already in your demo calendar.") is true,
+ * and both actions record the one block's id (the id is only shown and stored; nothing deletes
+ * by it).
+ */
+async function findUntaggedPlannerBlock(
+  supabase: UserClient,
+  userId: string,
+  event: BlockEvent,
+  source: string,
+): Promise<DemoBlockRow | null> {
+  const { data, error } = await supabase
+    .from("calendar_events")
+    .select("id, title, starts_at, ends_at, seed_key")
+    .eq("user_id", userId)
+    .eq("source", source)
+    .lt("starts_at", event.ends_at)
+    .gt("ends_at", event.starts_at);
+  if (error) throw dbError("check your calendar", error);
+  return (data ?? []).find((row) => !row.seed_key && sameBlock(row, event)) ?? null;
+}
+
+/**
  * A planner block in the demo calendar, tagged with its reference in seed_key. A tagged block
- * with this title and time is reused. A tagged block with other values belongs to an earlier
- * action that had the same id before the planner's database was reset: it stays in the calendar
- * as an ordinary event, loses the tag (as an event the user edits does), and a new block is
- * written. The unique key on (user_id, seed_key) lets only one of two runs at the same moment
- * write it; the other gets a unique violation (23505), or sees the first one's block as an
- * overlap, and returns the block the first one wrote.
+ * with this title and time is reused. A tagged block with other values is either an earlier
+ * action's (one that had the same id before the planner's database was reset) or this action's,
+ * written by a run from another time zone (the planner's times have no zone, so the same action
+ * gives other instants elsewhere); the two cannot be told apart. Nothing is changed while the
+ * slot is taken: the conflict check comes first, and only a run that will write its block clears
+ * the old block's tag (it stays in the calendar as an ordinary event, as one the user edits does).
+ * A run refused as an overlap may still find its own block in the slot: one a run at the same
+ * moment just wrote (the unique key on (user_id, seed_key) lets only one of them write it; the
+ * other may also get a unique violation, 23505), or one that lost its tag (see
+ * findUntaggedPlannerBlock). That block is returned instead of the overlap. Known limit: both
+ * fallbacks only recognise a block with this run's instants. Of two runs at the same moment from
+ * zones with other offsets (Zurich and London), the second gets the unique violation and "Could
+ * not add the event to your calendar"; nothing more is written, and a later run from the first
+ * zone reuses the block.
  */
 async function createDemoPlannerBlock(
   supabase: UserClient,
@@ -167,16 +203,7 @@ async function createDemoPlannerBlock(
   };
 
   const found = await findDemoBlock(supabase, userId, reference);
-  if (found) {
-    if (sameBlock(found, event)) return { id: found.id, provider, reused: true };
-    const { error: untagError } = await supabase
-      .from("calendar_events")
-      .update({ seed_key: null })
-      .eq("id", found.id)
-      .eq("user_id", userId)
-      .eq("seed_key", reference);
-    if (untagError) throw dbError("add the event to your calendar", untagError);
-  }
+  if (found && sameBlock(found, event)) return { id: found.id, provider, reused: true };
   try {
     await assertNoCalendarConflict({
       supabase,
@@ -189,7 +216,18 @@ async function createDemoPlannerBlock(
   } catch (error: unknown) {
     const written = await writtenMeanwhile().catch(() => null);
     if (written) return written;
+    const untagged = await findUntaggedPlannerBlock(supabase, userId, event, source).catch(() => null);
+    if (untagged) return { id: untagged.id, provider, reused: true };
     throw error;
+  }
+  if (found) {
+    const { error: untagError } = await supabase
+      .from("calendar_events")
+      .update({ seed_key: null })
+      .eq("id", found.id)
+      .eq("user_id", userId)
+      .eq("seed_key", reference);
+    if (untagError) throw dbError("add the event to your calendar", untagError);
   }
   const { data, error } = await supabase
     .from("calendar_events")
@@ -218,6 +256,9 @@ async function createDemoPlannerBlock(
  * A planner block in Google Calendar, tagged with a line in its description. Only an event with
  * that tag and the block's title and time is the planner's block (see sameBlock); any other event
  * in the slot, a tagged one of an earlier action with the same id included, is an overlap.
+ * Known limit: two runs at the same moment can both find the slot free and both insert an event.
+ * Preventing that needs a claim row (as for Gmail drafts) or a deterministic event id in
+ * insertCalendarEvent (calendar.server.ts).
  */
 async function createGooglePlannerBlock(
   userId: string,
@@ -254,7 +295,9 @@ async function createGooglePlannerBlock(
  * the action's title and time: an event the user made with the same title and time is not the
  * planner's block and stays an overlap (it was taken for the block, and its id recorded as the
  * planner action's, when blocks were matched by title and time), and neither is a block an
- * earlier action with the same id left at another time (see sameBlock).
+ * earlier action with the same id left at another time (see sameBlock). In the demo calendar, a
+ * planner block with the action's title and time that lost its reference (the user edited it) is
+ * also reused (see createDemoPlannerBlock).
  */
 export async function createCalendarBlock(opts: {
   supabase: UserClient;
@@ -308,12 +351,21 @@ async function recordDraft(
 /**
  * Save a reviewed reply as a DRAFT. Never sends: with Google connected the draft goes to the
  * user's Gmail drafts folder; in demo mode it is stored in email_drafts. Both are recorded.
+ *
+ * `timeZone`: the visitor's, as the chat's inbox list uses it. The demo emails are dated from the
+ * visitor's today, so without it a Saturday-afternoon reply in Zurich was saved as "Re: Lunch
+ * this Saturday?" while the inbox listed "Lunch next Saturday?" (finding 42). Without it the email
+ * is read in UTC, as before. The email is read when the draft is saved, so a reply card made
+ * before the dates move on (Saturday 1 PM for the lunch email) and saved after it gets the newer
+ * subject.
  */
 export async function saveReplyDraft(opts: {
   supabase: UserClient;
   userId: string;
   messageId: string;
   replyBody: string;
+  timeZone?: string;
+  nowMs?: number;
 }): Promise<SavedDraft> {
   const connected = await isGoogleConnected(opts.userId);
   if (connected) {
@@ -334,7 +386,7 @@ export async function saveReplyDraft(opts: {
     return { ...draft, provider: "gmail" };
   }
 
-  const email = getMockEmail(opts.messageId);
+  const email = getMockEmail(opts.messageId, opts.timeZone, opts.nowMs);
   if (!email) throw new Error("That email is not in the demo inbox.");
   const subject = email.subject.toLowerCase().startsWith("re:") ? email.subject : `Re: ${email.subject}`;
   const draftId = await recordDraft(opts.supabase, {
@@ -396,7 +448,11 @@ export const DRAFT_IN_PROGRESS_MESSAGE = "This action is being run already. Try 
  * written before the Gmail draft exists; while it is recent and has no Gmail id yet, the first
  * run is still at work, and the second gets DRAFT_IN_PROGRESS_MESSAGE as an error (nothing is
  * recorded). It used to report the draft as saved, with the row's own id as the Gmail draft's,
- * also when the Gmail call then failed and no Gmail draft existed.
+ * also when the Gmail call then failed and no Gmail draft existed. Known limit: an older row
+ * without Gmail's id is reused with the row's id. That happens when the Gmail draft was created
+ * but writing its id failed (the planner then records the row's id), or when the Gmail call
+ * failed and neither the user's nor the service role's delete of the row worked (see
+ * releaseDraftRow), and then no Gmail draft exists.
  */
 function reusedDraft(row: DraftRow, nowMs: number): SavedDraft {
   const gmail = row.provider === "gmail";
@@ -410,6 +466,23 @@ function reusedDraft(row: DraftRow, nowMs: number): SavedDraft {
     provider: gmail ? "gmail" : "demo",
     reused: true,
   };
+}
+
+/**
+ * Remove the row of a Gmail draft that could not be created. When the user's delete fails, the
+ * service role removes it (scoped to this row and user): a row left without Gmail's id looks like
+ * a saved Gmail draft to every Run after GMAIL_DRAFT_CLAIM_MS, and no Gmail draft exists.
+ */
+async function releaseDraftRow(supabase: UserClient, userId: string, rowId: string): Promise<void> {
+  const { error } = await supabase.from("email_drafts").delete().eq("id", rowId).eq("user_id", userId);
+  if (!error) return;
+  console.error("[lifeops] could not remove an unused draft row:", describeCause(error));
+  try {
+    const { error: adminError } = await supabaseAdmin.from("email_drafts").delete().eq("id", rowId).eq("user_id", userId);
+    if (adminError) console.error("[lifeops] could not remove an unused draft row:", describeCause(adminError));
+  } catch (adminError: unknown) {
+    console.error("[lifeops] could not remove an unused draft row:", describeCause(adminError));
+  }
 }
 
 /**
@@ -476,12 +549,7 @@ export async function saveNewDraft(opts: {
     draft = await createDraft(opts.userId, { to: opts.to, subject: opts.subject, body: opts.body });
   } catch (error: unknown) {
     // Nothing was created in Gmail: free the reference again, so Run can be tried again.
-    const { error: releaseError } = await opts.supabase
-      .from("email_drafts")
-      .delete()
-      .eq("id", row.id)
-      .eq("user_id", opts.userId);
-    if (releaseError) console.error("[lifeops] could not remove an unused draft row:", describeCause(releaseError));
+    await releaseDraftRow(opts.supabase, opts.userId, row.id);
     throw error;
   }
   // Gmail's id goes on the row with the service role (users cannot change their drafts). When that

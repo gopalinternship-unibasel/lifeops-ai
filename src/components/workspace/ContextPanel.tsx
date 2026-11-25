@@ -407,7 +407,7 @@ export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion
   async function saveDraft() {
     setBusy(true);
     try {
-      const r = await saveGmailDraft({ data: { cardId: draft.id, messageId: draft.messageId, replyBody: body } });
+      const r = await saveGmailDraft({ data: { cardId: draft.id, messageId: draft.messageId, replyBody: body, timeZone: getBrowserTimeZone() } });
       if (r.alreadyHandled) {
         toast.info(r.error ?? "This reply is already saved as a draft.");
         setSaved(true);
