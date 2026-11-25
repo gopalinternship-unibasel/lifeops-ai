@@ -8,12 +8,12 @@
  * --demo-user signs in a new anonymous demo user (needs SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in
  * the environment, both public values) and calls real server functions with its token. It fails
  * when the dashboard shows the planner offline or no AI provider set up on the function (a
- * missing secret), without making an AI call. Anonymous users are removed by the project's
- * nightly clean-up job.
+ * missing secret), without making an AI call. A planner that only timed out (a cold start) gets
+ * one more read after 5 s. Anonymous users are removed by the project's nightly clean-up job.
  * --chat also runs one chat turn (needs the AI settings on the function; uses the AI allowance).
  */
 import { createHash } from "node:crypto";
-import { dashboardChecks } from "./smoke-checks.mjs";
+import { dashboardSmokeChecks } from "./smoke-checks.mjs";
 
 const args = process.argv.slice(2);
 const arg = (name) => {
@@ -162,9 +162,12 @@ if (demoUser) {
     check("fetchCalendar (demo calendar)", cal.ok, `${cal.detail}${Array.isArray(events) ? `, ${events.length} events` : ""}`);
     const status = await call("google.functions.ts", "getGoogleConnectionStatus", { token, method: "GET" });
     check("getGoogleConnectionStatus (GET, secret key on the server)", status.ok, `${status.detail} ${JSON.stringify(status.value ?? "").slice(0, 100)}`);
-    const dash = await call("dashboard.functions.ts", "fetchDashboard", { token, data: { timeZone: "Europe/Zurich" } });
-    check("fetchDashboard", dash.ok, dash.detail);
-    if (dash.ok) for (const item of dashboardChecks(dash.value)) check(item.label, item.ok, item.detail);
+    // A planner that only timed out (a cold start after an idle period) gets a second read.
+    const dashboard = await dashboardSmokeChecks(
+      () => call("dashboard.functions.ts", "fetchDashboard", { token, data: { timeZone: "Europe/Zurich" } }),
+      { log: (message) => console.log(`WAIT ${message}`) },
+    );
+    for (const item of dashboard) check(item.label, item.ok, item.detail);
     if (chat && typeof sessionId === "string") {
       const started = Date.now();
       const turn = await call("chat.functions.ts", "processChat", {

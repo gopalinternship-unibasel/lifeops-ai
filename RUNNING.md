@@ -87,7 +87,7 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 13 migrations in `supabase/migrations`
+1. starts the local Supabase stack and applies the 17 migrations in `supabase/migrations`
    (the first start downloads the Supabase images, several minutes); on every later run
    `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
@@ -356,7 +356,7 @@ the planner's `/docs`; unset `ENV` means production (no `/docs`, no SQL logging)
 
 ```powershell
 cd <the project folder>
-npm test                 # 385 unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
+npm test                 # unit tests (vitest): LLM gateway and readable provider errors, time ranges, conflicts
                          # and free slots from now on, Google OAuth offline, env files, readable input errors,
                          # workspace card state, rule-based briefing (one line per commitment, inbox coverage,
                          # meetings already over), reply and plan-request state, dates in the chat prompt,
@@ -368,7 +368,7 @@ npm test                 # 385 unit tests (vitest): LLM gateway and readable pro
                          # replies (tests/reply-guard-table.test.ts), unknown ids and draft claims, the briefing's
                          # inbox block and priority reasons, plan day status and stored plan requests
 npm run typecheck
-npm run lint             # 0 errors (8 old fast-refresh warnings)
+npm run lint             # 0 errors (the warnings are all fast-refresh ones)
 npm run build
 cd fastapi-backend
 .venv\Scripts\python.exe -m pytest     # planner tests with a temporary SQLite file and a fake LLM
@@ -716,23 +716,26 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   this PC and is off here: the demo limits `AI_CHAT_PER_HOUR`, `AI_PLANS_PER_DAY`,
   `AI_PLANNER_PER_HOUR` and `AI_CALLS_PER_DAY` (unset = unlimited, the default here), the notice on the
   sign-in page (`VITE_HOSTED_DEMO=true`), the Vercel build (`NITRO_PRESET=vercel`; plain
-  `npm run build` is unchanged and writes `dist\`), and the nightly clean-up of anonymous users older
-  than 7 days. The clean-up is a one-off file for the hosted project, `supabase/hosted/cleanup_anonymous_users.sql`,
+  `npm run build` is unchanged and writes `dist\`), and the nightly clean-up of anonymous users not
+  used for 7 days. The clean-up is a one-off file for the hosted project, `supabase/hosted/cleanup_anonymous_users.sql`,
   and not a migration: the local database image has `pg_cron` too, so as a migration it would delete
   local anonymous users as well. The grants migration (`20261114120000_data_api_grants.sql`) is one of
-  the 13 migrations and runs here too, where it repeats grants that already exist.
-  Limits of the hosted demo: each allowed request that calls the model records one use in a ledger in
-  the database that only the server writes (`public.ai_usage`), in the same database call that checks
-  the cap, so requests sent at the same moment cannot pass a cap together, and a request that is cut off
-  in the middle still counts. Each `Plan it` records one planner use, also when it falls back to the
-  in-app assistant; that fallback chat turn is checked against the chat and daily caps but records no
-  use of its own, and if one of them refuses it, the planner request stays stored as failed with the
-  limit sentence. The global allowance is counted per UTC day
-  across all users. The caps are sized for Cloudflare Workers AI's free
-  10,000 neurons a day (shared with another demo on the same account) from estimated token counts, not
-  measured ones; they do not guarantee that the allowance lasts the day. The nightly clean-up deletes
-  old anonymous users and, through the foreign keys, their rows in the app's tables; the planner's rows
-  in its own `planner` schema are not linked to them and are not cleaned up. Google Gmail and Calendar
-  stay off there (demo inbox and calendar).
+  the 17 migrations and runs here too, where it repeats grants that already exist. So do the four of
+  24 Nov 2026 (`VERCEL_DEPLOYMENT.md`, section 5.1): the AI usage ledger stays empty here while no
+  `AI_*` limit is set, and the size and row limits per account apply here as on the hosted sites (for
+  example 1,000 stored chat messages; clearing the chat history frees them).
+  Limits of the hosted demo: each allowed request that calls the model records one use in a ledger in the
+  database that only the server writes (`public.ai_usage`), in the same database call that checks the cap
+  and under a lock, so parallel requests are counted one at a time and cannot pass a cap together, and a
+  request that is cut off in the middle still counts. Each `Plan it` records one planner use, also when it
+  falls back to the in-app assistant; that fallback chat turn is checked against the chat and daily caps
+  but records no use of its own, and if one of them refuses it, the planner request stays stored as failed
+  with the limit sentence. The global allowance is counted per UTC day across all users. The caps are
+  sized for Cloudflare Workers AI's free 10,000 neurons a day (shared with another demo on the same
+  account) from estimated token counts, not measured ones; they do not guarantee that the allowance lasts
+  the day. The nightly clean-up deletes anonymous users not used for 7 days and, through the foreign keys,
+  their rows in the app's tables; a second job, half an hour later, deletes the planner's rows in its own
+  `planner` schema whose user no longer exists (they have no foreign key). Google Gmail and Calendar stay
+  off there (demo inbox and calendar).
 - The planner's own Gmail/Calendar adapters are still mock (as in the hackathon). Real writes happen in the
   web app when you click **Run** on the dashboard.

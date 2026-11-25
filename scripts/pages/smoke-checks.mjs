@@ -33,3 +33,40 @@ export function dashboardChecks(value) {
     },
   ];
 }
+
+/**
+ * A planner that was idle needs a cold start, and the dashboard waits only
+ * LIFEOPS_BACKEND_DASHBOARD_TIMEOUT_MS (10 s) for it, so the first read after an idle period can
+ * report the planner offline with the reason "timeout" although the planner works: that read
+ * itself starts it. Only this reason is worth a second read. "off" (not set up or switched off),
+ * "rejected" (the token is missing or refused), "unreachable" and "failed" stay failures at once.
+ */
+export function plannerTimedOut(value) {
+  const planner = value?.planner;
+  return planner?.online === false && planner.reason === "timeout";
+}
+
+/** How long smoke-edge.mjs waits before it reads the dashboard again after a planner timeout. */
+export const PLANNER_RETRY_WAIT_MS = 5000;
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The fetchDashboard checks of smoke-edge.mjs --demo-user: [{ label, ok, detail }]. `fetchOnce`
+ * reads the dashboard once and resolves to smoke-edge's call result ({ ok, detail, value }). When
+ * the planner only timed out, the dashboard is read once more after `waitMs` and that read
+ * decides: a planner that times out twice fails the check.
+ */
+export async function dashboardSmokeChecks(fetchOnce, { waitMs = PLANNER_RETRY_WAIT_MS, sleep = pause, log = () => {} } = {}) {
+  let dash = await fetchOnce();
+  let retried = false;
+  if (dash.ok && plannerTimedOut(dash.value)) {
+    const said = typeof dash.value.planner.error === "string" ? ` (${dash.value.planner.error})` : "";
+    log(`the planner timed out${said}; a planner that was idle starts slowly, so the dashboard is read again in ${Math.round(waitMs / 1000)} s`);
+    await sleep(waitMs);
+    dash = await fetchOnce();
+    retried = true;
+  }
+  const checks = [{ label: "fetchDashboard", ok: dash.ok, detail: retried ? `${dash.detail}, second read` : dash.detail }];
+  return dash.ok ? [...checks, ...dashboardChecks(dash.value)] : checks;
+}

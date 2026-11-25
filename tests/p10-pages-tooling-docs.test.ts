@@ -1,6 +1,6 @@
 // The deployment docs quote what visitors and operators see. These checks tie the quotes that
 // live in this repository's code to the docs, so a wording change in one shows up in the other.
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AiNotConfiguredError } from "@/server/ai/llm.server";
 import { SERVER_FN_MESSAGES } from "@/lib/server-fn-errors";
@@ -75,10 +75,9 @@ function sourceText(dir = new URL("../src/", import.meta.url)): string {
 }
 
 /**
- * Sentences and badges the docs quote whose code comes with the dashboard, AI and error-wording
- * changes made alongside this one (src/lib/dashboard-view.ts, src/server/lifeops-backend.server.ts,
- * src/server/ai/llm.server.ts, src/lib/errors.ts). Before those changes are merged the check is
- * skipped; afterwards it fails when a quote and the code no longer agree.
+ * Sentences and badges the docs quote whose code lives in other modules (src/lib/dashboard-view.ts,
+ * src/server/lifeops-backend.server.ts, src/server/ai/llm.server.ts, src/lib/errors.ts). The check
+ * fails when a quote and the code no longer agree. (It was skipped until those modules were merged.)
  */
 const QUOTED_ELSEWHERE = [
   "Planner service unavailable — in-app assistant",
@@ -90,7 +89,6 @@ const QUOTED_ELSEWHERE = [
   "The AI assistant is not set up correctly on this site right now.",
   "Could not reach MONDAY. Check your connection and try again.",
 ];
-const merged = existsSync(new URL("../src/lib/dashboard-view.ts", import.meta.url));
 
 describe("quotes from the code of the other changes", () => {
   it("are in the docs", () => {
@@ -98,7 +96,7 @@ describe("quotes from the code of the other changes", () => {
     for (const quote of QUOTED_ELSEWHERE) expect(docs, quote).toContain(quote);
   });
 
-  it.skipIf(!merged)("match the code once it is merged", () => {
+  it("match the code", () => {
     const source = sourceText();
     for (const quote of QUOTED_ELSEWHERE) expect(source, quote).toContain(quote);
   });

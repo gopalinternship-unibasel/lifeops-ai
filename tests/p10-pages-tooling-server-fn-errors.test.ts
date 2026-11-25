@@ -51,9 +51,19 @@ describe("guardServerFnResponse with TanStack's client fetcher", () => {
     });
   });
 
-  it("turns the 500 for an unknown server function into the reload sentence", async () => {
+  it("turns h3's unhandled 500 into the 'failed' sentence, not the reload one", async () => {
+    // Both editions run serverFnStatusHandler, which answers an unknown function id with a 404,
+    // so an unhandled 500 from the server is a real failure (for example in a request
+    // middleware): telling the visitor that the app was updated would be wrong.
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    await expect(callWith(UNKNOWN_FN_500)).rejects.toThrow(SERVER_FN_MESSAGES.outdated);
+    await expect(callWith(UNKNOWN_FN_500)).rejects.toThrow(SERVER_FN_MESSAGES.failed);
+    await expect(callWith(UNKNOWN_FN_500)).rejects.not.toThrow(SERVER_FN_MESSAGES.outdated);
+  });
+
+  it("shows the reload sentence for the server's 404 to an unknown server function", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const notInThisBuild = () => unknownServerFnResponse(new Error(`Server function info not found for ${"0".repeat(64)}`))!;
+    await expect(callWith(notInThisBuild)).rejects.toThrow(SERVER_FN_MESSAGES.outdated);
   });
 
   it("turns the Supabase gateway's 546 and 504 into the timeout sentence", async () => {

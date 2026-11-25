@@ -4,12 +4,13 @@
  *
  * In the browser (guardServerFnResponse): TanStack Start's client (serverFnFetcher) returns any
  * JSON answer that lacks its `x-tss-serialized` header as the function's result, whatever the HTTP
- * status. An error in JSON, such as the Supabase gateway's 546 WORKER_LIMIT or 504, or TanStack's
- * own 500 for a server function the server does not have, therefore "succeeded": the page got an
- * object without the fields it expected, and "Plan it" for example cleared the user's text and
- * showed no error. The guard turns such answers into a plain-text error with a short sentence,
- * which serverFnFetcher throws as an Error, so the page's own error handling shows it and keeps
- * what the user typed.
+ * status. An error in JSON, such as the Supabase gateway's 546 WORKER_LIMIT or 504, or h3's 500
+ * `{ unhandled: true }`, therefore "succeeded": the page got an object without the fields it
+ * expected, and "Plan it" for example cleared the user's text and showed no error. The guard turns
+ * such answers into a plain-text error with a short sentence (messageForStatus), which
+ * serverFnFetcher throws as an Error, so the page's own error handling shows it and keeps what the
+ * user typed. A server without serverFnStatusHandler (a build from before it existed) also sends
+ * that 500 for a server function it does not have; servers with it answer with a 404 instead.
  *
  * On the server (serverFnStatusHandler): TanStack answers a call to a server function the build
  * does not have, and a payload it cannot read, with HTTP 500. Both are the caller's fault (an
@@ -66,11 +67,16 @@ function textResponse(status: number, message: string, statusText = ""): Respons
   });
 }
 
-/** The sentence for a failed answer that carries no message meant for the visitor. */
-export function messageForStatus(status: number, body?: unknown): string {
-  // h3's answer to an error thrown outside a server function's own handler. TanStack throws one
-  // for a function id the server does not have; servers with serverFnStatusHandler answer 404.
-  if (status === 500 && isRecord(body) && body.unhandled === true) return SERVER_FN_MESSAGES.outdated;
+/**
+ * The sentence for a failed answer that carries no message meant for the visitor.
+ *
+ * A 500 gets the "failed" sentence, also h3's JSON answer `{ unhandled: true }` to an error thrown
+ * outside a server function's own handler. That answer used to mean an unknown function id (an
+ * out-of-date page), but serverFnStatusHandler now answers an unknown id with a plain-text 404 and
+ * the reload sentence on both editions (the same server bundle), so on a current server it means
+ * a real failure, for example in a request middleware, which a reload does not fix.
+ */
+export function messageForStatus(status: number): string {
   if (status === 504 || status === 546) return SERVER_FN_MESSAGES.slow;
   if (status === 429) return SERVER_FN_MESSAGES.busy;
   if (status === 413 || status === 414) return SERVER_FN_MESSAGES.tooLarge;
@@ -117,7 +123,7 @@ export async function guardServerFnResponse(response: Response): Promise<Respons
 
   const detail = text.replace(/\s+/g, " ").trim().slice(0, 200);
   console.warn(`[lifeops] A server function answered HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
-  return textResponse(response.status, messageForStatus(response.status, body), response.statusText);
+  return textResponse(response.status, messageForStatus(response.status), response.statusText);
 }
 
 /* ------------------------------------------------------------------------------------------
