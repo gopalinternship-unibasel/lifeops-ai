@@ -13,12 +13,13 @@ from datetime import date, datetime, time, timedelta
 
 from app.schemas import PlannerAction, PlannerOutput, PlannerTask
 
-_EXAM = re.compile(r"\bexam(?:s|ination|inations)?\b")
-_ASSIGNMENT = re.compile(r"\bassignments?\b")
-_MEETING = re.compile(r"\bmeetings?\b")
+# Matched in the text as written, so read_date still sees the user's capitals ("May 12").
+_EXAM = re.compile(r"\bexam(?:s|ination|inations)?\b", re.IGNORECASE)
+_ASSIGNMENT = re.compile(r"\bassignments?\b", re.IGNORECASE)
+_MEETING = re.compile(r"\bmeetings?\b", re.IGNORECASE)
 # A date belongs to the keyword in the same part of the sentence ("exams next week, a meeting
 # tomorrow"): the text is split at punctuation and at joining words.
-_CLAUSE_BREAK = re.compile(r"[,;.!?\n]+|\b(?:and|but|then|also|plus)\b")
+_CLAUSE_BREAK = re.compile(r"[,;.!?\n]+|\b(?:and|but|then|also|plus)\b", re.IGNORECASE)
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _MONTH = (
@@ -47,21 +48,27 @@ _DAY_OF_NEXT_WEEK = re.compile(
     r"|next\s+week\s+(?:on\s+)?(?P<after>" + _WEEKDAY_NAMES + r"))\b"
 )
 # Other week words change which Friday is meant ("a week from Friday", "Friday after next",
-# "Friday in two weeks"), so a weekday next to them is not read. "this week" changes nothing.
-_WEEK_WORDS = re.compile(r"\b(?<!this )weeks?\b|\bafter next\b|\bfortnight\b")
+# "Friday in two weeks", "Friday after this week"), so a weekday next to them is not read.
+# "this week" alone changes nothing.
+_WEEK_WORDS = re.compile(
+    r"\b(?<!this )weeks?\b|\bafter next\b|\bfortnight\b|\b(?:after|following)\s+this\s+week\b"
+)
 # "this Tuesday", "Tuesday this week": said on a Tuesday, that is today.
 _THIS_BEFORE = re.compile(r"\bthis\s+$")
 _THIS_WEEK = re.compile(r"\bthis\s+week\b")
-# "may" is also the verb ("I may 2 ...", "exam 1 may be moved"). Without a year, "of" ("2nd of
-# May") or an ordinal after it ("May 2nd"), it is the month only after a word that introduces a
-# date, at the start of the clause, or when the date is followed by the end of the clause,
-# punctuation, a time or a word that goes with a date.
+# "may" is also the verb ("I may 2 ...", "exam 1 may be moved"). It is the month with a year,
+# "of" ("2nd of May"), an ordinal day ("May 2nd", "5th May"; not "the 5th may be ...") or a
+# capital M in the user's text ("exam May 12"). Otherwise it is the month only after a word that
+# introduces a date, at the start of the clause, or when the date is followed by the end of the
+# clause, punctuation, a time or a word that goes with a date.
 _MAY_BEFORE = re.compile(r"(?:^|\b(?:on|by|due|until|till|before|after|from))\s*$")
 _MAY_AFTER = re.compile(
     r"\s*(?:$|[^\w\s]|(?:at|by|before|until|till|in|on|morning|afternoon|evening|noon)\b"
     r"|\d{1,2}(?::\d{2}|\s*[ap]m\b))"
 )
-_ORDINAL_END = re.compile(r"\d(?:st|nd|rd|th)$")
+# The words that most often follow the verb: "<number> may be / not / have / need / also / well".
+_MAY_VERB_AFTER = re.compile(r"\s+(?:be|not|have|need|also|well)\b")
+_ORDINAL = re.compile(r"\d(?:st|nd|rd|th)\b")
 
 _DRAFT_BODY = (
     "Hi,\n\nI hope you are well. I have a scheduling conflict, so I wanted to ask whether we could "
@@ -87,11 +94,26 @@ def _calendar_date(year: str | None, month: str, day: str, today: date) -> date 
     return found
 
 
-def _may_is_the_month(match: re.Match, text: str) -> bool:
-    """Whether a date written with "may" means the month rather than the verb (see _MAY_BEFORE)."""
+def _as_written(written: str, lowered: str) -> str:
+    """The text as the user wrote it, where its positions match the lower-cased text."""
+    # Lower-casing a few non-English letters changes the length; then only the lower case is used.
+    return written if len(written) == len(lowered) else lowered
+
+
+def _is_may(match: re.Match) -> bool:
+    return (match.group("dm_month") or match.group("md_month")) == "may"
+
+
+def _may_is_the_month(match: re.Match, text: str, written: str) -> bool:
+    """Whether a date written with "may" means the month rather than the verb (see _MAY_BEFORE).
+
+    `text` is the lower-cased text the match was found in, `written` the same text as written.
+    """
     if match.group("dm_year") or match.group("md_year") or " of " in match.group(0):
         return True
-    if match.group("md_month") and _ORDINAL_END.search(match.group(0)):
+    month = "dm_month" if match.group("dm_month") else "md_month"
+    verb_next = month == "dm_month" and _MAY_VERB_AFTER.match(text, match.end())
+    if not verb_next and (written[match.start(month):match.end(month)] == "May" or _ORDINAL.search(match.group(0))):
         return True
     return bool(_MAY_BEFORE.search(text, 0, match.start()) or _MAY_AFTER.match(text, match.end()))
 
@@ -101,16 +123,24 @@ def read_date(text: str, today: date) -> date | None:
 
     A weekday is its next occurrence, and "Friday next week" is the Friday of the next
     Monday-to-Sunday week. "next Friday" is not exact: said on a Tuesday, some mean the Friday
-    three days ahead and some the one ten days ahead, so it is skipped (a later exact date in the
-    text still counts) and the user is asked to confirm it. So is a weekday next to other week
-    words ("Friday after next"), which used to be read as this week's day, and a bare weekday that
-    is today ("Tuesday" said on a Tuesday can mean today or a week from now; "this Tuesday" is
-    today). "may" counts as the month only where the words around it mark a date.
+    three days ahead and some the one ten days ahead, so it is skipped and the user is asked to
+    confirm it. So is a weekday next to other week words ("Friday after next"), which used to be
+    read as this week's day, and a bare weekday that is today ("Tuesday" said on a Tuesday can
+    mean today or a week from now; "this Tuesday" is today). After such a day only a calendar or
+    ISO date later in the text still counts ("next Friday, 4 Dec"): another day word is an
+    alternative ("Tuesday or Wednesday"), not the answer. "may" counts as the month only where it
+    is written or surrounded as one; give the text as written, so its capitals can tell.
     """
+    written = text
     text = text.lower()
+    written = _as_written(written, text)
     day_of_next_week = _DAY_OF_NEXT_WEEK.search(text)
     week_words = _WEEK_WORDS.search(text)
+    unclear_day = False
     for match in _DATE.finditer(text):
+        day_word = match.group("day_after") or match.group("tomorrow") or match.group("today") or match.group("weekday")
+        if unclear_day and day_word:
+            continue
         if match.group("day_after"):
             return today + timedelta(days=2)
         if match.group("tomorrow"):
@@ -120,14 +150,17 @@ def read_date(text: str, today: date) -> date | None:
         if match.group("weekday"):
             weekday = match.group("weekday")
             if match.group("next"):
+                unclear_day = True
                 continue
             if day_of_next_week and weekday in (day_of_next_week.group("before"), day_of_next_week.group("after")):
                 monday_of_next_week = today + timedelta(days=7 - today.weekday())
                 return monday_of_next_week + timedelta(days=_WEEKDAYS.index(weekday))
             if week_words:
+                unclear_day = True
                 continue
             ahead = (_WEEKDAYS.index(weekday) - today.weekday()) % 7
             if ahead == 0 and not (_THIS_BEFORE.search(text, 0, match.start()) or _THIS_WEEK.search(text)):
+                unclear_day = True
                 continue
             return today + timedelta(days=ahead)
         if match.group("iso"):
@@ -135,7 +168,7 @@ def read_date(text: str, today: date) -> date | None:
                 return date.fromisoformat(match.group("iso"))
             except ValueError:
                 continue
-        if (match.group("dm_month") or match.group("md_month")) == "may" and not _may_is_the_month(match, text):
+        if _is_may(match) and not _may_is_the_month(match, text, written):
             continue
         if match.group("dm_month"):
             found = _calendar_date(match.group("dm_year"), match.group("dm_month"), match.group("dm_day"), today)
@@ -159,7 +192,20 @@ def _day_label(day: date) -> str:
     return f"{day:%A} {day.day} {day:%B}"
 
 
+def _skipped_may(clause: str, written: str) -> tuple[str, int] | None:
+    """(the words as written, the day) of a date with "may" that read_date took as the verb."""
+    for match in _DATE.finditer(clause):
+        day = match.group("dm_day") or match.group("md_day")
+        if _is_may(match) and 1 <= int(day) <= 31:
+            return written[match.start():match.end()], int(day)
+    return None
+
+
 def _no_date_hint(clause: str, what: str, today: date) -> str:
+    """Why the date of `what` is not set; read_date found no date in `clause` (as written)."""
+    written = clause
+    clause = clause.lower()
+    written = _as_written(written, clause)
     if "next week" in clause:
         return f"Confirm the date of {what}: your text says next week."
     next_weekday = _NEXT_WEEKDAY.search(clause)
@@ -173,6 +219,11 @@ def _no_date_hint(clause: str, what: str, today: date) -> str:
     if not _WEEK_WORDS.search(clause) and re.search(rf"\b{todays_name}\b", clause):
         day = todays_name.capitalize()
         return f"Confirm the date of {what}: your text says {day}, which can mean today or next {day}."
+    may = _skipped_may(clause, written)
+    if may:
+        # Not "no date was found": the text names one, but "may" can also be the verb.
+        words, day_of_may = may
+        return f'Confirm the date of {what}: your text says "{words}"; check whether it means {day_of_may} May.'
     if _ANY_WEEKDAY.search(clause):
         return f"Confirm the date of {what}: the day in your text could not be read exactly."
     return f"Confirm the date of {what}: no date was found in your text."
@@ -187,15 +238,15 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
     now = now or datetime.now()
     today = now.date()
     tomorrow = today + timedelta(days=1)
-    lower = user_input.lower()
 
     tasks: list[PlannerTask] = []
     actions: list[PlannerAction] = []
 
-    exam = _clause_with(_EXAM, lower)
+    # The clauses keep the user's capitals: read_date tells "May 12" (the month) from "may".
+    exam = _clause_with(_EXAM, user_input)
     if exam:
         word, clause = exam
-        the = "the exams" if word.endswith("s") else "the exam"
+        the = "the exams" if word.lower().endswith("s") else "the exam"
         exam_day = read_date(clause, today)
         description = "Review the lecture notes, solve practice questions and find the weak topics."
         if exam_day:
@@ -228,10 +279,10 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
                 )
             )
 
-    assignment = _clause_with(_ASSIGNMENT, lower)
+    assignment = _clause_with(_ASSIGNMENT, user_input)
     if assignment:
         word, clause = assignment
-        the = "the assignments" if word.endswith("s") else "the assignment"
+        the = "the assignments" if word.lower().endswith("s") else "the assignment"
         due = read_date(clause, today)
         description = "Break down the requirements, do the work and check it before you hand it in."
         description += f" Due {_day_label(due)}." if due else " " + _no_date_hint(clause, the, today)
@@ -258,7 +309,7 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
                 )
             )
 
-    meeting = _clause_with(_MEETING, lower)
+    meeting = _clause_with(_MEETING, user_input)
     if meeting:
         _, clause = meeting
         day = read_date(clause, today)
@@ -305,7 +356,8 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
                 PlannerAction(
                     action_type="reminder",
                     title=f"Decide about {label}",
-                    description="Check whether the meeting should be rescheduled.",
+                    description="Check whether the meeting should be rescheduled."
+                    + ("" if day else " The meeting's date was not read, so this time is only a placeholder."),
                     start_time=remind_at,
                     end_time=None,
                     risk_level="low",

@@ -11,6 +11,7 @@
 
 import json
 import logging
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -152,6 +153,40 @@ def test_a_duplicate_that_finishes_second_returns_the_first_plan(client, fake_ll
     # Concurrent duplicates each call the model; the discarded second plan is logged.
     assert len(fake_llm.calls) == 2
     assert "same idempotency key ran at the same time" in caplog.text
+
+
+def test_a_discarded_duplicate_names_its_plan_run_and_the_actions_it_ran(client, fake_llm, monkeypatch, caplog):  # noqa: F811
+    # The discarded plan's rows are rolled back, and the database may give their ids to later
+    # rows; the warning did not name them, so the executor's log lines about them were ambiguous.
+    answer = json.loads(_llm_plan())
+    for action in answer["actions"]:
+        action["requires_approval"] = False  # low risk and no approval: run in autonomous mode
+    fake_llm.answer = json.dumps(answer)
+    body = {"user_input": TEXT, "idempotency_key": "plan-request-43", "autonomous_mode": True}
+    first = client.post("/api/plan", json=body, headers=ALICE).json()
+
+    real_stored, real_execute = plan_route._stored_answer, plan_route.execute_action
+    checks, ran = [], []
+
+    def checked_too_early(*args):
+        checks.append(1)
+        return None if len(checks) == 1 else real_stored(*args)
+
+    def execute(action):
+        ran.append(action.id)
+        return real_execute(action)
+
+    monkeypatch.setattr(plan_route, "_stored_answer", checked_too_early)
+    monkeypatch.setattr(plan_route, "execute_action", execute)
+    with caplog.at_level(logging.WARNING, logger="app.routes.plan"):
+        second = client.post("/api/plan", json=body, headers=ALICE)
+    assert second.json() == first
+    assert len(ran) == 2 and None not in ran
+    warning = next(record.getMessage() for record in caplog.records if "same idempotency key" in record.getMessage())
+    assert f"adapters run for discarded actions {ran}" in warning
+    assert f"the first (plan run {first['plan_run_id']}) returned" in warning
+    discarded_run = re.search(r"the second plan \(plan run (\d+),", warning)
+    assert discarded_run and int(discarded_run.group(1)) != first["plan_run_id"]
 
 
 def test_stored_answers_older_than_two_days_are_deleted(client):

@@ -226,6 +226,72 @@ def test_a_bare_weekday_that_is_today_is_not_taken_as_a_firm_date():
     assert "the day in your text could not be read exactly" in unread.tasks[0].description
 
 
+def test_a_may_date_left_out_is_named_and_capitals_or_an_ordinal_mark_the_month():
+    # The verb guard dropped real May dates and then said "no date was found in your text",
+    # although the text said "may 12"; "May" with a capital and "5th may" were not read either.
+    today = date(2026, 11, 24)
+    assert read_date("exam may 12 for chemistry", today) is None  # the guard stays for lower case
+    plan = build_demo_plan("exam may 12 for chemistry", NOW)
+    task = plan.tasks[0]
+    assert task.deadline is None
+    assert 'Confirm the date of the exam: your text says "may 12"; check whether it means 12 May.' in task.description
+    assert "no date was found" not in task.description
+    assignments = build_demo_plan("I may 2 assignments", NOW)
+    assert 'your text says "may 2"; check whether it means 2 May.' in assignments.tasks[0].description
+
+    # Written with a capital M, it is the month (the planner reads the text as the user wrote it).
+    capital = build_demo_plan("Exam May 12 for chemistry", NOW)
+    assert capital.tasks[0].deadline == datetime(2027, 5, 12, 8, 0)
+    for text, expected in (
+        ("exam May 12 for chemistry", date(2027, 5, 12)),
+        ("chemistry exam May 5 room 201", date(2027, 5, 5)),
+        ("exam scheduled May 5 hall b", date(2027, 5, 5)),
+    ):
+        assert read_date(text, today) == expected, text
+    # An ordinal day before "may" counts like one after it ("may 5th"), unless the verb's usual
+    # next word follows.
+    assert read_date("exam 5th may is hard", today) == date(2027, 5, 5)
+    assert read_date("the 5th may be the day", today) is None
+    assert read_date("exam 1 May be moved", today) is None
+    assert read_date("EXAM MAY 12 FOR CHEMISTRY", today) is None  # all capitals tell nothing
+
+
+def test_after_an_unclear_day_another_day_word_is_not_taken_as_the_date():
+    # "exam tuesday or wednesday" said on a Tuesday skipped Tuesday and gave Wednesday as a firm
+    # deadline, though the user named two possible days.
+    today = date(2026, 11, 24)  # a Tuesday
+    for text in ("exam tuesday or wednesday", "exam tuesday or tomorrow", "exam next friday or saturday"):
+        assert read_date(text, today) is None, text
+    # A calendar or ISO date after it still counts.
+    assert read_date("exam tuesday 1 dec", today) == date(2026, 12, 1)
+    assert read_date("exam tuesday 2026-12-01", today) == date(2026, 12, 1)
+    assert read_date("exam next friday 4 dec", today) == date(2026, 12, 4)
+
+    plan = build_demo_plan("Exam Tuesday or Wednesday", NOW)
+    assert plan.tasks[0].deadline is None
+    assert "your text says Tuesday, which can mean today or next Tuesday" in plan.tasks[0].description
+
+
+def test_a_weekday_after_this_week_is_not_this_weeks():
+    # "this week" anywhere in the words made a bare weekday today, also in "after this week".
+    today = date(2026, 11, 24)  # a Tuesday
+    for text in ("meeting tuesday after this week", "tuesday following this week", "friday after this week"):
+        assert read_date(text, today) is None, text
+    assert read_date("tuesday is the meeting this week", today) == today
+    assert read_date("this week on friday", today) == date(2026, 11, 27)
+
+
+def test_the_reminder_for_an_undated_meeting_says_its_time_is_a_placeholder():
+    # "A meeting on Tuesday" said on a Tuesday gets a reminder for tomorrow 09:00, too late if the
+    # meeting is today; the reminder now says that its time is only a placeholder.
+    reminder = next(action for action in build_demo_plan("A meeting on Tuesday", NOW).actions if action.action_type == "reminder")
+    assert reminder.start_time == datetime(2026, 11, 25, 9, 0)
+    assert "The meeting's date was not read, so this time is only a placeholder." in reminder.description
+    dated = build_demo_plan("a meeting on friday", NOW)
+    dated_reminder = next(action for action in dated.actions if action.action_type == "reminder")
+    assert "placeholder" not in dated_reminder.description
+
+
 def test_keyword_proposals_need_approval_and_are_never_run_automatically(client):
     # Its times are guesses: even with autonomous mode on, nothing becomes a calendar event or a
     # draft without the user's approval.
