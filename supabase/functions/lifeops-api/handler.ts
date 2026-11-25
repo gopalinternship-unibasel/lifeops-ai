@@ -29,6 +29,41 @@ export interface HandlerOptions {
   log?: (message: string, error?: unknown) => void;
 }
 
+/**
+ * Function secrets the server code needs that settings.env does not hold (see PAGES_DEPLOYMENT.md,
+ * "Settings and secrets of the function"). scripts/pages/secrets.mjs checks the same three names
+ * before a deploy.
+ */
+export const REQUIRED_SECRETS = ["LLM_BASE_URL", "LLM_API_KEY", "LIFEOPS_BACKEND_TOKEN"] as const;
+
+/** What visitors get while a secret is missing; for the function's start-up log. */
+const MISSING_SECRET_EFFECT: Record<(typeof REQUIRED_SECRETS)[number], string> = {
+  LLM_BASE_URL: "AI requests are refused with a note that the assistant is not set up",
+  LLM_API_KEY: "the AI provider rejects every request",
+  LIFEOPS_BACKEND_TOKEN: 'the planner refuses the calls, so "Plan it" uses the in-app assistant',
+};
+
+/** The required secrets that are not set (empty or blank counts as not set). */
+export function missingSecrets(get: (name: string) => string | undefined): string[] {
+  return REQUIRED_SECRETS.filter((name) => !get(name)?.trim());
+}
+
+/** One log line naming the missing secrets and what each one breaks, or null when all are set. */
+export function missingSecretsWarning(missing: readonly string[]): string | null {
+  if (!missing.length) return null;
+  const effects = missing
+    .map((name) => MISSING_SECRET_EFFECT[name as keyof typeof MISSING_SECRET_EFFECT])
+    .filter(Boolean)
+    .join("; ");
+  return `lifeops-api: function secrets not set: ${missing.join(", ")}. Until they are set, ${effects}. See PAGES_DEPLOYMENT.md.`;
+}
+
+/** The answer to every call when the function could not start; the cause is in the log only. */
+export const STARTUP_FAILED_MESSAGE = "The server is not available right now. Please try again in a moment.";
+
+/** The answer when the server code failed in a way it did not answer itself (logged). */
+export const REQUEST_FAILED_MESSAGE = "Something went wrong on the server. Please try again.";
+
 /** Request headers the browser sends: the app's bearer token plus TanStack's own headers. */
 export const ALLOW_HEADERS = "authorization, apikey, x-client-info, content-type, accept, x-tsr-serverfn";
 /** Response headers the client must be able to read across origins (serverFnFetcher checks them). */
@@ -126,7 +161,10 @@ export function createHandler(opts: HandlerOptions): (request: Request) => Promi
         response = error;
       } else {
         log("lifeops-api: request failed", error);
-        response = new Response("Internal Server Error", { status: 500 });
+        response = new Response(REQUEST_FAILED_MESSAGE, {
+          status: 500,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
       }
     }
     return withCors(response, origin);

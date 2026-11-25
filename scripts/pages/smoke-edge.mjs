@@ -6,11 +6,14 @@
  *   node scripts/pages/smoke-edge.mjs --url https://<ref>.supabase.co/functions/v1/lifeops-api --demo-user
  *
  * --demo-user signs in a new anonymous demo user (needs SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in
- * the environment, both public values) and calls real server functions with its token. Anonymous
- * users are removed by the project's nightly clean-up job.
+ * the environment, both public values) and calls real server functions with its token. It fails
+ * when the dashboard shows the planner offline or no AI provider set up on the function (a
+ * missing secret), without making an AI call. Anonymous users are removed by the project's
+ * nightly clean-up job.
  * --chat also runs one chat turn (needs the AI settings on the function; uses the AI allowance).
  */
 import { createHash } from "node:crypto";
+import { dashboardChecks } from "./smoke-checks.mjs";
 
 const args = process.argv.slice(2);
 const arg = (name) => {
@@ -160,7 +163,8 @@ if (demoUser) {
     const status = await call("google.functions.ts", "getGoogleConnectionStatus", { token, method: "GET" });
     check("getGoogleConnectionStatus (GET, secret key on the server)", status.ok, `${status.detail} ${JSON.stringify(status.value ?? "").slice(0, 100)}`);
     const dash = await call("dashboard.functions.ts", "fetchDashboard", { token, data: { timeZone: "Europe/Zurich" } });
-    check("fetchDashboard", dash.ok, `${dash.detail} planner: ${JSON.stringify(dash.value?.backend ?? dash.value?.planner ?? "").slice(0, 120)}`);
+    check("fetchDashboard", dash.ok, dash.detail);
+    if (dash.ok) for (const item of dashboardChecks(dash.value)) check(item.label, item.ok, item.detail);
     if (chat && typeof sessionId === "string") {
       const started = Date.now();
       const turn = await call("chat.functions.ts", "processChat", {

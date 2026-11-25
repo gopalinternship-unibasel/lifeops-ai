@@ -711,9 +711,9 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   service starts, and it never changes a table that exists. Its tests also pass against PostgreSQL
   (`LIFEOPS_TEST_DATABASE_URL`, and `LIFEOPS_TEST_DATABASE_SCHEMA` for a schema other than the role's
   own; the database is emptied by the tests, so use a throw-away one).
-- **Hosted deployment (Vercel, Supabase, a hosted model)** is described in `VERCEL_DEPLOYMENT.md` and was
-  checked only by builds, unit tests and throw-away databases; it has not been deployed yet. What
-  differs from this PC and is off here: the demo limits `AI_CHAT_PER_HOUR`, `AI_PLANS_PER_DAY`,
+- **Hosted deployment (Vercel, Supabase, a hosted model)** is described in `VERCEL_DEPLOYMENT.md` (live
+  since 17 Nov 2026; section 0 there says what was checked) and `PAGES_DEPLOYMENT.md`. What differs from
+  this PC and is off here: the demo limits `AI_CHAT_PER_HOUR`, `AI_PLANS_PER_DAY`,
   `AI_PLANNER_PER_HOUR` and `AI_CALLS_PER_DAY` (unset = unlimited, the default here), the notice on the
   sign-in page (`VITE_HOSTED_DEMO=true`), the Vercel build (`NITRO_PRESET=vercel`; plain
   `npm run build` is unchanged and writes `dist\`), and the nightly clean-up of anonymous users older
@@ -721,12 +721,14 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   and not a migration: the local database image has `pg_cron` too, so as a migration it would delete
   local anonymous users as well. The grants migration (`20261114120000_data_api_grants.sql`) is one of
   the 13 migrations and runs here too, where it repeats grants that already exist.
-  Limits of the hosted demo: the caps count stored requests, so a request that is cut off in the middle
-  still counts, and the planner's `Plan it` that falls back to the in-app assistant counts as a planner
-  request and a chat message; if the chat or daily cap refuses that fallback turn, the planner request
-  stays stored as failed with the limit sentence. The caps count first and insert afterwards without a
-  lock, so requests sent at the same moment can pass a cap by a few. The global allowance is counted per
-  UTC day across all users with three count queries. The caps are sized for Cloudflare Workers AI's free
+  Limits of the hosted demo: each allowed request that calls the model records one use in a ledger in
+  the database that only the server writes (`public.ai_usage`), in the same database call that checks
+  the cap, so requests sent at the same moment cannot pass a cap together, and a request that is cut off
+  in the middle still counts. Each `Plan it` records one planner use, also when it falls back to the
+  in-app assistant; that fallback chat turn is checked against the chat and daily caps but records no
+  use of its own, and if one of them refuses it, the planner request stays stored as failed with the
+  limit sentence. The global allowance is counted per UTC day
+  across all users. The caps are sized for Cloudflare Workers AI's free
   10,000 neurons a day (shared with another demo on the same account) from estimated token counts, not
   measured ones; they do not guarantee that the allowance lasts the day. The nightly clean-up deletes
   old anonymous users and, through the foreign keys, their rows in the app's tables; the planner's rows

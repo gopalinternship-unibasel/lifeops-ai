@@ -3,13 +3,21 @@ name: Pages
 # Builds the GitHub Pages edition of LifeOps (https://gopalinternship-unibasel.github.io/lifeops-ai/)
 # and publishes it with the GitHub Pages actions. It runs on demand only: `npm run release:pages`
 # deploys the Supabase Edge Function "lifeops-api" (the server side) and then starts this workflow
-# for the same commit, so both halves always come from one commit (see PAGES_DEPLOYMENT.md).
+# on main with the input `sha` set to the commit it deployed, so both halves come from one commit
+# even when main moves on in the meantime (see PAGES_DEPLOYMENT.md). Started by hand without `sha`,
+# it builds the head of main. The commit must be on main: the github-pages environment publishes
+# from main only.
 # The build reads the public Supabase values from the repository variables SUPABASE_URL and
 # SUPABASE_PUBLISHABLE_KEY (also used by smoke.yml); PAGES_SERVER_FN_ORIGIN may override the
 # function's URL.
 
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to build: a full 40-character SHA on main (empty: the head of the branch)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -34,7 +42,29 @@ jobs:
             exit 1
           fi
 
+      - name: Check the commit input
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          if [ -n "$SHA" ] && ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::The input sha must be a full 40-character commit SHA in lower case."
+            exit 1
+          fi
+
+      # The released commit, not whatever the branch points to when the run starts. Full history,
+      # so the next step can check that the commit is on main.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: The commit is on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Commit $(git rev-parse --short HEAD) is not on main. The Pages site is published from main only; merge first."
+            exit 1
+          fi
+          echo "Building $(git rev-parse HEAD)."
 
       - uses: actions/setup-node@v7
         with:
