@@ -52,6 +52,29 @@ def test_missing_settings_fail_the_actions_not_the_request(client, fake_llm, zap
     assert actions["Call the bank"]["provider"] == "lifeops"
 
 
+def test_failures_in_an_autonomous_plan_are_logged_with_the_action_id(client, fake_llm, zapier_without_settings, use_settings, caplog):  # noqa: F811
+    # The plan route ran the executor before the action had an id, so the warning read
+    # "Zapier execution of action None failed" and could not be matched to the stored action.
+    fake_llm.answer = json.dumps(PLAN)
+    with caplog.at_level(logging.WARNING, logger="app.services.action_executor"):
+        response = client.post("/api/plan", json={"user_input": "meeting tomorrow at 10", "autonomous_mode": True}, headers=ALICE)
+    assert response.status_code == 200, response.text
+    ids = {action["title"]: action["id"] for action in client.get("/api/actions", headers=ALICE).json()}
+    messages = [record.getMessage() for record in caplog.records if record.name == "app.services.action_executor"]
+    assert "action None" not in " ".join(messages)
+    for title in ("Meeting prep", "Draft"):
+        assert any(f"Zapier execution of action {ids[title]} failed" in message for message in messages), messages
+
+    # The same for the built-in Google adapters that are not wired up.
+    caplog.clear()
+    use_settings(execution_backend="mock", google_integration_mode="real")
+    with caplog.at_level(logging.WARNING, logger="app.services.action_executor"):
+        client.post("/api/plan", json={"user_input": "meeting tomorrow at 10", "autonomous_mode": True}, headers=ALICE)
+    messages = [record.getMessage() for record in caplog.records if record.name == "app.services.action_executor"]
+    assert len(messages) == 2 and "action None" not in " ".join(messages), messages
+    assert all(message.startswith("Built-in adapter for action ") for message in messages)
+
+
 def test_execute_safe_counts_only_the_actions_that_ran(client, fake_llm, zapier_without_settings):  # noqa: F811
     # Since failures became a failed result instead of a 500, execute-safe reached them, and it
     # counted every stored result as executed: "executed_count 3" with two actions stored as failed.

@@ -150,6 +150,9 @@ def create_lifeops_plan(
 
         # The same rule as /api/actions/execute-safe: low risk AND no human decision needed.
         if effective_autonomous_mode and can_auto_execute(action) and not action.requires_approval:
+            # Give the action its id before the executor runs, so its log lines name the stored
+            # action (they said "action None"); the row is still committed below with the rest.
+            session.flush()
             apply_execution_result(action, execute_action(action))
             # Counted only when it ran: an action whose executor failed is stored as failed.
             if action.status == ActionStatus.executed:

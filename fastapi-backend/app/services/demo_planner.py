@@ -49,6 +49,19 @@ _DAY_OF_NEXT_WEEK = re.compile(
 # Other week words change which Friday is meant ("a week from Friday", "Friday after next",
 # "Friday in two weeks"), so a weekday next to them is not read. "this week" changes nothing.
 _WEEK_WORDS = re.compile(r"\b(?<!this )weeks?\b|\bafter next\b|\bfortnight\b")
+# "this Tuesday", "Tuesday this week": said on a Tuesday, that is today.
+_THIS_BEFORE = re.compile(r"\bthis\s+$")
+_THIS_WEEK = re.compile(r"\bthis\s+week\b")
+# "may" is also the verb ("I may 2 ...", "exam 1 may be moved"). Without a year, "of" ("2nd of
+# May") or an ordinal after it ("May 2nd"), it is the month only after a word that introduces a
+# date, at the start of the clause, or when the date is followed by the end of the clause,
+# punctuation, a time or a word that goes with a date.
+_MAY_BEFORE = re.compile(r"(?:^|\b(?:on|by|due|until|till|before|after|from))\s*$")
+_MAY_AFTER = re.compile(
+    r"\s*(?:$|[^\w\s]|(?:at|by|before|until|till|in|on|morning|afternoon|evening|noon)\b"
+    r"|\d{1,2}(?::\d{2}|\s*[ap]m\b))"
+)
+_ORDINAL_END = re.compile(r"\d(?:st|nd|rd|th)$")
 
 _DRAFT_BODY = (
     "Hi,\n\nI hope you are well. I have a scheduling conflict, so I wanted to ask whether we could "
@@ -74,14 +87,25 @@ def _calendar_date(year: str | None, month: str, day: str, today: date) -> date 
     return found
 
 
+def _may_is_the_month(match: re.Match, text: str) -> bool:
+    """Whether a date written with "may" means the month rather than the verb (see _MAY_BEFORE)."""
+    if match.group("dm_year") or match.group("md_year") or " of " in match.group(0):
+        return True
+    if match.group("md_month") and _ORDINAL_END.search(match.group(0)):
+        return True
+    return bool(_MAY_BEFORE.search(text, 0, match.start()) or _MAY_AFTER.match(text, match.end()))
+
+
 def read_date(text: str, today: date) -> date | None:
     """The first date the text names exactly, or None ("next week" is not an exact date).
 
-    A weekday is its next occurrence, today included, and "Friday next week" is the Friday of the
-    next Monday-to-Sunday week. "next Friday" is not exact: said on a Tuesday, some mean the Friday
+    A weekday is its next occurrence, and "Friday next week" is the Friday of the next
+    Monday-to-Sunday week. "next Friday" is not exact: said on a Tuesday, some mean the Friday
     three days ahead and some the one ten days ahead, so it is skipped (a later exact date in the
     text still counts) and the user is asked to confirm it. So is a weekday next to other week
-    words ("Friday after next"), which used to be read as this week's day.
+    words ("Friday after next"), which used to be read as this week's day, and a bare weekday that
+    is today ("Tuesday" said on a Tuesday can mean today or a week from now; "this Tuesday" is
+    today). "may" counts as the month only where the words around it mark a date.
     """
     text = text.lower()
     day_of_next_week = _DAY_OF_NEXT_WEEK.search(text)
@@ -103,12 +127,16 @@ def read_date(text: str, today: date) -> date | None:
             if week_words:
                 continue
             ahead = (_WEEKDAYS.index(weekday) - today.weekday()) % 7
+            if ahead == 0 and not (_THIS_BEFORE.search(text, 0, match.start()) or _THIS_WEEK.search(text)):
+                continue
             return today + timedelta(days=ahead)
         if match.group("iso"):
             try:
                 return date.fromisoformat(match.group("iso"))
             except ValueError:
                 continue
+        if (match.group("dm_month") or match.group("md_month")) == "may" and not _may_is_the_month(match, text):
+            continue
         if match.group("dm_month"):
             found = _calendar_date(match.group("dm_year"), match.group("dm_month"), match.group("dm_day"), today)
         else:
@@ -131,7 +159,7 @@ def _day_label(day: date) -> str:
     return f"{day:%A} {day.day} {day:%B}"
 
 
-def _no_date_hint(clause: str, what: str) -> str:
+def _no_date_hint(clause: str, what: str, today: date) -> str:
     if "next week" in clause:
         return f"Confirm the date of {what}: your text says next week."
     next_weekday = _NEXT_WEEKDAY.search(clause)
@@ -141,6 +169,10 @@ def _no_date_hint(clause: str, what: str) -> str:
             f"Confirm the date of {what}: your text says next {day}, "
             f"which can mean this coming {day} or the one after."
         )
+    todays_name = _WEEKDAYS[today.weekday()]
+    if not _WEEK_WORDS.search(clause) and re.search(rf"\b{todays_name}\b", clause):
+        day = todays_name.capitalize()
+        return f"Confirm the date of {what}: your text says {day}, which can mean today or next {day}."
     if _ANY_WEEKDAY.search(clause):
         return f"Confirm the date of {what}: the day in your text could not be read exactly."
     return f"Confirm the date of {what}: no date was found in your text."
@@ -169,13 +201,15 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
         if exam_day:
             description += f" {the.capitalize()}: {_day_label(exam_day)}."
         else:
-            description += " " + _no_date_hint(clause, the)
+            description += " " + _no_date_hint(clause, the, today)
+        # Ready by the morning of the exam day; once that morning has passed (an exam today), no
+        # deadline rather than one that is already over, as for the meeting below.
+        ready_by = datetime.combine(exam_day, time(8, 0)) if exam_day else None
         tasks.append(
             PlannerTask(
                 title=f"Prepare for {the}",
                 description=description,
-                # Ready by the morning of the exam day.
-                deadline=datetime.combine(exam_day, time(8, 0)) if exam_day else None,
+                deadline=ready_by if ready_by and ready_by > now else None,
                 estimated_minutes=360,
                 priority=5,
             )
@@ -200,7 +234,7 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
         the = "the assignments" if word.endswith("s") else "the assignment"
         due = read_date(clause, today)
         description = "Break down the requirements, do the work and check it before you hand it in."
-        description += f" Due {_day_label(due)}." if due else " " + _no_date_hint(clause, the)
+        description += f" Due {_day_label(due)}." if due else " " + _no_date_hint(clause, the, today)
         tasks.append(
             PlannerTask(
                 title=f"Finish {the}",
@@ -241,7 +275,7 @@ def build_demo_plan(user_input: str, now: datetime | None = None) -> PlannerOutp
             PlannerTask(
                 title=f"Decide whether to reschedule {label}",
                 description="Check whether the meeting clashes with your other plans and ask to move it if needed."
-                + ("" if day else " " + _no_date_hint(clause, "the meeting")),
+                + ("" if day else " " + _no_date_hint(clause, "the meeting", today)),
                 deadline=decide_by if decide_by and decide_by > now else None,
                 estimated_minutes=15,
                 priority=3,
