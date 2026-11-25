@@ -270,8 +270,9 @@ export const runChaosPlan = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     const timeZone = normalizeTimeZone(data.timeZone);
 
-    // One "Plan it" at a time, and one use of the demo's AI allowance per press, recorded before
-    // the request row is stored (see startPlanRequest), whichever of the two answers it.
+    // One "Plan it" at a time, and one use of the demo's AI allowance per press, whichever of the
+    // two answers it. The use is recorded once this request's row holds the one running slot, and
+    // a refused request's row is removed again (see startPlanRequest).
     const plannerOn = backendBaseUrl() !== null;
     const row = await startPlanRequest(supabase, userId, data.input, { windowMs: maxPlanRequestMs() });
 

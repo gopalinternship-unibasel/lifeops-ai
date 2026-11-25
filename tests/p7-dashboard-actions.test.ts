@@ -13,6 +13,10 @@
  *    planner's block), and a Gmail draft whose row and planner record both failed was created
  *    again by the next Run;
  *  - 75: two Runs at the same moment both passed the lookups and wrote twice.
+ * Review of round 2:
+ *  - 69: a block or draft was reused for its reference alone, so after a reset of the planner's
+ *    database a new action with an old action's id never got its own;
+ *  - 75: a Run during another Run's Gmail call reported the draft as saved (with the row's id).
  * The fake client below applies the database's unique keys: (user_id, seed_key) on
  * calendar_events, and the planner-reference index on email_drafts (migration 20261125110000).
  */
@@ -48,6 +52,8 @@ const google = vi.hoisted(() => ({
   insertError: null as string | null,
   /** When set, creating a Gmail draft fails with this message. */
   draftError: null as string | null,
+  /** When set, creating a Gmail draft waits for this promise (a Gmail call still under way). */
+  draftGate: null as Promise<void> | null,
 }));
 
 vi.mock("@/server/google/calendar.server", () => ({
@@ -63,6 +69,7 @@ vi.mock("@/server/google/calendar.server", () => ({
 
 vi.mock("@/server/google/gmail.server", () => ({
   createDraft: async (_userId: string, draft: Record<string, unknown>) => {
+    if (google.draftGate) await google.draftGate;
     if (google.draftError) throw new Error(google.draftError);
     google.drafts.push(draft);
     return { draftId: `gd-${google.drafts.length}` };
@@ -72,6 +79,8 @@ vi.mock("@/server/google/gmail.server", () => ({
 
 import {
   createCalendarBlock,
+  DRAFT_IN_PROGRESS_MESSAGE,
+  GMAIL_DRAFT_CLAIM_MS,
   GOOGLE_NOT_CONNECTED_MESSAGE,
   isGoogleConnected,
   NO_RECIPIENT,
@@ -221,6 +230,7 @@ beforeEach(() => {
   google.drafts = [];
   google.insertError = null;
   google.draftError = null;
+  google.draftGate = null;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -464,8 +474,14 @@ describe("errors that reach the page (50)", () => {
     const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
     const r1 = await runApprovedPlannerAction({ ...base, record: recorder(1).record });
     expect(r1).toEqual({ ok: true, message: `Saved as a Gmail draft (not sent). ${NOT_RECORDED_NOTE}` });
-    const r2 = await runApprovedPlannerAction({ ...base, record: recorder().record });
-    expect(r2).toEqual({ ok: true, message: "Already saved as a Gmail draft (not sent)." });
+    // Right after, a row without Gmail's id looks like a run still under way (75, round 2 review).
+    const soon = recorder();
+    const r2 = await runApprovedPlannerAction({ ...base, record: soon.record });
+    expect(r2).toEqual({ ok: false, message: DRAFT_IN_PROGRESS_MESSAGE });
+    expect(soon.record).not.toHaveBeenCalled();
+    const later = recorder();
+    const r3 = await runApprovedPlannerAction({ ...base, nowMs: NOW + GMAIL_DRAFT_CLAIM_MS + 1000, record: later.record });
+    expect(r3).toEqual({ ok: true, message: "Already saved as a Gmail draft (not sent)." });
     expect(google.drafts).toHaveLength(1);
     expect(db.tables.email_drafts).toHaveLength(1);
   });
@@ -549,6 +565,41 @@ describe("two Runs of the same action at the same moment (75)", () => {
     expect([...a.outcomes, ...b.outcomes].map((outcome) => outcome.external_id)).toEqual([id, id]);
   });
 
+  it("a second Run whose conflict check sees the first one's new block reuses it instead of reporting an overlap", async () => {
+    const db = fakeUserClient();
+    const realFrom = (db.client as unknown as { from: (table: string) => Record<string, unknown> }).from;
+    let raced = false;
+    // The first run's insert lands right after this run looked for the tagged block.
+    const client = {
+      from: (table: string) => {
+        const builder = realFrom(table);
+        if (table === "calendar_events" && !raced) {
+          const lookup = builder.maybeSingle as () => Promise<unknown>;
+          builder.maybeSingle = async () => {
+            const result = await lookup();
+            raced = true;
+            db.tables.calendar_events.push({
+              id: "first-run",
+              user_id: USER,
+              title: "Deep work",
+              starts_at: "2026-11-25T13:00:00.000Z",
+              ends_at: "2026-11-25T15:00:00.000Z",
+              source: "planner",
+              seed_key: "planner-action-7",
+            });
+            return result;
+          };
+        }
+        return builder;
+      },
+    } as unknown as UserClient;
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(1);
+    expect(rec.outcomes[0]).toMatchObject({ provider: "demo_calendar", external_id: "first-run" });
+  });
+
   it("save one demo draft; the second reuses it instead of failing", async () => {
     const db = fakeUserClient();
     const email = action({ id: 22, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
@@ -562,18 +613,171 @@ describe("two Runs of the same action at the same moment (75)", () => {
     expect(db.tables.email_drafts).toHaveLength(1);
   });
 
-  it("create one Gmail draft", async () => {
+  it("create one Gmail draft; a Run during the first one's Gmail call is told so and records nothing", async () => {
     admin.googleRow = { user_id: USER };
     const db = fakeUserClient();
     admin.tables = db.client;
     const email = action({ id: 23, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
     const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
-    const [ra, rb] = await Promise.all([
-      runApprovedPlannerAction({ ...base, record: recorder().record }),
-      runApprovedPlannerAction({ ...base, record: recorder().record }),
-    ]);
-    expect([ra.ok, rb.ok]).toEqual([true, true]);
+    let gmailAnswers = () => {};
+    google.draftGate = new Promise<void>((resolve) => {
+      gmailAnswers = resolve;
+    });
+    const a = recorder();
+    const b = recorder();
+    const first = runApprovedPlannerAction({ ...base, record: a.record });
+    const second = runApprovedPlannerAction({ ...base, record: b.record });
+    // The second run finds the first one's row (or loses the insert to it) while Gmail is still
+    // answering the first. It used to report "Already saved as a Gmail draft" with the row's id
+    // as the Gmail draft's, also when the Gmail call then failed.
+    const rb = await second;
+    expect(rb).toEqual({ ok: false, message: DRAFT_IN_PROGRESS_MESSAGE });
+    expect(b.record).not.toHaveBeenCalled();
+    gmailAnswers();
+    const ra = await first;
+    expect(ra).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
     expect(google.drafts).toHaveLength(1);
+    expect(db.tables.email_drafts).toHaveLength(1);
+    expect(a.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+
+    // Once Gmail's id is on the row, a later Run reuses the draft with that id.
+    const c = recorder();
+    const rc = await runApprovedPlannerAction({ ...base, record: c.record });
+    expect(rc).toEqual({ ok: true, message: "Already saved as a Gmail draft (not sent)." });
+    expect(c.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+  });
+
+  it("a Run during a Gmail call that then fails records nothing, and the next Run saves the draft", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient();
+    admin.tables = db.client;
+    const email = action({ id: 24, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    let gmailAnswers = () => {};
+    google.draftGate = new Promise<void>((resolve) => {
+      gmailAnswers = resolve;
+    });
+    google.draftError = "Gmail could not save the draft right now (HTTP 503). Please try again in a moment.";
+    const a = recorder();
+    const b = recorder();
+    const first = runApprovedPlannerAction({ ...base, record: a.record });
+    const rb = await runApprovedPlannerAction({ ...base, record: b.record });
+    expect(rb).toEqual({ ok: false, message: DRAFT_IN_PROGRESS_MESSAGE });
+    gmailAnswers();
+    expect(await first).toEqual({ ok: false, message: google.draftError });
+    // Neither run told the planner about a Gmail draft that does not exist.
+    expect(a.record).not.toHaveBeenCalled();
+    expect(b.record).not.toHaveBeenCalled();
+    expect(db.tables.email_drafts).toHaveLength(0);
+
+    google.draftGate = null;
+    google.draftError = null;
+    const c = recorder();
+    expect(await runApprovedPlannerAction({ ...base, record: c.record })).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
+    expect(c.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+  });
+});
+
+describe("a reference left by an earlier planner database (69, round 2 review)", () => {
+  // Planner action ids are the planner database's own row ids; after a reset (a deleted
+  // lifeops.db, a hosted planner without DATABASE_URL) a new action 7 has the reference of an
+  // old action 7 whose block or draft is still in Supabase.
+  const oldBlock = {
+    id: "old-block",
+    user_id: USER,
+    title: "Gym (old plan)",
+    starts_at: "2026-11-10T06:00:00.000Z",
+    ends_at: "2026-11-10T07:00:00.000Z",
+    source: "planner",
+    seed_key: "planner-action-7",
+  };
+
+  it("a demo block tagged by the old action at another time is kept, and the new action gets its own block", async () => {
+    const db = fakeUserClient();
+    db.tables.calendar_events.push({ ...oldBlock });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r).toEqual({ ok: true, message: "Added to your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(2);
+    const [kept, added] = db.tables.calendar_events;
+    // The old block stays in the calendar as an ordinary event, without the tag.
+    expect(kept).toMatchObject({ id: "old-block", title: "Gym (old plan)", seed_key: null });
+    expect(added).toMatchObject({ title: "Deep work", starts_at: "2026-11-25T13:00:00.000Z", seed_key: "planner-action-7" });
+    expect(rec.outcomes[0]).toMatchObject({ provider: "demo_calendar", external_id: added.id });
+
+    // A second Run of the new action reuses the new block.
+    const again = recorder();
+    const r2 = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: again.record });
+    expect(r2).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(2);
+    expect(again.outcomes[0]).toMatchObject({ external_id: added.id });
+  });
+
+  it("a demo block tagged by the old action in the same slot is an overlap, not the new action's block", async () => {
+    const db = fakeUserClient();
+    db.tables.calendar_events.push({ ...oldBlock, starts_at: "2026-11-25T13:00:00.000Z", ends_at: "2026-11-25T15:00:00.000Z" });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^This time overlaps "Gym \(old plan\)"/);
+    expect(rec.record).not.toHaveBeenCalled();
+    expect(db.tables.calendar_events).toHaveLength(1);
+  });
+
+  it("a Google event tagged by the old action at an overlapping time is an overlap, not the new action's block", async () => {
+    admin.googleRow = { user_id: USER };
+    google.events.push({
+      id: "g-old",
+      title: "Gym (old plan)",
+      starts_at: "2026-11-25T12:30:00.000Z",
+      ends_at: "2026-11-25T13:30:00.000Z",
+      notes: "Added by MONDAY's planner (planner-action-7).",
+    } as (typeof google.events)[number]);
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: fakeUserClient().client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^This time overlaps "Gym \(old plan\)"/);
+    expect(rec.record).not.toHaveBeenCalled();
+    expect(google.inserted).toHaveLength(0);
+  });
+
+  it("a draft saved by the old action is kept under a renamed reference, and the new action's draft is saved", async () => {
+    const db = fakeUserClient();
+    admin.tables = db.client;
+    db.tables.email_drafts.push({
+      id: "old-draft",
+      user_id: USER,
+      message_id: "planner-action-7",
+      to_address: "coach@gym.example",
+      subject: "Cancel Tuesday",
+      body: "Old plan",
+      provider: "demo",
+      external_draft_id: null,
+      created_at: "2026-11-10T06:00:00.000Z",
+    });
+    const email = action({ action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r).toEqual({ ok: true, message: "Saved as a demo draft (not sent)." });
+    expect(db.tables.email_drafts).toHaveLength(2);
+    const [kept, saved] = db.tables.email_drafts;
+    expect(kept).toMatchObject({ id: "old-draft", subject: "Cancel Tuesday", message_id: "planner-action-7 (earlier action old-draft)" });
+    expect(saved).toMatchObject({ message_id: "planner-action-7", subject: "Can we move?", body: "Hi" });
+    expect(rec.outcomes[0]).toMatchObject({ provider: "demo_draft", external_id: saved.id });
+
+    const again = recorder();
+    const r2 = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: again.record });
+    expect(r2).toEqual({ ok: true, message: "Already saved as a demo draft (not sent)." });
+    expect(db.tables.email_drafts).toHaveLength(2);
+  });
+
+  it("a draft saved by the same action is still reused when the user typed another recipient", async () => {
+    const db = fakeUserClient();
+    const email = action({ id: 25, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    await runApprovedPlannerAction({ ...base, to: "a@x.example", record: recorder(1).record });
+    const r2 = await runApprovedPlannerAction({ ...base, to: "b@x.example", record: recorder().record });
+    expect(r2).toEqual({ ok: true, message: "Already saved as a demo draft (not sent)." });
     expect(db.tables.email_drafts).toHaveLength(1);
   });
 });

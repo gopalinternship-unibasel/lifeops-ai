@@ -7,7 +7,10 @@
 -- second insert fail with unique_violation (23505); the app then returns the first run's draft
 -- (saveNewDraft in src/server/workspace.server.ts), and it writes the row before it creates the
 -- Gmail draft, so the second run creates none. Reply drafts (message_id is the email answered,
--- which can be answered more than once) are not affected.
+-- which can be answered more than once) are not affected. A draft under a reference whose subject
+-- or body differ from the action's belongs to an earlier action with the same id (the planner's
+-- database was reset); the app renames its reference to 'planner-action-N (earlier action <id>)'
+-- before it saves the new action's draft, so the index never blocks a new action.
 --
 -- Runs before the app looked for an earlier draft could save the same reference twice. Before the
 -- index is built, every such duplicate but the oldest gets its own id appended to the reference

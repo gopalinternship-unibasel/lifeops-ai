@@ -113,23 +113,43 @@ function plannerTag(reference: string): string {
   return `(${reference})`;
 }
 
-/** The demo calendar's block for this reference (its seed_key), if there is one. */
-async function findDemoBlock(supabase: UserClient, userId: string, reference: string): Promise<string | null> {
+/**
+ * Whether a block tagged with an action's reference is that action's block: the same title and
+ * time. Planner action ids are the planner database's own row ids, and that database is reset
+ * now and then (a deleted lifeops.db, a planner without DATABASE_URL), so a new action can get the
+ * id, and the reference, of an action whose block is still in the calendar.
+ */
+function sameBlock(found: { title: string; starts_at: string; ends_at: string }, wanted: BlockEvent): boolean {
+  return (
+    found.title.trim() === wanted.title.trim() &&
+    toMs(found.starts_at) === toMs(wanted.starts_at) &&
+    toMs(found.ends_at) === toMs(wanted.ends_at)
+  );
+}
+
+type DemoBlockRow = { id: string; title: string; starts_at: string; ends_at: string };
+
+/** The demo calendar's block tagged with this reference (its seed_key), if there is one. */
+async function findDemoBlock(supabase: UserClient, userId: string, reference: string): Promise<DemoBlockRow | null> {
   const { data, error } = await supabase
     .from("calendar_events")
-    .select("id")
+    .select("id, title, starts_at, ends_at")
     .eq("user_id", userId)
     .eq("seed_key", reference)
     .limit(1)
     .maybeSingle();
   if (error) throw dbError("check your calendar", error);
-  return data?.id ?? null;
+  return data ?? null;
 }
 
 /**
- * A planner block in the demo calendar, tagged with its reference in seed_key. The unique key on
- * (user_id, seed_key) lets only one of two runs at the same moment write it; the other gets a
- * unique violation (23505) and returns the block the first one wrote.
+ * A planner block in the demo calendar, tagged with its reference in seed_key. A tagged block
+ * with this title and time is reused. A tagged block with other values belongs to an earlier
+ * action that had the same id before the planner's database was reset: it stays in the calendar
+ * as an ordinary event, loses the tag (as an event the user edits does), and a new block is
+ * written. The unique key on (user_id, seed_key) lets only one of two runs at the same moment
+ * write it; the other gets a unique violation (23505), or sees the first one's block as an
+ * overlap, and returns the block the first one wrote.
  */
 async function createDemoPlannerBlock(
   supabase: UserClient,
@@ -140,16 +160,37 @@ async function createDemoPlannerBlock(
   timeZone: string | undefined,
 ): Promise<CalendarBlock> {
   const provider = "demo_calendar";
+  /** The block a run at the same moment wrote for this action, if there is one now. */
+  const writtenMeanwhile = async (): Promise<CalendarBlock | null> => {
+    const written = await findDemoBlock(supabase, userId, reference);
+    return written && sameBlock(written, event) ? { id: written.id, provider, reused: true } : null;
+  };
+
   const found = await findDemoBlock(supabase, userId, reference);
-  if (found) return { id: found, provider, reused: true };
-  await assertNoCalendarConflict({
-    supabase,
-    userId,
-    connected: false,
-    startsAt: event.starts_at,
-    endsAt: event.ends_at,
-    timeZone,
-  });
+  if (found) {
+    if (sameBlock(found, event)) return { id: found.id, provider, reused: true };
+    const { error: untagError } = await supabase
+      .from("calendar_events")
+      .update({ seed_key: null })
+      .eq("id", found.id)
+      .eq("user_id", userId)
+      .eq("seed_key", reference);
+    if (untagError) throw dbError("add the event to your calendar", untagError);
+  }
+  try {
+    await assertNoCalendarConflict({
+      supabase,
+      userId,
+      connected: false,
+      startsAt: event.starts_at,
+      endsAt: event.ends_at,
+      timeZone,
+    });
+  } catch (error: unknown) {
+    const written = await writtenMeanwhile().catch(() => null);
+    if (written) return written;
+    throw error;
+  }
   const { data, error } = await supabase
     .from("calendar_events")
     .insert({
@@ -165,8 +206,8 @@ async function createDemoPlannerBlock(
     .single();
   if (error) {
     if (error.code === "23505") {
-      const written = await findDemoBlock(supabase, userId, reference);
-      if (written) return { id: written, provider, reused: true };
+      const written = await writtenMeanwhile();
+      if (written) return written;
     }
     throw dbError("add the event to your calendar", error);
   }
@@ -175,7 +216,8 @@ async function createDemoPlannerBlock(
 
 /**
  * A planner block in Google Calendar, tagged with a line in its description. Only an event with
- * that tag is the planner's block; any other event in the slot is an overlap.
+ * that tag and the block's title and time is the planner's block (see sameBlock); any other event
+ * in the slot, a tagged one of an earlier action with the same id included, is an overlap.
  */
 async function createGooglePlannerBlock(
   userId: string,
@@ -186,7 +228,9 @@ async function createGooglePlannerBlock(
   const provider = "google_calendar";
   const tag = plannerTag(reference);
   const inSlot = await listCalendarEvents(userId, event.starts_at, event.ends_at);
-  const tagged = inSlot.find((existing) => existing.id && (existing.notes ?? "").includes(tag));
+  const tagged = inSlot.find(
+    (existing) => existing.id && (existing.notes ?? "").includes(tag) && sameBlock(existing, event),
+  );
   if (tagged) return { id: tagged.id, provider, reused: true };
   const conflicts = findConflicts(
     event,
@@ -206,10 +250,11 @@ async function createGooglePlannerBlock(
  * demo calendar's seed_key; a line in a Google event's description), and a block that already
  * carries it is returned (reused: true) instead of writing a second one. A planner action whose
  * first run wrote the block but could not be recorded can then be run again: without this, the
- * retry was refused as an overlap with its own block. Only the reference counts: an event the
- * user made with the same title and time is not the planner's block and stays an overlap (it was
- * taken for the block, and its id recorded as the planner action's, when blocks were matched by
- * title and time).
+ * retry was refused as an overlap with its own block. A block counts only with the reference and
+ * the action's title and time: an event the user made with the same title and time is not the
+ * planner's block and stays an overlap (it was taken for the block, and its id recorded as the
+ * planner action's, when blocks were matched by title and time), and neither is a block an
+ * earlier action with the same id left at another time (see sameBlock).
  */
 export async function createCalendarBlock(opts: {
   supabase: UserClient;
@@ -303,23 +348,65 @@ export async function saveReplyDraft(opts: {
   return { draftId, subject, to: email.from, provider: "demo" };
 }
 
-/** The draft already saved under this reference, as a reused draft, or null. */
-async function findSavedDraft(supabase: UserClient, userId: string, reference: string): Promise<SavedDraft | null> {
-  const { data: existing, error } = await supabase
+type DraftRow = {
+  id: string;
+  to_address: string;
+  subject: string;
+  body: string;
+  provider: string;
+  external_draft_id: string | null;
+  created_at: string;
+};
+
+/** The draft saved under this reference (the oldest, if there are several), or null. */
+async function findDraftRow(supabase: UserClient, userId: string, reference: string): Promise<DraftRow | null> {
+  const { data, error } = await supabase
     .from("email_drafts")
-    .select("id, to_address, subject, provider, external_draft_id")
+    .select("id, to_address, subject, body, provider, external_draft_id, created_at")
     .eq("user_id", userId)
     .eq("message_id", reference)
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
   if (error) throw dbError("check your saved drafts", error);
-  if (!existing) return null;
-  const gmail = existing.provider === "gmail";
+  return data ?? null;
+}
+
+/**
+ * Whether a draft saved under an action's reference is that action's draft: the same subject and
+ * body. As for calendar blocks (see sameBlock), a reset of the planner's database gives a new
+ * action the id, and the reference, of an earlier one whose draft is still saved. The recipient is
+ * not compared: the user may type another one before running the action again.
+ */
+function sameDraft(row: DraftRow, wanted: { subject: string; body: string }): boolean {
+  return row.subject === wanted.subject && row.body === wanted.body;
+}
+
+/**
+ * How long a Gmail draft's row may be without Gmail's id while the run that wrote it is still
+ * creating the Gmail draft: a token refresh and one Google request, each limited to 20 seconds.
+ */
+export const GMAIL_DRAFT_CLAIM_MS = 2 * 60_000;
+
+/** Shown to a second run of an action while the first is still creating its Gmail draft. */
+export const DRAFT_IN_PROGRESS_MESSAGE = "This action is being run already. Try again in a moment.";
+
+/**
+ * The saved draft, returned to a second run (reused: true). With Google connected the row is
+ * written before the Gmail draft exists; while it is recent and has no Gmail id yet, the first
+ * run is still at work, and the second gets DRAFT_IN_PROGRESS_MESSAGE as an error (nothing is
+ * recorded). It used to report the draft as saved, with the row's own id as the Gmail draft's,
+ * also when the Gmail call then failed and no Gmail draft existed.
+ */
+function reusedDraft(row: DraftRow, nowMs: number): SavedDraft {
+  const gmail = row.provider === "gmail";
+  if (gmail && !row.external_draft_id && nowMs - Date.parse(row.created_at) < GMAIL_DRAFT_CLAIM_MS) {
+    throw new Error(DRAFT_IN_PROGRESS_MESSAGE);
+  }
   return {
-    draftId: (gmail ? existing.external_draft_id : null) ?? existing.id,
-    subject: existing.subject,
-    to: existing.to_address,
+    draftId: (gmail ? row.external_draft_id : null) ?? row.id,
+    subject: row.subject,
+    to: row.to_address,
     provider: gmail ? "gmail" : "demo",
     reused: true,
   };
@@ -327,8 +414,11 @@ async function findSavedDraft(supabase: UserClient, userId: string, reference: s
 
 /**
  * Save a new (non-reply) email as a DRAFT only. Used for planner-proposed emails: `reference`
- * ("planner-action-<id>") identifies the action, and a draft already saved for it is returned
+ * ("planner-action-<id>") identifies the action, and the draft already saved for it is returned
  * instead of saving a second one (a run whose outcome could not be recorded may be run again).
+ * A draft under the reference with another subject or body is an earlier action's (see
+ * sameDraft): it is kept, its reference gets its own id appended, as migration 20261125110000
+ * does for duplicates, and a new draft is saved.
  *
  * The row with the reference is written first. The unique index on planner references
  * (migration 20261125110000) lets only one of two runs at the same moment write it; the other
@@ -343,9 +433,21 @@ export async function saveNewDraft(opts: {
   to: string;
   subject: string;
   body: string;
+  nowMs?: number;
 }): Promise<SavedDraft> {
-  const earlier = await findSavedDraft(opts.supabase, opts.userId, opts.reference);
-  if (earlier) return earlier;
+  const nowMs = opts.nowMs ?? Date.now();
+  const earlier = await findDraftRow(opts.supabase, opts.userId, opts.reference);
+  if (earlier) {
+    if (sameDraft(earlier, opts)) return reusedDraft(earlier, nowMs);
+    // Users cannot change their drafts (no UPDATE policy): the service role, scoped to this row.
+    const { error: renameError } = await supabaseAdmin
+      .from("email_drafts")
+      .update({ message_id: `${opts.reference} (earlier action ${earlier.id})` })
+      .eq("id", earlier.id)
+      .eq("user_id", opts.userId)
+      .eq("message_id", opts.reference);
+    if (renameError) throw dbError("save the draft", renameError);
+  }
 
   const connected = await isGoogleConnected(opts.userId);
   const { data: row, error: insertError } = await opts.supabase
@@ -362,8 +464,8 @@ export async function saveNewDraft(opts: {
     .single();
   if (insertError) {
     if (insertError.code === "23505") {
-      const written = await findSavedDraft(opts.supabase, opts.userId, opts.reference);
-      if (written) return written;
+      const written = await findDraftRow(opts.supabase, opts.userId, opts.reference);
+      if (written && sameDraft(written, opts)) return reusedDraft(written, nowMs);
     }
     throw dbError("save the draft", insertError);
   }
@@ -521,6 +623,7 @@ async function carryOutPlannerAction(opts: {
       to,
       subject: fit(oneLine(action.email_subject ?? "") || oneLine(action.title), 300),
       body: fit(action.email_body?.trim() || action.description || "", 12_000),
+      nowMs: opts.nowMs,
     });
     const kind = draft.provider === "gmail" ? "a Gmail draft" : "a demo draft";
     return {
