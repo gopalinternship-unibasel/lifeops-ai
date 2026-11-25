@@ -583,6 +583,7 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
           userId: context.userId,
           messageId: data.messageId,
           replyBody: suggestion,
+          timeZone: data.timeZone,
         });
       } catch (e: unknown) {
         return {
@@ -608,6 +609,8 @@ export const saveGmailDraft = createServerFn({ method: "POST" })
     cardId: CardId,
     messageId: MessageId,
     replyBody: z.string().trim().min(1).max(MAX_REPLY_BODY),
+    // The visitor's time zone: the demo email is read as the chat's inbox list showed it.
+    timeZone: z.string().max(100).optional(),
   }), d))
   .handler(async ({ context, data }) => {
     // One draft per reply card: saving the same card again does not add a second draft.
@@ -631,6 +634,7 @@ export const saveGmailDraft = createServerFn({ method: "POST" })
         userId: context.userId,
         messageId: data.messageId,
         replyBody: data.replyBody,
+        timeZone: data.timeZone,
       });
       if (data.cardId) await recordCardResult(context.supabase, context.userId, data.cardId, draft.draftId);
       return { ok: true, alreadyHandled: false, error: null, draft };

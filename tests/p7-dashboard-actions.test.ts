@@ -17,6 +17,12 @@
  *  - 69: a block or draft was reused for its reference alone, so after a reset of the planner's
  *    database a new action with an old action's id never got its own;
  *  - 75: a Run during another Run's Gmail call reported the draft as saved (with the row's id).
+ * Round 3:
+ *  - 69: a Run from another time zone cleared the action's own block's tag before its conflict
+ *    check refused it, and a block the user edited lost its tag; either way every later Run was
+ *    refused as an overlap with the action's own block;
+ *  - 75: a Gmail draft row whose Gmail call failed stayed when the user's delete failed too;
+ *  - 42: a demo reply draft read the demo email in UTC, not in the visitor's time zone.
  * The fake client below applies the database's unique keys: (user_id, seed_key) on
  * calendar_events, and the planner-reference index on email_drafts (migration 20261125110000).
  */
@@ -87,11 +93,13 @@ import {
   NOT_RECORDED_NOTE,
   runApprovedPlannerAction,
   saveNewDraft,
+  saveReplyDraft,
   userFacingMessage,
   type PlannerActionOutcome,
   type PlannerActionToRun,
   type UserClient,
 } from "@/server/workspace.server";
+import { fetchMockEmails } from "@/server/connectors/gmail.mock";
 
 const USER = "11111111-2222-3333-4444-555555555555";
 const ZRH = "Europe/Zurich";
@@ -722,6 +730,8 @@ describe("a reference left by an earlier planner database (69, round 2 review)",
     expect(r.message).toMatch(/^This time overlaps "Gym \(old plan\)"/);
     expect(rec.record).not.toHaveBeenCalled();
     expect(db.tables.calendar_events).toHaveLength(1);
+    // A refused Run changes nothing: the block keeps its tag (round 3).
+    expect(db.tables.calendar_events[0].seed_key).toBe("planner-action-7");
   });
 
   it("a Google event tagged by the old action at an overlapping time is an overlap, not the new action's block", async () => {
@@ -779,6 +789,170 @@ describe("a reference left by an earlier planner database (69, round 2 review)",
     const r2 = await runApprovedPlannerAction({ ...base, to: "b@x.example", record: recorder().record });
     expect(r2).toEqual({ ok: true, message: "Already saved as a demo draft (not sent)." });
     expect(db.tables.email_drafts).toHaveLength(1);
+  });
+});
+
+describe("the action's own block after a Run from another time zone or a user's edit (69, round 3)", () => {
+  // The planner's times have no zone ("2026-11-25T14:00:00"): the same action is 13:00 UTC in
+  // Zurich and 14:00 UTC in London.
+  const LONDON = "Europe/London";
+
+  it("record fails, a Run from London is refused without changing anything, and a Run from Zurich reuses the block", async () => {
+    const db = fakeUserClient();
+    const base = { supabase: db.client, userId: USER, action: action({}), nowMs: NOW };
+    const r1 = await runApprovedPlannerAction({ ...base, timeZone: ZRH, record: recorder(1).record });
+    expect(r1).toEqual({ ok: true, message: `Added to your demo calendar. ${NOT_RECORDED_NOTE}` });
+    const id = db.tables.calendar_events[0].id;
+
+    const london = recorder();
+    const r2 = await runApprovedPlannerAction({ ...base, timeZone: LONDON, record: london.record });
+    expect(r2.ok).toBe(false);
+    expect(r2.message).toMatch(/^This time overlaps "Deep work"/);
+    expect(london.record).not.toHaveBeenCalled();
+    // 85d97ef cleared the block's tag here, so every later Run was refused as well.
+    expect(db.tables.calendar_events).toEqual([expect.objectContaining({ id, seed_key: "planner-action-7" })]);
+
+    const zurich = recorder();
+    const r3 = await runApprovedPlannerAction({ ...base, timeZone: ZRH, record: zurich.record });
+    expect(r3).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(1);
+    expect(zurich.outcomes[0]).toMatchObject({ provider: "demo_calendar", external_id: id });
+  });
+
+  it("a block the user edited (editing clears its tag) is reused by the next Run instead of being an overlap", async () => {
+    const db = fakeUserClient();
+    const base = { supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW };
+    await runApprovedPlannerAction({ ...base, record: recorder(1).record });
+    // calendar.mock updateEvent: the notes change, and seed_key becomes null.
+    Object.assign(db.tables.calendar_events[0], { notes: "Bring the laptop", seed_key: null });
+    const id = db.tables.calendar_events[0].id;
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ ...base, record: rec.record });
+    expect(r).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(1);
+    expect(rec.outcomes[0]).toMatchObject({ provider: "demo_calendar", external_id: id });
+  });
+
+  it("the same holds for an edited reminder", async () => {
+    const db = fakeUserClient();
+    const reminder = action({ action_type: "reminder", title: "Call the bank", start_time: "2026-11-25T09:00:00", end_time: null });
+    const base = { supabase: db.client, userId: USER, action: reminder, timeZone: ZRH, nowMs: NOW };
+    await runApprovedPlannerAction({ ...base, record: recorder(1).record });
+    Object.assign(db.tables.calendar_events[0], { notes: "IBAN ready", seed_key: null });
+    const r = await runApprovedPlannerAction({ ...base, record: recorder().record });
+    expect(r).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(db.tables.calendar_events).toHaveLength(1);
+  });
+
+  it("a Run from Tokyo writes a block at its own time; the Run from Zurich still finds the first one", async () => {
+    // Known limit: the Tokyo time does not overlap the Zurich block, so the Tokyo Run cannot
+    // tell that block from an earlier action's and writes its own (as 9c71efc and 48edf66 did).
+    const db = fakeUserClient();
+    const base = { supabase: db.client, userId: USER, action: action({}), nowMs: NOW };
+    await runApprovedPlannerAction({ ...base, timeZone: ZRH, record: recorder(1).record });
+    const first = db.tables.calendar_events[0].id;
+    const tokyo = await runApprovedPlannerAction({ ...base, timeZone: "Asia/Tokyo", record: recorder().record });
+    expect(tokyo).toEqual({ ok: true, message: "Added to your demo calendar." });
+    const zurich = recorder();
+    const r = await runApprovedPlannerAction({ ...base, timeZone: ZRH, record: zurich.record });
+    expect(r).toEqual({ ok: true, message: "Already in your demo calendar." });
+    expect(zurich.outcomes[0]).toMatchObject({ external_id: first });
+    expect(db.tables.calendar_events).toHaveLength(2);
+  });
+
+  it("an untagged block of another source, or at another time, is still an overlap", async () => {
+    const db = fakeUserClient();
+    db.tables.calendar_events.push(
+      { id: "week-plan", user_id: USER, title: "Deep work", starts_at: "2026-11-25T13:00:00.000Z", ends_at: "2026-11-25T15:00:00.000Z", source: "plan", seed_key: null },
+    );
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^This time overlaps "Deep work"/);
+
+    const other = fakeUserClient();
+    other.tables.calendar_events.push(
+      { id: "earlier", user_id: USER, title: "Deep work", starts_at: "2026-11-25T12:00:00.000Z", ends_at: "2026-11-25T14:00:00.000Z", source: "planner", seed_key: null },
+    );
+    const r2 = await runApprovedPlannerAction({ supabase: other.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r2.ok).toBe(false);
+    expect(r2.message).toMatch(/^This time overlaps "Deep work"/);
+    expect(rec.record).not.toHaveBeenCalled();
+  });
+
+  it("a block tagged by another action with the same title and time is still an overlap", async () => {
+    const db = fakeUserClient();
+    db.tables.calendar_events.push(
+      { id: "b8", user_id: USER, title: "Deep work", starts_at: "2026-11-25T13:00:00.000Z", ends_at: "2026-11-25T15:00:00.000Z", source: "planner", seed_key: "planner-action-8" },
+    );
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(rec.record).not.toHaveBeenCalled();
+  });
+});
+
+describe("a Gmail draft that could not be created (75, round 3)", () => {
+  it("is removed with the service role when the user's delete fails, so the next Run saves the draft", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient();
+    // The service role sees the same rows; only the user's delete of a draft fails.
+    admin.tables = db.client;
+    const realFrom = (db.client as unknown as { from: (table: string) => Record<string, unknown> }).from;
+    const user = {
+      from: (table: string) => {
+        const builder = realFrom(table);
+        if (table === "email_drafts") {
+          builder.delete = () => ({ eq: () => ({ eq: async () => ({ data: null, error: CONNECTION_FAILURE }) }) });
+        }
+        return builder;
+      },
+    } as unknown as UserClient;
+    const email = action({ id: 26, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const base = { supabase: user, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    google.draftError = "Gmail could not save the draft right now (HTTP 503). Please try again in a moment.";
+    const r1 = await runApprovedPlannerAction({ ...base, record: recorder().record });
+    expect(r1).toEqual({ ok: false, message: google.draftError });
+    expect(db.tables.email_drafts).toHaveLength(0);
+
+    google.draftError = null;
+    // 48edf66 answered "This action is being run already." here, and after two minutes
+    // "Already saved as a Gmail draft" with the row's id, though no Gmail draft existed.
+    const rec = recorder();
+    const r2 = await runApprovedPlannerAction({ ...base, record: rec.record });
+    expect(r2).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
+    expect(google.drafts).toHaveLength(1);
+    expect(rec.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+  });
+});
+
+describe("a demo reply draft is read in the visitor's time zone (42)", () => {
+  const listed = (id: string, timeZone: string, nowMs: number) =>
+    fetchMockEmails(timeZone, nowMs).find((email) => email.id === id)?.subject;
+
+  it("Saturday 13:30 in Zurich: the saved subject is the one the inbox lists", async () => {
+    // 12:30 UTC: lunch at 13:00 Zurich is over ("next Saturday"); at 13:00 UTC it would not be.
+    const at = Date.parse("2026-11-28T12:30:00Z");
+    expect(listed("e3", ZRH, at)).toBe("Lunch next Saturday?");
+    const db = fakeUserClient();
+    const draft = await saveReplyDraft({ supabase: db.client, userId: USER, messageId: "e3", replyBody: "Sure!", timeZone: ZRH, nowMs: at });
+    expect(draft.subject).toBe("Re: Lunch next Saturday?");
+    expect(db.tables.email_drafts[0]).toMatchObject({ message_id: "e3", subject: "Re: Lunch next Saturday?", provider: "demo" });
+  });
+
+  it("Thursday 00:30 in Zurich (still Wednesday in UTC): the paper is due Saturday", async () => {
+    const at = Date.parse("2026-11-25T23:30:00Z");
+    const db = fakeUserClient();
+    const draft = await saveReplyDraft({ supabase: db.client, userId: USER, messageId: "e1", replyBody: "Thanks", timeZone: ZRH, nowMs: at });
+    expect(draft.subject).toBe(`Re: ${listed("e1", ZRH, at)}`);
+    expect(draft.subject).toContain("due Saturday");
+  });
+
+  it("without a time zone the email is read in UTC, as before", async () => {
+    const at = Date.parse("2026-11-28T12:30:00Z");
+    const db = fakeUserClient();
+    const draft = await saveReplyDraft({ supabase: db.client, userId: USER, messageId: "e3", replyBody: "Sure!", nowMs: at });
+    expect(draft.subject).toBe("Re: Lunch this Saturday?");
   });
 });
 
