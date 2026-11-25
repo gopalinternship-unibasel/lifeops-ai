@@ -8,12 +8,24 @@
  *  - 82: a reminder or task was reported as "Marked as done." though nothing was scheduled;
  *  - 44: no screen let the user give a draft's recipient ("(recipient to fill in)" was saved);
  *  - 50: database errors were thrown as raw PostgREST objects.
+ * Round 2:
+ *  - 69: a block was reused by title and time alone (an event the user made was taken for the
+ *    planner's block), and a Gmail draft whose row and planner record both failed was created
+ *    again by the next Run;
+ *  - 75: two Runs at the same moment both passed the lookups and wrote twice.
+ * The fake client below applies the database's unique keys: (user_id, seed_key) on
+ * calendar_events, and the planner-reference index on email_drafts (migration 20261125110000).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
 
-const admin = vi.hoisted(() => ({ googleRow: null as Record<string, unknown> | null, error: null as Record<string, unknown> | null }));
+const admin = vi.hoisted(() => ({
+  googleRow: null as Record<string, unknown> | null,
+  error: null as Record<string, unknown> | null,
+  /** The service role's view of the other tables (a test's fake user client), when set. */
+  tables: null as { from: (table: string) => unknown } | null,
+}));
 
 vi.mock("@/integrations/supabase/client.server", () => {
   const query = {
@@ -21,7 +33,11 @@ vi.mock("@/integrations/supabase/client.server", () => {
     eq: () => query,
     maybeSingle: async () => ({ data: admin.googleRow, error: admin.error }),
   };
-  return { supabaseAdmin: { from: () => query } };
+  return {
+    supabaseAdmin: {
+      from: (table: string) => (table === "google_oauth_tokens" || !admin.tables ? query : admin.tables.from(table)),
+    },
+  };
 });
 
 const google = vi.hoisted(() => ({
@@ -30,6 +46,8 @@ const google = vi.hoisted(() => ({
   drafts: [] as Array<Record<string, unknown>>,
   /** When set, the Google Calendar insert fails with this raw message (as calendar.server did). */
   insertError: null as string | null,
+  /** When set, creating a Gmail draft fails with this message. */
+  draftError: null as string | null,
 }));
 
 vi.mock("@/server/google/calendar.server", () => ({
@@ -45,6 +63,7 @@ vi.mock("@/server/google/calendar.server", () => ({
 
 vi.mock("@/server/google/gmail.server", () => ({
   createDraft: async (_userId: string, draft: Record<string, unknown>) => {
+    if (google.draftError) throw new Error(google.draftError);
     google.drafts.push(draft);
     return { draftId: `gd-${google.drafts.length}` };
   },
@@ -70,25 +89,50 @@ const ZRH = "Europe/Zurich";
 // Tuesday 24 Nov 2026, 10:00 in Zurich.
 const NOW = Date.parse("2026-11-24T09:00:00Z");
 
+/** The database's unique keys on the two tables (a row's key, or null when the key does not apply). */
+const UNIQUE_KEY: Record<string, (row: Row) => string | null> = {
+  calendar_events: (row) => (row.seed_key ? `${row.user_id}|${row.seed_key}` : null),
+  email_drafts: (row) =>
+    String(row.message_id ?? "").startsWith("planner-action-") ? `${row.user_id}|${row.message_id}` : null,
+};
+
+const CONNECTION_FAILURE = { code: "08006", message: "connection failure", details: "at Socket (node:net:1)", hint: null };
+
 /** A small stand-in for the user's Supabase client: the calls the helpers make, on in-memory rows. */
-function fakeUserClient(opts: { failInsertInto?: string } = {}) {
+function fakeUserClient(opts: { failInsertInto?: string; failUpdateOf?: string } = {}) {
   const tables: Record<string, Row[]> = { calendar_events: [], email_drafts: [] };
   let nextId = 1;
   function from(table: string) {
     const filters: Array<(row: Row) => boolean> = [];
     let insertRow: Row | null = null;
+    let patch: Row | null = null;
+    let removing = false;
     let order: { key: string; ascending: boolean } | null = null;
     let limit: number | null = null;
     const run = async (single: boolean) => {
       if (insertRow) {
         if (opts.failInsertInto === table) {
-          return { data: null, error: { code: "08006", message: "connection failure", details: "at Socket (node:net:1)", hint: null } };
+          return { data: null, error: CONNECTION_FAILURE };
+        }
+        const key = UNIQUE_KEY[table]?.(insertRow) ?? null;
+        if (key && (tables[table] ?? []).some((row) => UNIQUE_KEY[table](row) === key)) {
+          return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint", details: null, hint: null } };
         }
         const row = { id: `row-${nextId++}`, created_at: new Date(NOW + nextId).toISOString(), ...insertRow };
         (tables[table] ??= []).push(row);
         return { data: row, error: null };
       }
-      let rows = (tables[table] ?? []).filter((row) => filters.every((keep) => keep(row)));
+      const matching = (tables[table] ?? []).filter((row) => filters.every((keep) => keep(row)));
+      if (removing) {
+        tables[table] = (tables[table] ?? []).filter((row) => !matching.includes(row));
+        return { data: null, error: null };
+      }
+      if (patch) {
+        if (opts.failUpdateOf === table) return { data: null, error: CONNECTION_FAILURE };
+        matching.forEach((row) => Object.assign(row, patch));
+        return { data: null, error: null };
+      }
+      let rows = matching;
       if (order) {
         const { key, ascending } = order;
         rows = [...rows].sort((a, b) => String(a[key]).localeCompare(String(b[key])) * (ascending ? 1 : -1));
@@ -120,6 +164,14 @@ function fakeUserClient(opts: { failInsertInto?: string } = {}) {
       },
       insert: (row: Row) => {
         insertRow = row;
+        return builder;
+      },
+      update: (value: Row) => {
+        patch = value;
+        return builder;
+      },
+      delete: () => {
+        removing = true;
         return builder;
       },
       single: () => run(true),
@@ -163,10 +215,12 @@ function recorder(failTimes = 0) {
 beforeEach(() => {
   admin.googleRow = null;
   admin.error = null;
+  admin.tables = null;
   google.events = [];
   google.inserted = [];
   google.drafts = [];
   google.insertError = null;
+  google.draftError = null;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -206,7 +260,7 @@ describe("a run whose outcome could not be recorded (69, 89, 75)", () => {
     expect(second.outcomes[0]).toMatchObject({ provider: "demo_draft", external_id: db.tables.email_drafts[0].id });
   });
 
-  it("a Google calendar block written once is found again by title and time", async () => {
+  it("a Google calendar block written once is found again by its tag", async () => {
     admin.googleRow = { user_id: USER };
     const db = fakeUserClient();
     const base = { supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW };
@@ -378,21 +432,154 @@ describe("errors that reach the page (50)", () => {
     expect(rec.record).not.toHaveBeenCalled();
   });
 
-  it("a Gmail draft whose record could not be saved still counts as saved, so Run is not repeated (69)", async () => {
+  it("no Gmail draft is created when its row cannot be saved, so a second Run cannot make a second one (69)", async () => {
     admin.googleRow = { user_id: USER };
-    const db = fakeUserClient({ failInsertInto: "email_drafts" });
     const email = action({ id: 19, action_type: "email_draft", title: "Reschedule", email_subject: "Move our meeting?" });
-    const rec = recorder();
-    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: rec.record });
-    expect(r).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
+    // The row cannot be saved and the planner cannot be told: the round-1 code created the Gmail
+    // draft first, so every such Run left one more Gmail draft behind.
+    const broken = fakeUserClient({ failInsertInto: "email_drafts" });
+    const first = recorder(1);
+    const r1 = await runApprovedPlannerAction({ supabase: broken.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: first.record });
+    expect(r1).toEqual({ ok: false, message: "Could not save the draft. Please try again in a moment." });
+    expect(google.drafts).toHaveLength(0);
+    expect(first.record).not.toHaveBeenCalled();
+
+    const db = fakeUserClient();
+    admin.tables = db.client;
+    const second = recorder();
+    const r2 = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW, record: second.record });
+    expect(r2).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
     expect(google.drafts).toHaveLength(1);
-    // The planner records it as executed, so the action no longer offers Run.
-    expect(rec.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+    expect(db.tables.email_drafts).toEqual([
+      expect.objectContaining({ message_id: "planner-action-19", provider: "gmail", external_draft_id: "gd-1" }),
+    ]);
+    expect(second.outcomes[0]).toMatchObject({ provider: "gmail_draft", external_id: "gd-1" });
+  });
+
+  it("a Gmail draft whose id and planner record could not be written is reused by the next Run (69)", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient({ failUpdateOf: "email_drafts" });
+    admin.tables = db.client;
+    const email = action({ id: 20, action_type: "email_draft", title: "Reschedule", email_subject: "Move our meeting?" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    const r1 = await runApprovedPlannerAction({ ...base, record: recorder(1).record });
+    expect(r1).toEqual({ ok: true, message: `Saved as a Gmail draft (not sent). ${NOT_RECORDED_NOTE}` });
+    const r2 = await runApprovedPlannerAction({ ...base, record: recorder().record });
+    expect(r2).toEqual({ ok: true, message: "Already saved as a Gmail draft (not sent)." });
+    expect(google.drafts).toHaveLength(1);
+    expect(db.tables.email_drafts).toHaveLength(1);
+  });
+
+  it("a Gmail draft that could not be created frees its reference, so Run can be tried again (69)", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient();
+    admin.tables = db.client;
+    const email = action({ id: 21, action_type: "email_draft", title: "Reschedule", email_subject: "Move our meeting?" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    google.draftError = "Gmail could not save the draft right now (HTTP 503). Please try again in a moment.";
+    const rec = recorder();
+    const r1 = await runApprovedPlannerAction({ ...base, record: rec.record });
+    expect(r1).toEqual({ ok: false, message: google.draftError });
+    expect(db.tables.email_drafts).toHaveLength(0);
+    expect(rec.record).not.toHaveBeenCalled();
+    google.draftError = null;
+    const r2 = await runApprovedPlannerAction({ ...base, record: rec.record });
+    expect(r2).toEqual({ ok: true, message: "Saved as a Gmail draft (not sent)." });
+    expect(google.drafts).toHaveLength(1);
+  });
+});
+
+describe("only the planner's own block is reused (69)", () => {
+  it("an event the user made with the same title and time is an overlap, not the planner's block", async () => {
+    const db = fakeUserClient();
+    db.tables.calendar_events.push({
+      id: "mine",
+      user_id: USER,
+      title: "Deep work",
+      starts_at: "2026-11-25T13:00:00.000Z",
+      ends_at: "2026-11-25T15:00:00.000Z",
+      source: "chat",
+      seed_key: null,
+    });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^This time overlaps "Deep work"/);
+    // The round-1 code reused it and recorded its id as the planner action's block.
+    expect(rec.record).not.toHaveBeenCalled();
+    expect(db.tables.calendar_events).toHaveLength(1);
+  });
+
+  it("the same holds for a Google event without the planner's tag", async () => {
+    admin.googleRow = { user_id: USER };
+    google.events.push({ id: "g-mine", title: "Deep work", starts_at: "2026-11-25T13:00:00.000Z", ends_at: "2026-11-25T15:00:00.000Z" });
+    const rec = recorder();
+    const r = await runApprovedPlannerAction({ supabase: fakeUserClient().client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW, record: rec.record });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/^This time overlaps "Deep work"/);
+    expect(rec.record).not.toHaveBeenCalled();
+    expect(google.inserted).toHaveLength(0);
+  });
+
+  it("tags the block: seed_key in the demo calendar, a line in the Google description", async () => {
+    const db = fakeUserClient();
+    const withNotes = action({ description: "Chapter 3 and 4" });
+    await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: withNotes, timeZone: ZRH, nowMs: NOW, record: recorder().record });
+    expect(db.tables.calendar_events[0]).toMatchObject({ seed_key: "planner-action-7", notes: "Chapter 3 and 4", source: "planner" });
+
+    admin.googleRow = { user_id: USER };
+    await runApprovedPlannerAction({ supabase: db.client, userId: USER, action: withNotes, timeZone: ZRH, nowMs: NOW, record: recorder().record });
+    expect(google.inserted[0].notes).toBe("Chapter 3 and 4\n\nAdded by MONDAY's planner (planner-action-7).");
+  });
+});
+
+describe("two Runs of the same action at the same moment (75)", () => {
+  it("write one demo calendar block; the second reuses it", async () => {
+    const db = fakeUserClient();
+    const base = { supabase: db.client, userId: USER, action: action({}), timeZone: ZRH, nowMs: NOW };
+    const a = recorder();
+    const b = recorder();
+    const [ra, rb] = await Promise.all([
+      runApprovedPlannerAction({ ...base, record: a.record }),
+      runApprovedPlannerAction({ ...base, record: b.record }),
+    ]);
+    expect(db.tables.calendar_events).toHaveLength(1);
+    expect([ra.message, rb.message].sort()).toEqual(["Added to your demo calendar.", "Already in your demo calendar."]);
+    const id = db.tables.calendar_events[0].id;
+    expect([...a.outcomes, ...b.outcomes].map((outcome) => outcome.external_id)).toEqual([id, id]);
+  });
+
+  it("save one demo draft; the second reuses it instead of failing", async () => {
+    const db = fakeUserClient();
+    const email = action({ id: 22, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    const [ra, rb] = await Promise.all([
+      runApprovedPlannerAction({ ...base, record: recorder().record }),
+      runApprovedPlannerAction({ ...base, record: recorder().record }),
+    ]);
+    expect([ra.ok, rb.ok]).toEqual([true, true]);
+    expect([ra.message, rb.message].sort()).toEqual(["Already saved as a demo draft (not sent).", "Saved as a demo draft (not sent)."]);
+    expect(db.tables.email_drafts).toHaveLength(1);
+  });
+
+  it("create one Gmail draft", async () => {
+    admin.googleRow = { user_id: USER };
+    const db = fakeUserClient();
+    admin.tables = db.client;
+    const email = action({ id: 23, action_type: "email_draft", title: "Reschedule", email_subject: "Can we move?", email_body: "Hi" });
+    const base = { supabase: db.client, userId: USER, action: email, timeZone: ZRH, nowMs: NOW };
+    const [ra, rb] = await Promise.all([
+      runApprovedPlannerAction({ ...base, record: recorder().record }),
+      runApprovedPlannerAction({ ...base, record: recorder().record }),
+    ]);
+    expect([ra.ok, rb.ok]).toEqual([true, true]);
+    expect(google.drafts).toHaveLength(1);
+    expect(db.tables.email_drafts).toHaveLength(1);
   });
 });
 
 describe("existing callers keep their behaviour", () => {
-  it("createCalendarBlock without reuseIdentical still refuses an identical event as an overlap", async () => {
+  it("createCalendarBlock without a reference still refuses an identical event as an overlap", async () => {
     const db = fakeUserClient();
     const event = { title: "Gym", starts_at: "2026-11-25T17:00:00.000Z", ends_at: "2026-11-25T18:00:00.000Z" };
     await createCalendarBlock({ supabase: db.client, userId: USER, event, source: "chat", timeZone: ZRH });

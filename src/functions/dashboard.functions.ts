@@ -10,7 +10,7 @@ import { withoutHandledCards } from "@/lib/panel-state";
 import { planRequestView, type PlanRequestResult, type PlanRequestView } from "@/lib/plan-request";
 import { cardIdsOfPanel, listCardStates } from "@/server/chat-cards.server";
 import { ensureChatSessionFor, maxChatTurnMs, runChatTurn } from "@/server/chat-turn.server";
-import { resolveLLMConfig } from "@/server/ai/llm.server";
+import { isLocalBaseUrl, resolveLLMConfig } from "@/server/ai/llm.server";
 import { ensureSeedEvents } from "@/server/connectors/calendar.mock";
 import { toMs, type TimedEvent } from "@/server/calendar/time-ranges.server";
 import { dbError } from "@/server/public-error.server";
@@ -39,6 +39,7 @@ import {
   plannerOfflineFrom,
   safePlannerNote,
   startPlanRequest,
+  storableRequestError,
   visitorSafeText,
   type BackendAction,
   type BackendDashboard,
@@ -132,6 +133,27 @@ async function busyForPlanRequest(supabase: UserClient, userId: string, timeZone
   }
 }
 
+/**
+ * The dashboard's two calendar ranges: "next 7 days" [from, to) and the plan's week
+ * [weekStart, weekEnd). The demo calendar is read once for both, from Monday to today + 7 days
+ * (today is never before Monday, so that end is never before the week's end). Google answers at
+ * most 50 events per read (listCalendarEvents), so with Google each range is read on its own: one
+ * read of up to 13 days could leave events out of both in a busy fortnight. On a Monday the two
+ * ranges are the same and one read is enough.
+ */
+async function readDashboardCalendar(
+  read: (startIso: string, endIso: string) => Promise<TimedEvent[]>,
+  google: boolean,
+  range: { from: string; to: string; weekStart: string; weekEnd: string },
+): Promise<{ nextDays: TimedEvent[]; planWeek: TimedEvent[] }> {
+  if (!google || (range.from === range.weekStart && range.to === range.weekEnd)) {
+    const events = await read(range.weekStart, range.to);
+    return { nextDays: events, planWeek: events };
+  }
+  const [nextDays, planWeek] = await Promise.all([read(range.from, range.to), read(range.weekStart, range.weekEnd)]);
+  return { nextDays, planWeek };
+}
+
 type PlannerState =
   | { online: true; data: BackendDashboard }
   | { online: false; reason: PlannerOfflineReason; error: string };
@@ -149,8 +171,7 @@ export const fetchDashboard = createServerFn({ method: "POST" })
     const timeZone = normalizeTimeZone(data?.timeZone);
     const today = todayInTimeZone(timeZone);
     const monday = mondayOfISODate(today);
-    // "Next 7 days" runs from today; the plan's week from Monday. One calendar read covers both
-    // (today is never before Monday, so today + 7 is never before the week's end).
+    // "Next 7 days" runs from today; the plan's week from Monday.
     const from = zonedDateTimeToISO(today, { hour: 0 }, timeZone);
     const to = zonedDateTimeToISO(addDaysISO(today, 7), { hour: 0 }, timeZone);
     const weekStart = zonedDateTimeToISO(monday, { hour: 0 }, timeZone);
@@ -158,20 +179,25 @@ export const fetchDashboard = createServerFn({ method: "POST" })
 
     const googleConnected = await isGoogleConnected(userId);
     let calendarError: string | null = null;
-    let events: TimedEvent[] = [];
+    let nextDays: TimedEvent[] = [];
+    let planWeek: TimedEvent[] = [];
     try {
       if (!googleConnected) await ensureSeedEvents(supabase, userId, timeZone);
-      events = await listBusyEvents(supabase, userId, googleConnected, weekStart, to);
+      ({ nextDays, planWeek } = await readDashboardCalendar(
+        (startIso, endIso) => listBusyEvents(supabase, userId, googleConnected, startIso, endIso),
+        googleConnected,
+        { from, to, weekStart, weekEnd },
+      ));
     } catch (error: unknown) {
       console.error("[lifeops] dashboard: calendar read failed", error);
       calendarError = "Your calendar could not be loaded right now. Please try again in a moment.";
     }
-    const upcoming = overlapping(events, from, to).map((event) => ({
+    const upcoming = overlapping(nextDays, from, to).map((event) => ({
       title: event.title,
       starts_at: event.starts_at,
       ends_at: event.ends_at,
     }));
-    const weekEvents = overlapping(events, weekStart, weekEnd).map((event) => ({
+    const weekEvents = overlapping(planWeek, weekStart, weekEnd).map((event) => ({
       title: event.title,
       starts_at: event.starts_at,
       ends_at: event.ends_at,
@@ -193,7 +219,8 @@ export const fetchDashboard = createServerFn({ method: "POST" })
     const plan = (planResult.data?.payload as unknown as WeekPlan | null) ?? null;
     // Which plan items are in the calendar, as on the plan page; unknown when the calendar failed.
     const counts = planApprovalCounts(plan, weekEvents, Date.now());
-    const ai = aiStatus(resolveLLMConfig("chat"));
+    const llm = resolveLLMConfig("chat");
+    const ai = aiStatus({ ...llm, local: isLocalBaseUrl(llm.baseUrl) });
 
     let planner: PlannerState;
     try {
@@ -256,7 +283,8 @@ export const runChaosPlan = createServerFn({ method: "POST" })
         .update({
           status: update.status,
           result: (update.result ?? null) as unknown as Json,
-          error: update.error ?? null,
+          // Within the column's limit: a longer text made the database refuse this update.
+          error: update.error === undefined ? null : storableRequestError(update.error),
           finished_at: new Date().toISOString(),
         })
         .eq("id", row.id)

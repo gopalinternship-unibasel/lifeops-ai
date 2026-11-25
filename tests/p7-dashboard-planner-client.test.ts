@@ -338,15 +338,20 @@ describe("one 'Plan it' at a time (100, 11)", () => {
   const WINDOW = 300_000;
   const allowAll = async () => {};
 
-  /** planner_requests rows in memory, with the calls startPlanRequest makes; optionally the unique index. */
-  function fakeRequests(rows: Row[], opts: { uniqueRunning?: boolean } = {}) {
+  /**
+   * planner_requests rows in memory, with the calls startPlanRequest makes; optionally the unique
+   * index, and a hook that runs right before an insert (another tab's insert in between).
+   */
+  function fakeRequests(rows: Row[], opts: { uniqueRunning?: boolean; beforeInsert?: () => void } = {}) {
     let nextId = 1;
     function from() {
       const filters: Array<(row: Row) => boolean> = [];
       let patch: Row | null = null;
       let insertRow: Row | null = null;
+      let removing = false;
       const run = async (single: boolean) => {
         if (insertRow) {
+          opts.beforeInsert?.();
           if (opts.uniqueRunning && rows.some((row) => row.user_id === insertRow?.user_id && row.status === "running")) {
             return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint" } };
           }
@@ -355,6 +360,10 @@ describe("one 'Plan it' at a time (100, 11)", () => {
           return { data: row, error: null };
         }
         const matching = rows.filter((row) => filters.every((keep) => keep(row)));
+        if (removing) {
+          for (const row of matching) rows.splice(rows.indexOf(row), 1);
+          return { data: null, error: null };
+        }
         if (patch) {
           matching.forEach((row) => Object.assign(row, patch));
           return { data: null, error: null };
@@ -369,6 +378,10 @@ describe("one 'Plan it' at a time (100, 11)", () => {
         },
         insert: (value: Row) => {
           insertRow = value;
+          return builder;
+        },
+        delete: () => {
+          removing = true;
           return builder;
         },
         eq: (key: string, value: unknown) => {
@@ -403,22 +416,66 @@ describe("one 'Plan it' at a time (100, 11)", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("maps the unique index's 23505 (two tabs at once) to the same sentence", async () => {
+  it("maps the unique index's 23505 (two tabs at once) to the same sentence, and spends no AI use (11)", async () => {
     // The other tab's row appears between this request's check and its insert.
     const rows: Row[] = [];
-    const allowance = vi.fn(async () => {
-      rows.push({ id: "other", user_id: "u1", status: "running", created_at: new Date(NOW).toISOString() });
+    const allowance = vi.fn(async () => {});
+    const requests = fakeRequests(rows, {
+      uniqueRunning: true,
+      beforeInsert: () => {
+        if (!rows.some((row) => row.id === "other")) {
+          rows.push({ id: "other", user_id: "u1", status: "running", created_at: new Date(NOW).toISOString() });
+        }
+      },
     });
     const error = await failure(
-      startPlanRequest(fakeRequests(rows, { uniqueRunning: true }), "u1", "Plan my week", {
+      startPlanRequest(requests, "u1", "Plan my week", {
         windowMs: WINDOW,
         enforceAllowance: allowance,
         nowMs: NOW,
+        admin: requests,
       }),
     );
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toBe(PLAN_ALREADY_RUNNING);
     expect(error.message).not.toMatch(/23505|duplicate/);
+    // The tab that lost the race did not run, so it recorded no use of the allowance.
+    expect(allowance).not.toHaveBeenCalled();
+    expect(rows.map((row) => row.id)).toEqual(["other"]);
+  });
+
+  it("records the use only once its own row holds the running slot (11)", async () => {
+    const rows: Row[] = [];
+    const requests = fakeRequests(rows, { uniqueRunning: true });
+    const allowance = vi.fn(async () => {
+      expect(rows).toEqual([expect.objectContaining({ user_id: "u1", status: "running" })]);
+    });
+    await startPlanRequest(requests, "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: allowance, admin: requests });
+    expect(allowance).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused request whose row cannot be removed is closed, so it never blocks the next one (11)", async () => {
+    const rows: Row[] = [];
+    const requests = fakeRequests(rows, { uniqueRunning: true });
+    const brokenAdmin = {
+      from: () => {
+        throw new Error("Missing Supabase environment variable(s): SUPABASE_URL");
+      },
+    } as unknown as SupabaseClient<Database>;
+    const refuse = vi.fn(async () => {
+      throw new Error("You have reached this demo's limit of 6 planner requests per hour. Please try again later.");
+    });
+    await expect(
+      startPlanRequest(requests, "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: refuse, admin: brokenAdmin }),
+    ).rejects.toThrow(/limit of 6 planner requests/);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        error: "You have reached this demo's limit of 6 planner requests per hour. Please try again later.",
+      }),
+    ]);
+    const next = await startPlanRequest(requests, "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: allowAll, admin: requests });
+    expect(next.status).toBe("running");
   });
 
   it("closes a request the host cut off, so the unique index does not block the next one", async () => {
@@ -434,9 +491,10 @@ describe("one 'Plan it' at a time (100, 11)", () => {
     const refuse = vi.fn(async () => {
       throw new Error("You have reached this demo's limit of 6 planner requests per hour. Please try again later.");
     });
-    await expect(startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, enforceAllowance: refuse, nowMs: NOW })).rejects.toThrow(
-      /limit of 6 planner requests/,
-    );
+    const requests = fakeRequests(rows);
+    await expect(
+      startPlanRequest(requests, "u1", "Plan my week", { windowMs: WINDOW, enforceAllowance: refuse, nowMs: NOW, admin: requests }),
+    ).rejects.toThrow(/limit of 6 planner requests/);
     expect(rows).toHaveLength(1);
     const allowed = await startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: WINDOW, nowMs: NOW, enforceAllowance: allowAll });
     expect(allowed).toMatchObject({ input: "Plan my week", status: "running" });

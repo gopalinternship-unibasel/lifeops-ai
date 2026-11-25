@@ -29,21 +29,24 @@ import {
 } from "@/lib/dashboard-view";
 import { planItemEventTitle } from "@/lib/plan-state";
 import { prioritiesSubtitle } from "@/lib/priorities";
-import { resolveLLMConfig } from "@/server/ai/llm.server";
+import { isLocalBaseUrl, resolveLLMConfig, type LLMConfig } from "@/server/ai/llm.server";
 import type { WeekPlan } from "@/types/plan";
 
 // Local times, whatever zone the tests run in.
 const local = (y: number, m: number, d: number, h: number, min = 0) => new Date(y, m - 1, d, h, min).toISOString();
 
 describe("AI badge (12)", () => {
+  // As fetchDashboard builds it: `local` from the server's isLocalBaseUrl.
+  const badge = (config: LLMConfig) => aiStatus({ ...config, local: isLocalBaseUrl(config.baseUrl) });
+
   it("says plainly that AI is not set up, and never pairs 'Ollama' with the configured model", () => {
-    const pages = aiStatus(resolveLLMConfig("chat", { LLM_MODEL: "@cf/zai-org/glm-4.7-flash" }, true));
+    const pages = badge(resolveLLMConfig("chat", { LLM_MODEL: "@cf/zai-org/glm-4.7-flash" }, true));
     expect(pages).toEqual({ configured: false, label: "AI not set up on this site", local: false });
     expect(pages.label).not.toMatch(/Ollama/);
   });
 
   it("names the hosted provider and model when one is set", () => {
-    const vercel = aiStatus(
+    const vercel = badge(
       resolveLLMConfig(
         "chat",
         { LLM_BASE_URL: "https://api.cloudflare.com/client/v4/accounts/x/ai/v1", LLM_MODEL: "@cf/zai-org/glm-4.7-flash" },
@@ -54,7 +57,7 @@ describe("AI badge (12)", () => {
   });
 
   it("a local Ollama is labelled as such and marked local (minutes-long waits)", () => {
-    expect(aiStatus(resolveLLMConfig("chat", {}, false))).toEqual({ configured: true, label: "Ollama · llama3.1:8b", local: true });
+    expect(badge(resolveLLMConfig("chat", {}, false))).toEqual({ configured: true, label: "Ollama · llama3.1:8b", local: true });
   });
 });
 

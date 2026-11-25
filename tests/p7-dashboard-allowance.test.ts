@@ -2,10 +2,11 @@
  * "Plan it" and the demo's AI allowance (finding 11, dashboard part; audit of 24 Nov 2026).
  *
  * runChaosPlan calls startPlanRequest without an allowance of its own, so startPlanRequest must
- * record the use itself: one "planner" use per press, before the request row is stored, also
- * when the planner service is switched off and the in-app assistant answers (its chat turn only
- * checks the chat allowance and records nothing). Before the fix, a press with the planner off
- * recorded no use at all.
+ * record the use itself: one "planner" use per press, also when the planner service is switched
+ * off and the in-app assistant answers (its chat turn only checks the chat allowance and records
+ * nothing). Before the fix, a press with the planner off recorded no use at all. Since round 2 the
+ * use is recorded once the request row holds the one running slot (a second tab that lost the race
+ * to the unique index had already spent a use); see tests/p7-dashboard-planner-client.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -74,13 +75,13 @@ afterEach(() => {
 });
 
 describe("'Plan it' records one AI use per press (11)", () => {
-  it("with the planner switched off, the press still records one 'planner' use before the row", async () => {
+  it("with the planner switched off, the press still records one 'planner' use for its row", async () => {
     vi.stubEnv("LIFEOPS_BACKEND_URL", "off");
     vi.stubEnv("LIFEOPS_HOSTED", "1");
     const rows: Row[] = [];
     enforce.mockImplementationOnce(async () => {
-      // Recorded before the request row exists.
-      expect(rows).toHaveLength(0);
+      // Recorded once this request's row holds the running slot.
+      expect(rows).toHaveLength(1);
     });
     await startPlanRequest(fakeRequests(rows), "u1", "Plan my week", { windowMs: 300_000 });
     expect(enforce).toHaveBeenCalledTimes(1);

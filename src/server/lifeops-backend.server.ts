@@ -379,9 +379,12 @@ export async function backendRequest<T>(
       res.status >= 400 && res.status < 500 && ![404, 405, 408, 429].includes(res.status) && isJson;
     const appNotFound = res.status === 404 && detail !== "" && detail.toLowerCase() !== "not found";
     if (serviceRefusal || appNotFound) {
+      // On the hosted sites a detail with an address, a setting name or parser text is not shown
+      // (it is in the log line above), as for the planner's notes and stored texts.
+      const shown = visitorSafeText(detail, "", hosted);
       throw new Error(
-        detail
-          ? `The planner service could not do this: ${detail}.`
+        shown
+          ? `The planner service could not do this: ${shown}.`
           : "The planner service could not accept this request.",
       );
     }
@@ -457,15 +460,69 @@ export const INTERRUPTED_TEXT = "The request was cut off before it finished, for
 
 const REQUEST_COLUMNS = "id, input, status, result, error, created_at, finished_at";
 
+/** The longest error text planner_requests stores (CHECK in migration 20261124110100). */
+export const REQUEST_ERROR_MAX = 2000;
+
+/**
+ * An error text cut to what planner_requests.error holds. A longer one (a developer message on a
+ * local run can carry a whole Google answer) made the database refuse the update that closes
+ * the request, which then kept showing "Planning…" until its stale window had passed. Cut by
+ * characters, as the database counts them, so no half of a character pair is stored.
+ */
+export function storableRequestError(text: string): string {
+  const characters = Array.from(text);
+  return characters.length > REQUEST_ERROR_MAX ? characters.slice(0, REQUEST_ERROR_MAX).join("") : text;
+}
+
+/** Stored for a refused request whose row could not be removed. */
+const NOT_STARTED_TEXT = "This request was not started. Please try again later.";
+
+/**
+ * A request the allowance refused never started: its row is removed with the service role (users
+ * cannot delete requests), so a refusal leaves no row, as before the row was stored first. When
+ * that fails, the row is closed as failed with the refusal, so it never blocks "Plan it".
+ */
+async function withdrawPlanRequest(
+  supabase: SupabaseClient<Database>,
+  admin: SupabaseClient<Database>,
+  userId: string,
+  id: string,
+  refusal: unknown,
+): Promise<void> {
+  try {
+    const { error } = await admin.from("planner_requests").delete().eq("id", id).eq("user_id", userId);
+    if (!error) return;
+    console.error("[lifeops] Plan it: could not remove a refused request:", describeCause(error));
+  } catch (error: unknown) {
+    console.error("[lifeops] Plan it: could not remove a refused request:", describeCause(error));
+  }
+  const reason = refusal instanceof Error && refusal.message.trim() ? refusal.message.trim() : "";
+  const { error: closeError } = await supabase
+    .from("planner_requests")
+    .update({
+      status: "failed",
+      error: storableRequestError(visitorSafeText(reason, NOT_STARTED_TEXT) || NOT_STARTED_TEXT),
+      finished_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    .eq("user_id", userId)
+    .eq("status", "running");
+  if (closeError) console.error("[lifeops] Plan it: could not close a refused request:", describeCause(closeError));
+}
+
 /**
  * Store a new "Plan it" request as running, one at a time per user: a second tab used to start a
  * second planner run (and spend a second AI request).
  *
  * Every request records one "planner" use of the demo's AI allowance (off unless the AI_*
- * settings are set), after the checks and before the row is stored, so a refused request leaves
- * no row. That holds whether the planner service or the in-app assistant answers it: the
- * assistant's chat turn only checks the chat allowance and records no use of its own, so a press
- * with the planner switched off was not counted at all. `enforceAllowance` is for tests.
+ * settings are set). That holds whether the planner service or the in-app assistant answers it:
+ * the assistant's chat turn (runChatTurn without recordAiUse) only checks the chat allowance and
+ * records no use of its own, so a press with the planner switched off was not counted at all.
+ * The use is recorded right after the row is stored, once this request holds the one running
+ * slot: recorded before the insert, the use of a second tab that lost the race to the unique
+ * index (below) was spent on a request that never ran. A refused request's row is removed again
+ * (withdrawPlanRequest), so a refusal still leaves no row. `enforceAllowance` and `admin` are for
+ * tests.
  *
  * A request the host cut off is still "running" in the table, although the page shows it as
  * interrupted once `windowMs` has passed; it is closed first. Without that, the unique index on
@@ -476,7 +533,12 @@ export async function startPlanRequest(
   supabase: SupabaseClient<Database>,
   userId: string,
   input: string,
-  opts: { windowMs: number; nowMs?: number; enforceAllowance?: typeof enforceAiAllowance },
+  opts: {
+    windowMs: number;
+    nowMs?: number;
+    enforceAllowance?: typeof enforceAiAllowance;
+    admin?: SupabaseClient<Database>;
+  },
 ): Promise<PlanRequestRow> {
   const now = opts.nowMs ?? Date.now();
   const cutoff = new Date(now - opts.windowMs).toISOString();
@@ -499,8 +561,6 @@ export async function startPlanRequest(
   if (runningError) throw dbError("check your running plan request", runningError);
   if (running) throw new Error(PLAN_ALREADY_RUNNING);
 
-  await (opts.enforceAllowance ?? enforceAiAllowance)(supabaseAdmin, userId, "planner");
-
   const { data: row, error: insertError } = await supabase
     .from("planner_requests")
     .insert({ user_id: userId, input, status: "running" })
@@ -509,6 +569,14 @@ export async function startPlanRequest(
   if (insertError) {
     if (insertError.code === "23505") throw new Error(PLAN_ALREADY_RUNNING);
     throw dbError("start the plan request", insertError);
+  }
+
+  const admin = opts.admin ?? supabaseAdmin;
+  try {
+    await (opts.enforceAllowance ?? enforceAiAllowance)(admin, userId, "planner");
+  } catch (error: unknown) {
+    await withdrawPlanRequest(supabase, admin, userId, row.id, error);
+    throw error;
   }
   return row;
 }

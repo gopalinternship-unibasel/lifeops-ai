@@ -40,15 +40,15 @@ export interface AiStatus {
   local: boolean;
 }
 
-const LOCAL_HOST = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
-
 /**
  * The AI badge. Without a provider the badge says so, instead of pairing the local default's name
  * with the configured model ("Ollama · @cf/zai-org/glm-4.7-flash", a pair that does not exist).
+ * `local` comes from the server's one check for a model on this machine (isLocalBaseUrl in
+ * src/server/ai/llm.server.ts); a second copy of that check here had already drifted from it.
  */
-export function aiStatus(config: { configured: boolean; provider: string; model: string; baseUrl: string }): AiStatus {
+export function aiStatus(config: { configured: boolean; provider: string; model: string; local: boolean }): AiStatus {
   if (!config.configured) return { configured: false, label: "AI not set up on this site", local: false };
-  return { configured: true, label: `${config.provider} · ${config.model}`, local: LOCAL_HOST.test(config.baseUrl) };
+  return { configured: true, label: `${config.provider} · ${config.model}`, local: config.local };
 }
 
 /** Why the planner service is not used (BackendUnavailableReason on the server). */
