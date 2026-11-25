@@ -93,7 +93,9 @@ describe("text length limits agreed with the forms and the server (contract 2)",
 describe("rows per account (finding 41)", () => {
   const limits = sql("20261124110100");
   // One account's worst case stays a small share of the free database (500 MB): see the
-  // migration's header for the sum.
+  // migration's header for the sum. These checks read the round-1 file as written; since
+  // 20261125120000 six of these tables keep each account's newest rows instead of refusing, and
+  // the limits in force are checked in tests/p8-database-r2-row-limits.test.ts.
   const caps: Array<[string, number]> = [
     ["calendar_events", 1000],
     ["chat_card_actions", 1000],

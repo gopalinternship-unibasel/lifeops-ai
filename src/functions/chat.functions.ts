@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { ensureSeedEvents, listEventsForRange } from "@/server/connectors/calendar.mock";
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { normalizeTimeZone } from "@/server/timezone.server";
@@ -111,7 +112,9 @@ export const clearChatHistory = createServerFn({ method: "POST" })
       .eq("user_id", userId);
     if (sessionDeleteError) throw dbError("delete your chat", sessionDeleteError);
 
-    const { error: cardDeleteError } = await supabase
+    // With the service role, scoped to the user: the user's token may delete only a claim still
+    // without a result (migration 20261124110300), so every handled card's record stayed.
+    const { error: cardDeleteError } = await supabaseAdmin
       .from("chat_card_actions")
       .delete()
       .eq("user_id", userId);
