@@ -3,7 +3,7 @@
  * server (the unit tests run in Node with no DOM): the move cards retired after a change is
  * applied (finding 26) and the load-error notice after a refused sign-in (finding 92).
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -86,5 +86,25 @@ describe("the workspace load error (finding 92, round-2 review)", () => {
     const catchBlock = source.match(/async function bootstrap\(\)[\s\S]*?\} catch \(err: unknown\) \{([\s\S]*?)\n {4}\}/)?.[1] ?? "";
     expect(catchBlock).toContain("setBootError(getVisitorErrorMessage(err");
     expect(catchBlock).not.toContain("setBootError(getErrorMessage(");
+  });
+
+  it("every other error text of the workspace gets the same sentence (second review)", () => {
+    // The calendar error in the panel, the chat error, and the toasts for remembering a
+    // dismissal and for saving or applying a card showed "Unauthorized: Invalid token".
+    const files = [
+      "../src/routes/app.index.tsx",
+      ...readdirSync(new URL("../src/components/workspace/", import.meta.url))
+        .filter((name) => name.endsWith(".tsx"))
+        .map((name) => `../src/components/workspace/${name}`),
+    ];
+    const calls: Record<string, number> = {};
+    for (const file of files) {
+      const source = readFileSync(new URL(file, import.meta.url), "utf8");
+      expect(source, file).not.toMatch(/\bgetErrorMessage\(/);
+      expect(source, file).not.toMatch(/sign-in has expired/);
+      calls[file] = source.match(/\bgetVisitorErrorMessage\(/g)?.length ?? 0;
+    }
+    expect(calls["../src/routes/app.index.tsx"]).toBe(4);
+    expect(calls["../src/components/workspace/ContextPanel.tsx"]).toBe(3);
   });
 });

@@ -4,7 +4,7 @@ import { useRef, useState, type KeyboardEvent } from "react";
 import type { PanelPayload, PriorityRow, ScheduleBlock, PendingEvent, PendingEventChange, InsightCard, InboxSummary, EmailDraftSuggestion } from "@/types/panel";
 import { saveCalendarEvent, saveGmailDraft, updateCalendarEvent, removeCalendarEvent } from "@/functions/google.functions";
 import { toast } from "sonner";
-import { getErrorMessage } from "@/lib/errors";
+import { getVisitorErrorMessage } from "@/lib/errors";
 import { getBrowserTimeZone } from "@/lib/date";
 import { uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
 
@@ -281,7 +281,7 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
       toast.success(isDelete ? "Event cancelled" : "Event updated");
       onApplied(change.id, change);
     } catch (e: unknown) {
-      toast.error(getErrorMessage(e, "Failed"));
+      toast.error(getVisitorErrorMessage(e, "Failed"));
       setBusy(false);
     }
   }
@@ -330,7 +330,7 @@ export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent;
       if (!r.ok) { toast.error(r.error ?? "Save failed"); setBusy(false); return; }
       toast.success("Added to your calendar");
       onSaved(ev.id, { title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes });
-    } catch (e: unknown) { toast.error(getErrorMessage(e, "Save failed")); setBusy(false); }
+    } catch (e: unknown) { toast.error(getVisitorErrorMessage(e, "Save failed")); setBusy(false); }
   }
   return (
     <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3">
@@ -417,7 +417,7 @@ export function EmailDraftCard({ draft, onSaved }: { draft: EmailDraftSuggestion
       toast.success(r.draft.provider === "gmail" ? "Draft saved to Gmail (not sent)" : "Draft saved to the demo mailbox (not sent)");
       setSaved(true);
       onSaved(r.draft.draftId, body);
-    } catch (e: unknown) { toast.error(getErrorMessage(e, "Failed")); }
+    } catch (e: unknown) { toast.error(getVisitorErrorMessage(e, "Failed")); }
     finally { setBusy(false); }
   }
 

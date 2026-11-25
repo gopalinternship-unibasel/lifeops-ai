@@ -247,7 +247,7 @@ describe("chat errors on the hosted demo", () => {
 
 describe("the note after the sign-in was refused while waiting", () => {
   it("tells the visitor what happened and what to do, without internals", () => {
-    expect(SIGNED_OUT_NOTE).toMatch(/sign-in has expired/);
+    expect(SIGNED_OUT_NOTE).toMatch(/session has expired/);
     expect(SIGNED_OUT_NOTE).toMatch(/Reload the page/);
     expect(SIGNED_OUT_NOTE).not.toMatch(/401|Unauthori[sz]ed|token/i);
   });
