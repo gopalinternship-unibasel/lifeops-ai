@@ -9,6 +9,8 @@
  * event is over the email task is not ranked at all. Everything is labelled as rule-based.
  */
 import { formatTimeInZone, normalizeTimeZone } from "@/server/timezone.server";
+import { rangesOverlap } from "@/server/calendar/time-ranges.server";
+import { removeSentences } from "@/server/ai/reply-guard.server";
 import type { PriorityRow } from "@/types/panel";
 
 export interface BriefingEmail {
@@ -32,6 +34,26 @@ function oneLine(text: string, max: number): string {
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 
+/**
+ * Text from an email or a calendar as plain text in MONDAY's own Markdown message: the
+ * characters that would make a link ("[click](https://...)", "<https://...>"), bold, italics or
+ * code are escaped. A real sender or subject is written by someone else and is shown in
+ * MONDAY's message since the inbox is listed by rules (review of 24 Nov 2026).
+ */
+export function markdownText(text: string): string {
+  return (text ?? "").replace(/[\\`*_[\]<>]/g, "\\$&");
+}
+
+/**
+ * The sender's name from a From header: "Prof. Marlow <marlow@university.edu>" -> "Prof. Marlow".
+ * The whole header made reasons such as "From Prof. Marlow <marlow@university.edu>'s email"
+ * (review of 24 Nov 2026). A header that is only an address stays as it is.
+ */
+export function senderName(from: string): string {
+  const name = (from ?? "").replace(/\s*<[^>]*>\s*$/, "").replace(/^"(.*)"$/, "$1").trim();
+  return name || (from ?? "").replace(/^<(.*)>$/, "$1").trim();
+}
+
 // Words that say nothing about WHICH commitment an email or event is about.
 const GENERIC_WORDS = new Set([
   "the", "and", "for", "with", "from", "your", "you", "our", "this", "that", "are", "was", "will",
@@ -46,7 +68,11 @@ export function significantWords(text: string): Set<string> {
   return new Set(words.filter((word) => !GENERIC_WORDS.has(word)));
 }
 
-/** Clock times written in a text ("7 PM", "7:30pm", "19:00"), as "HH:MM" on a 24-hour clock. */
+/**
+ * Clock times written in a text ("7 PM", "7:30pm", "19:00"), as "HH:MM" on a 24-hour clock. The
+ * "2:00" of "2:00 PM" is not read a second time as 02:00 (it was until the review of 24 Nov
+ * 2026, so a correct 12-hour answer looked like it named a wrong time).
+ */
 export function mentionedClockTimes(text: string): Set<string> {
   const times = new Set<string>();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -54,7 +80,9 @@ export function mentionedClockTimes(text: string): Set<string> {
     const hour = (Number(m[1]) % 12) + (m[3].toLowerCase() === "p" ? 12 : 0);
     times.add(`${pad(hour)}:${m[2] ?? "00"}`);
   }
-  for (const m of (text ?? "").matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b/g)) times.add(`${pad(Number(m[1]))}:${m[2]}`);
+  for (const m of (text ?? "").matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*[ap]\.?\s?m\b)/gi)) {
+    times.add(`${pad(Number(m[1]))}:${m[2]}`);
+  }
   return times;
 }
 
@@ -94,6 +122,11 @@ export function buildRuleBasedBriefing(opts: {
   header?: string;
   /** Say that the priorities on the right are ranked by rule (default true). */
   prioritiesNote?: boolean;
+  /**
+   * The unread emails could not be fetched (a Gmail error). The briefing says so instead of
+   * "No unread emails — inbox is clear.", which it stated as a fact after a failed fetch.
+   */
+  inboxUnavailable?: boolean;
 }): { reply: string; priorities: PriorityRow[] } {
   const timeZone = normalizeTimeZone(opts.timeZone);
   const nowMs = opts.nowMs ?? Date.now();
@@ -104,19 +137,25 @@ export function buildRuleBasedBriefing(opts: {
   const unread = opts.emails.filter((email) => email.unread);
   const events = [...opts.todayEvents].sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
 
+  // The reason is a sentence for the reader (the caller makes sure it holds no developer detail
+  // on a hosted site); with none, the header gives no empty brackets.
+  const reason = oneLine(opts.reason, 160);
   const lines: string[] = [
     opts.header ??
-      `⚠️ The AI model did not answer (${oneLine(opts.reason, 160)}), so this briefing was put together by simple rules. Ask again later for the AI's own ranking.`,
+      `⚠️ The AI model did not answer${reason ? ` (${reason})` : ""}, so this briefing was put together by simple rules. Ask again later for the AI's own ranking.`,
     "",
-    `**📬 Inbox (${opts.unreadCount} unread)**`,
+    opts.inboxUnavailable ? "**📬 Inbox**" : `**📬 Inbox (${opts.unreadCount} unread)**`,
   ];
-  if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
+  if (opts.inboxUnavailable) lines.push("Your inbox could not be read right now.");
+  else if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
   for (const email of unread) {
-    lines.push(`- **${oneLine(email.from, 60)}** — *${oneLine(email.subject, 90)}* — ${oneLine(email.snippet, 120)}`);
+    lines.push(
+      `- **${markdownText(oneLine(email.from, 60))}** — *${markdownText(oneLine(email.subject, 90))}* — ${markdownText(oneLine(email.snippet, 120))}`,
+    );
   }
   lines.push("", "**📅 Today**");
   if (events.length === 0) lines.push("Nothing scheduled today.");
-  for (const event of events) lines.push(`- ${time(event.starts_at)} – ${time(event.ends_at)} ${oneLine(event.title, 90)}`);
+  for (const event of events) lines.push(`- ${time(event.starts_at)} – ${time(event.ends_at)} ${markdownText(oneLine(event.title, 90))}`);
   if (opts.prioritiesNote !== false) {
     lines.push(
       "",
@@ -142,7 +181,7 @@ export function buildRuleBasedBriefing(opts: {
     const about = tasks.filter((email) => !folded.has(email) && isSameCommitment(event, email, timeZone));
     for (const email of about) folded.add(email);
     const fromEmails = about
-      .map((email) => `also in ${oneLine(email.from, 50)}'s email: ${oneLine(email.extractedTask!.title, 80)}`)
+      .map((email) => `also in ${oneLine(senderName(email.from), 50)}'s email: ${oneLine(email.extractedTask!.title, 80)}`)
       .join("; ");
     candidates.push({
       title: oneLine(event.title, 120),
@@ -153,13 +192,13 @@ export function buildRuleBasedBriefing(opts: {
     if (folded.has(email)) continue;
     candidates.push({
       title: oneLine(email.extractedTask!.title, 120),
-      reason: `From ${oneLine(email.from, 50)}'s email — ${email.extractedTask!.importance} importance`,
+      reason: `From ${oneLine(senderName(email.from), 50)}'s email — ${email.extractedTask!.importance} importance`,
     });
   }
   // A real inbox has no extracted tasks: unread emails become "handle this" items.
   if (tasks.length === 0) {
     for (const email of unread) {
-      candidates.push({ title: `Reply to: ${oneLine(email.subject, 100)}`, reason: `Unread email from ${oneLine(email.from, 50)}` });
+      candidates.push({ title: `Reply to: ${oneLine(email.subject, 100)}`, reason: `Unread email from ${oneLine(senderName(email.from), 50)}` });
     }
   }
 
@@ -294,7 +333,7 @@ export function checkPriorityReasons(priorities: PriorityRow[], ctx: PriorityCon
     const claimsToday = /\b(today|tonight)\b/i.test(reason);
     if (!todayEvent && claimsToday) {
       const email = bestMatch(priority.title, tasks, (mail) => `${mail.extractedTask!.title} ${mail.subject}`);
-      const sender = email ? oneLine(email.from.replace(/\s*<[^>]*>/, ""), 50) : "";
+      const sender = email ? oneLine(senderName(email.from), 50) : "";
       const fromEmail = email ? `from ${sender}'s email (${email.extractedTask!.importance} importance)` : "";
       if (laterEvent) {
         reason = `${minutesOf(laterEvent)} min block on ${dayLabel(laterEvent.starts_at, timeZone)} (${time(laterEvent.starts_at)}–${time(laterEvent.ends_at)})${fromEmail ? `; ${fromEmail}` : ""}`;
@@ -316,4 +355,74 @@ export function checkPriorityReasons(priorities: PriorityRow[], ctx: PriorityCon
     return reason === priority.reason ? priority : { ...priority, reason };
   });
   return { priorities: checked, corrected };
+}
+
+/**
+ * Does a priority's title name this commitment, not just touch it? All identifying words of the
+ * shorter of the two titles are in the longer one ("Team sync" and "Team sync — demo
+ * walkthrough"), with at least two such words unless both are the same single word. Two shared
+ * words were enough until the review of 24 Nov 2026, so a separate preparation task ("Prepare
+ * demo walkthrough slides") was folded into the meeting and lost.
+ */
+function namesSameCommitment(title: string, reference: string): boolean {
+  const a = significantWords(title);
+  const b = significantWords(reference);
+  const [shorter, longer] = a.size <= b.size ? [a, b] : [b, a];
+  if (shorter.size === 0) return false;
+  if (shorter.size < 2 && longer.size !== shorter.size) return false;
+  return [...shorter].every((word) => longer.has(word));
+}
+
+/**
+ * The model's priorities with one row per commitment: an email that announces one of today's
+ * events (the demo's "Team sync moved to 7 PM today" and the 7 PM team sync) is that event, so
+ * a row for the email's task and a row for the event are one priority, as in the rule-based
+ * briefing. The higher-ranked row stays; the ranks are numbered 1, 2, 3 ... again. A live
+ * briefing listed them as two priorities (review of 24 Nov 2026). Only rows that name the event
+ * or the email's task closely are folded (see namesSameCommitment).
+ */
+export function foldSameCommitments(
+  priorities: PriorityRow[],
+  ctx: { todayEvents: BriefingEvent[]; emails: BriefingEmail[]; timeZone?: string },
+): { priorities: PriorityRow[]; folded: string[] } {
+  const timeZone = normalizeTimeZone(ctx.timeZone);
+  const tasks = ctx.emails.filter((email) => email.extractedTask);
+  const ordered = priorities.map((priority, index) => ({ priority, index })).sort((a, b) => a.priority.rank - b.priority.rank || a.index - b.index);
+  const dropped = new Set<number>();
+  const folded: string[] = [];
+  for (const event of ctx.todayEvents) {
+    const about = tasks.filter((email) => isSameCommitment(event, email, timeZone));
+    if (about.length === 0) continue;
+    const rows = ordered.filter(
+      ({ priority, index }) =>
+        !dropped.has(index) &&
+        (namesSameCommitment(priority.title, event.title) ||
+          about.some((email) => namesSameCommitment(priority.title, email.extractedTask!.title))),
+    );
+    for (const row of rows.slice(1)) {
+      dropped.add(row.index);
+      folded.push(`"${row.priority.title}" is the same commitment as "${rows[0].priority.title}"`);
+    }
+  }
+  if (dropped.size === 0) return { priorities, folded };
+  const kept = ordered.filter(({ index }) => !dropped.has(index)).map(({ priority }, i) => ({ ...priority, rank: i + 1 }));
+  return { priorities: kept, folded };
+}
+
+/** "overlaps", "conflicts with", "clash", "double-booked". */
+const OVERLAP_WORDS = /\b(?:overlap\w*|conflict\w*|clash\w*|double[- ]?booked|collid\w*)\b/i;
+
+/**
+ * Sentences of a briefing that speak of an overlap or a conflict on a day where no two events
+ * overlap. A live briefing said the team sync "now overlaps" with itself: Alicia's email about
+ * it and the calendar event are one meeting (review of 24 Nov 2026). With two events that do
+ * overlap, nothing is removed.
+ */
+export function removeFalseOverlapClaims(text: string, todayEvents: BriefingEvent[]): { text: string; removed: number } {
+  const ranges = todayEvents
+    .map((event) => [Date.parse(event.starts_at), Date.parse(event.ends_at)] as const)
+    .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end));
+  const anyOverlap = ranges.some(([start, end], i) => ranges.some(([s2, e2], j) => j > i && rangesOverlap(start, end, s2, e2)));
+  if (anyOverlap) return { text: text ?? "", removed: 0 };
+  return removeSentences(text ?? "", (sentence) => OVERLAP_WORDS.test(sentence));
 }

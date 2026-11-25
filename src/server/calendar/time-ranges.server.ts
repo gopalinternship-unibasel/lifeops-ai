@@ -56,29 +56,46 @@ export function describeConflicts(conflicts: TimedEvent[], timeZone?: string): s
   return `This time overlaps ${names.join(", ")}${more}. Pick a free slot instead.`;
 }
 
-const NAIVE_DATE_TIME = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/;
+/** "2026-11-24T19:00", "2026-11-24 19:00:00.5", optionally with an offset ("Z", "+01:00", "+0100", "+01"). */
+const ISO_DATE_TIME = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?\s*(?:(Z)|([+-])(\d{2})(?::?(\d{2}))?)?$/i;
 
 /**
  * Parse a model- or user-supplied date-time. A timestamp WITHOUT an offset is read as wall-clock
  * time in the user's time zone (small models often omit or invent offsets). Returns an ISO
  * string in UTC, or null when the value is not a date-time.
+ *
+ * Only ISO date-times are read (review of 24 Nov 2026). An impossible clock ("25:00", "23:75")
+ * used to roll over into the next hour or day, a date alone became UTC midnight, and other text
+ * ("Tue 2026-11-24 19:00") was read in the server's own zone (UTC on Vercel and in the Edge
+ * Function) instead of the user's.
  */
 export function parseUserDateTime(value: string, timeZone?: string): string | null {
-  const trimmed = value.trim();
-  const naive = NAIVE_DATE_TIME.exec(trimmed);
-  if (naive) {
+  const match = ISO_DATE_TIME.exec(value.trim());
+  if (!match) return null;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = Number(match[4] ?? 0);
+  // The first three digits of the fraction, read as text so no floating-point rounding creeps in.
+  const millisecond = match[5] ? Number(match[5].padEnd(3, "0").slice(0, 3)) : 0;
+  // 24:00 is the end of the day; anything later, or minutes and seconds past 59, is not a time.
+  if (hour > 24 || minute > 59 || second > 59 || (hour === 24 && (minute > 0 || second > 0 || millisecond > 0))) return null;
+  if (!match[6] && !match[7]) {
     try {
-      return zonedDateTimeToISO(
-        naive[1],
-        { hour: Number(naive[2]), minute: Number(naive[3]), second: Number(naive[4] ?? 0) },
-        normalizeTimeZone(timeZone),
-      );
+      return zonedDateTimeToISO(match[1], { hour, minute, second, millisecond }, normalizeTimeZone(timeZone));
     } catch {
       return null;
     }
   }
-  const ms = new Date(trimmed).getTime();
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  const [year, month, day] = match[1].split("-").map(Number);
+  const wallClock = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);
+  // The date itself must exist ("2026-02-30" is not a date).
+  const midnight = new Date(Date.UTC(year, month - 1, day));
+  if (midnight.getUTCFullYear() !== year || midnight.getUTCMonth() !== month - 1 || midnight.getUTCDate() !== day) return null;
+  const offsetHours = Number(match[8] ?? 0);
+  const offsetMinutes = Number(match[9] ?? 0);
+  if (offsetHours > 14 || offsetMinutes > 59) return null;
+  const offsetMs = (match[7] === "-" ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
+  return new Date(wallClock - offsetMs).toISOString();
 }
 
 /** Convert "HH:MM" on a YYYY-MM-DD date in the user's time zone to an ISO instant. */

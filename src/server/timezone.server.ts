@@ -89,7 +89,23 @@ function offsetAt(instantMs: number, timeZone: string): number {
   return representedAsUtc - rounded;
 }
 
-/** Convert a wall-clock time in an IANA zone to an absolute ISO timestamp. */
+/** The wall-clock time of an instant in a zone, written as if it were UTC (milliseconds kept). */
+function wallClockAt(instantMs: number, timeZone: string): number {
+  const p = partsAt(instantMs, timeZone);
+  const millisecond = ((instantMs % 1000) + 1000) % 1000;
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second, millisecond);
+}
+
+/**
+ * Convert a wall-clock time in an IANA zone to an absolute ISO timestamp, the way Temporal's
+ * "compatible" option does: a time that occurs twice (when clocks go back) is the earlier one,
+ * and a time that does not exist (when clocks go forward) is moved forward by the gap, so
+ * Zurich's 02:30 on the last Sunday of March is 03:30 and Cairo's missing midnight is 01:00.
+ *
+ * Until the review of 24 Nov 2026 this was a three-step fixed-point loop that has no fixed point
+ * in a gap: it ended an hour EARLY in zones east of UTC (Zurich 02:30 became 01:30, Cairo's day
+ * started at 23:00 the day before) and an hour late in zones west of it.
+ */
 export function zonedDateTimeToISO(
   date: string,
   time: { hour: number; minute?: number; second?: number; millisecond?: number },
@@ -107,13 +123,17 @@ export function zonedDateTimeToISO(
     time.millisecond ?? 0,
   );
 
-  let instant = targetWallClock;
-  for (let i = 0; i < 3; i += 1) {
-    const next = targetWallClock - offsetAt(instant, timeZone);
-    if (next === instant) break;
-    instant = next;
-  }
-  return new Date(instant).toISOString();
+  // The zone's offsets a day before and a day after: equal except near a change of offset.
+  const offsetBefore = offsetAt(targetWallClock - 86_400_000, timeZone);
+  const offsetAfter = offsetAt(targetWallClock + 86_400_000, timeZone);
+  const withOffsetBefore = targetWallClock - offsetBefore;
+  const withOffsetAfter = targetWallClock - offsetAfter;
+  // A normal time (both are the same instant), or the earlier of two occurrences.
+  if (wallClockAt(withOffsetBefore, timeZone) === targetWallClock) return new Date(withOffsetBefore).toISOString();
+  if (wallClockAt(withOffsetAfter, timeZone) === targetWallClock) return new Date(withOffsetAfter).toISOString();
+  // No such wall-clock time (the gap when clocks go forward): read it with the offset before the
+  // gap, which lands as far after the gap's end as the time is after its start.
+  return new Date(withOffsetBefore).toISOString();
 }
 
 export function todayInTimeZone(requestedTimeZone?: string): string {

@@ -3,11 +3,12 @@
  * through the user-scoped Supabase client, so row-level security still applies.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dbError, describeCause } from "@/server/public-error.server";
 import {
   addDaysISO,
+  localDateTime,
   mondayOfISODate,
   normalizeTimeZone,
-  todayInTimeZone,
   zonedDateTimeToISO,
 } from "@/server/timezone.server";
 
@@ -35,26 +36,25 @@ export interface CalendarEventPatch {
   notes?: string | null;
 }
 
-export async function ensureSeedEvents(
-  supabase: SupabaseClient,
-  userId: string,
-  requestedTimeZone?: string,
-) {
-  const { data: existing, error: selectError } = await supabase
-    .from("calendar_events")
-    .select("id")
-    .eq("user_id", userId)
-    .limit(1);
-  if (selectError) throw selectError;
-  if (existing && existing.length > 0) return;
+export interface DemoSeedEvent {
+  seed_key: "team-sync" | "lecture" | "dentist" | "acme-interview";
+  title: string;
+  starts_at: string;
+  ends_at: string;
+  notes: string | null;
+}
 
+/**
+ * The demo calendar as it stands on `today` (the user's local date): a few fixed commitments
+ * across the coming week so free-slot planning has something to work around. The demo inbox
+ * (gmail.mock.ts) is built from the same dates: the team sync tonight at 7 PM from Alicia's
+ * email, and the Acme interview on the Monday of next week.
+ */
+export function demoSeedEvents(today: string, requestedTimeZone?: string): DemoSeedEvent[] {
   const timeZone = normalizeTimeZone(requestedTimeZone);
-  const today = todayInTimeZone(timeZone);
   const at = (date: string, hour: number, minute = 0) => zonedDateTimeToISO(date, { hour, minute }, timeZone);
-  // A few fixed commitments across the coming week so free-slot planning has something to
-  // work around. They match the demo inbox (team sync tonight, Acme interview on Monday).
   const nextMonday = mondayOfISODate(addDaysISO(today, 7));
-  const seed = [
+  return [
     {
       seed_key: "team-sync",
       title: "Team sync — demo walkthrough",
@@ -84,14 +84,106 @@ export async function ensureSeedEvents(
       notes: "20-minute system design presentation (from Acme Recruiting).",
     },
   ];
+}
 
-  // Two pages can seed at the same moment; the (user_id, seed_key) constraint makes the
-  // second insert a no-op instead of duplicating every demo event.
-  const { error } = await supabase.from("calendar_events").upsert(
-    seed.map((event) => ({ ...event, user_id: userId, source: "calendar" })),
-    { onConflict: "user_id,seed_key", ignoreDuplicates: true },
+/**
+ * The connector_status row that records that a user's demo calendar was seeded. Until the
+ * review of 24 Nov 2026 the demo events were seeded whenever the calendar was empty, so a user
+ * who cancelled every event got all four demo events back on the next page load.
+ */
+export const DEMO_CALENDAR_SEEDED = "demo_calendar_seeded";
+
+/**
+ * Seed the demo calendar once per user, and keep the demo events the user has not touched in
+ * step with the demo inbox (see refreshPastDemoEvents). Runs on every mock-calendar read.
+ */
+export async function ensureSeedEvents(
+  supabase: SupabaseClient,
+  userId: string,
+  requestedTimeZone?: string,
+  nowMs: number = Date.now(),
+) {
+  const timeZone = normalizeTimeZone(requestedTimeZone);
+  const today = localDateTime(nowMs, timeZone).date;
+  const [marker, pastSeeds] = await Promise.all([
+    supabase
+      .from("connector_status")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("provider", DEMO_CALENDAR_SEEDED)
+      .maybeSingle(),
+    // Demo events that are over and that the user has never changed (updateEvent clears seed_key).
+    supabase
+      .from("calendar_events")
+      .select("id,seed_key,starts_at,ends_at")
+      .eq("user_id", userId)
+      .not("seed_key", "is", null)
+      .lte("ends_at", new Date(nowMs).toISOString()),
+  ]);
+  if (marker.error) throw dbError("load your demo calendar", marker.error);
+  if (pastSeeds.error) throw dbError("load your demo calendar", pastSeeds.error);
+
+  if (!marker.data) {
+    // Users seeded before the marker existed already have events: they are only marked. A user
+    // with an empty calendar and no marker has never been seeded.
+    const { data: existing, error: selectError } = await supabase
+      .from("calendar_events")
+      .select("id")
+      .eq("user_id", userId)
+      .limit(1);
+    if (selectError) throw dbError("load your demo calendar", selectError);
+    if (!existing || existing.length === 0) {
+      // Two pages can seed at the same moment; the (user_id, seed_key) constraint makes the
+      // second insert a no-op instead of duplicating every demo event.
+      const { error } = await supabase.from("calendar_events").upsert(
+        demoSeedEvents(today, timeZone).map((event) => ({ ...event, user_id: userId, source: "calendar" })),
+        { onConflict: "user_id,seed_key", ignoreDuplicates: true },
+      );
+      if (error) throw dbError("set up your demo calendar", error);
+    }
+    const { error: markError } = await supabase
+      .from("connector_status")
+      .upsert(
+        { user_id: userId, provider: DEMO_CALENDAR_SEEDED },
+        { onConflict: "user_id,provider", ignoreDuplicates: true },
+      );
+    // Without the marker the calendar still works; only a fully emptied calendar would be seeded
+    // again, as before. Not worth failing the page for.
+    if (markError) console.error("[lifeops] demo calendar: could not record the seeding:", describeCause(markError));
+  }
+
+  await refreshPastDemoEvents(supabase, userId, pastSeeds.data ?? [], demoSeedEvents(today, timeZone));
+}
+
+/**
+ * The demo inbox is written relative to today ("Team sync moved to 7 PM today", "interview
+ * Monday at 10am"), but the demo events were placed once, on the user's first visit. On a later
+ * day the inbox and the calendar contradicted each other (review of 24 Nov 2026). So a demo event
+ * that is over and that the user never changed moves forward to where today's demo calendar has
+ * it. Events the user moved, renamed or cancelled are left alone.
+ */
+async function refreshPastDemoEvents(
+  supabase: SupabaseClient,
+  userId: string,
+  pastSeeds: { id: string; seed_key: string | null; starts_at: string; ends_at: string }[],
+  schedule: DemoSeedEvent[],
+) {
+  await Promise.all(
+    pastSeeds.map(async (row) => {
+      const slot = schedule.find((event) => event.seed_key === row.seed_key);
+      // Only ever forward in time, so two time zones can never move an event back and forth.
+      if (!slot || Date.parse(slot.starts_at) <= Date.parse(row.starts_at)) return;
+      const { error } = await supabase
+        .from("calendar_events")
+        .update({ starts_at: slot.starts_at, ends_at: slot.ends_at })
+        .eq("id", row.id)
+        .eq("user_id", userId)
+        // Not if the user changed it in the meantime.
+        .eq("starts_at", row.starts_at)
+        .not("seed_key", "is", null);
+      if (error) console.error("[lifeops] demo calendar: could not move a past demo event forward:", describeCause(error));
+    }),
   );
-  if (error) throw error;
 }
 
 export async function listEventsForRange(
@@ -108,7 +200,7 @@ export async function listEventsForRange(
     .lt("starts_at", toIso)
     .gt("ends_at", fromIso)
     .order("starts_at", { ascending: true });
-  if (error) throw error;
+  if (error) throw dbError("load your calendar", error);
   return (data ?? []) as unknown as CalendarEventRow[];
 }
 
@@ -129,7 +221,7 @@ export async function createEvent(
     })
     .select("id,title,starts_at,ends_at,notes,source")
     .single();
-  if (error) throw error;
+  if (error) throw dbError("add the event to your calendar", error);
   return data as unknown as CalendarEventRow;
 }
 
@@ -145,7 +237,7 @@ export async function updateEvent(
     .eq("id", eventId)
     .eq("user_id", userId)
     .maybeSingle();
-  if (readError) throw readError;
+  if (readError) throw dbError("change the event", readError);
   if (!current) throw new Error("Calendar event not found");
 
   const startsAt = patch.starts_at ?? current.starts_at;
@@ -161,12 +253,14 @@ export async function updateEvent(
       starts_at: startsAt,
       ends_at: endsAt,
       notes: patch.notes === undefined ? current.notes : patch.notes,
+      // A demo event the user changed is theirs now: ensureSeedEvents no longer moves it forward.
+      seed_key: null,
     })
     .eq("id", eventId)
     .eq("user_id", userId)
     .select("id,title,starts_at,ends_at,notes,source")
     .single();
-  if (error) throw error;
+  if (error) throw dbError("change the event", error);
   return data as unknown as CalendarEventRow;
 }
 
@@ -181,7 +275,7 @@ export async function deleteEvent(
     .eq("id", eventId)
     .eq("user_id", userId)
     .select("id");
-  if (error) throw error;
+  if (error) throw dbError("cancel the event", error);
   // Deleting nothing is not a success: the event was already cancelled (or never existed).
   if (!data || data.length === 0) {
     throw new Error("This event is no longer in your calendar (already cancelled?).");

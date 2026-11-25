@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composeReply, removeActionClaims, stripInternalMarkers } from "@/server/ai/reply-guard.server";
+import { composeReply, NOTHING_ANSWERED, removeActionClaims, stripInternalMarkers } from "@/server/ai/reply-guard.server";
 import type { PendingEvent, PendingEventChange } from "@/types/panel";
 
 const ZRH = "Europe/Zurich";
@@ -68,13 +68,18 @@ describe("the reply agrees with the cards", () => {
       notes: { "pending-1": 'overlaps "Lecture": Save will be refused' },
     });
     expect(reply).toBe(
-      'Stay hydrated!\n\nProposed for your calendar:\n- **Gym — push workout**: Tue, Nov 10, 3:00 PM – 5:00 PM (overlaps "Lecture": Save will be refused)\nNothing is saved until you click **Save to Calendar** on the right.',
+      'Stay hydrated!\n\nProposed for your calendar:\n- **Gym — push workout**: Tue, Nov 10, 3:00 PM – 5:00 PM (overlaps "Lecture": Save will be refused)\n\nNothing is saved until you click **Save to Calendar** on the right.',
     );
   });
 
   it("a claim with no card left is not repeated; the user is told nothing changed", () => {
-    const reply = composeReply({ modelReply: "Your dentist appointment has been moved.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [] });
+    // After a request to do something: no valid proposal, try again with the day and time.
+    const reply = composeReply({ modelReply: "Your dentist appointment has been moved.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [], askedForAction: true });
     expect(reply).toContain("nothing was prepared or changed");
+    // After a question (no flags) the neutral notice: nothing was asked for (review of 24 Nov 2026).
+    const answer = composeReply({ modelReply: "Your dentist appointment has been moved.", timeZone: ZRH, pendingEvents: [], pendingEventChanges: [] });
+    expect(answer).toBe(NOTHING_ANSWERED);
+    expect(answer).toContain("Your calendar was not changed");
   });
 
   it("a plain answer without cards keeps the model's text (ids removed)", () => {

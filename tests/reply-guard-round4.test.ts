@@ -3,7 +3,7 @@
  * reply for a reminder that the parser used to turn into a move.
  */
 import { describe, expect, it } from "vitest";
-import { composeReply, hasWrongWeekday, removeActionClaims, resolveRefs } from "@/server/ai/reply-guard.server";
+import { composeReply, hasWrongWeekday, NOTHING_ANSWERED, removeActionClaims, resolveRefs } from "@/server/ai/reply-guard.server";
 import type { EmailDraftSuggestion, PendingEvent } from "@/types/panel";
 
 const ZRH = "Europe/Zurich";
@@ -53,8 +53,20 @@ describe("the real default model's reminder answer (10 Nov 2026)", () => {
       pendingEventChanges: [],
       refs,
       year: 2026,
+      askedForAction: true,
     });
     expect(reply).toBe("The AI model answered without a valid proposal, so nothing was prepared or changed. Please try again, naming the day and the time.");
+    // The same answer to a question gets the neutral notice (review of 24 Nov 2026).
+    expect(
+      composeReply({
+        modelReply: "Reminder set for Thursday 2026-11-14 13:00:00 for the dentist appointment.",
+        timeZone: ZRH,
+        pendingEvents: [],
+        pendingEventChanges: [],
+        refs,
+        year: 2026,
+      }),
+    ).toBe(NOTHING_ANSWERED);
   });
 
   it("other 'set' claims are claims; 'set to' and plain sentences are not", () => {
@@ -102,7 +114,7 @@ describe("a reminder is a new card, never described as a move", () => {
       refs,
     });
     expect(reply).toBe(
-      "Proposed for your calendar:\n- **Reminder: Dentist appointment**: Thu, Nov 12, 1:00 PM – 1:15 PM\nNothing is saved until you click **Save to Calendar** on the right.",
+      "Proposed for your calendar:\n- **Reminder: Dentist appointment**: Thu, Nov 12, 1:00 PM – 1:15 PM\n\nNothing is saved until you click **Save to Calendar** on the right.",
     );
   });
 

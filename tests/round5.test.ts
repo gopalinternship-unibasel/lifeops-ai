@@ -176,8 +176,11 @@ describe("a reply that says it is done, in a turn with no card", () => {
   });
 
   it("whatever else the model wrote is followed by a plain statement that nothing was added", () => {
-    // A wording no list has: it stays, but cannot stand as a confirmation.
-    expect(compose("Your Thursday now includes a dentist reminder at 1 pm.")).toBe(`Your Thursday now includes a dentist reminder at 1 pm.\n\n${NOTHING_ADDED}`);
+    // A wording no list has, with a day or a time: with no calendar card it is a claim or an echo
+    // of the request, so it goes too (review of 24 Nov 2026; it used to stay above the notice).
+    expect(compose("Your Thursday now includes a dentist reminder at 1 pm.")).toBe(NOTHING_PREPARED);
+    // Without a day or a time it stays, but cannot stand as a confirmation.
+    expect(compose("Your plans now include a dentist reminder.")).toBe(`Your plans now include a dentist reminder.\n\n${NOTHING_ADDED}`);
     // A question back is kept.
     expect(compose("What time should the yoga session start, and how long is it?")).toBe(`What time should the yoga session start, and how long is it?\n\n${NOTHING_ADDED}`);
     // A claim before a question: the claim goes, the question stays.

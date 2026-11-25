@@ -78,7 +78,8 @@ describe("rule-based first-visit briefing (the model did not answer)", () => {
       nowMs: now,
     });
     expect(reply).toContain("Nothing scheduled today.");
-    expect(priorities).toEqual([{ rank: 1, title: "Reply to: Budget review", reason: "Unread email from Ana <ana@example.com>" }]);
+    // The sender's name, not the whole From header (review of 24 Nov 2026).
+    expect(priorities).toEqual([{ rank: 1, title: "Reply to: Budget review", reason: "Unread email from Ana" }]);
   });
 });
 
