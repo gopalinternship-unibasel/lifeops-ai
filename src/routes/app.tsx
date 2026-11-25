@@ -104,8 +104,10 @@ function AppLayout() {
           {/* From lg up only, and cut short: a long address beside the links left the
               navigation a sliver at tablet widths. */}
           <span className="text-xs text-muted-foreground hidden lg:block max-w-[16rem] truncate" title={user.email}>{user.email}</span>
-          {/* Below sm only the 14 px icon shows: p-2 gives it a 30 px tap area, and -m-2 keeps it
-              where it was (the padding reaches exactly to the nav across the gap-2). */}
+          {/* Below sm only the 14 px icon shows: p-2 gives it a tap area of about 30 px, and -m-2
+              keeps it where it was. The extra 8 px on the left stays inside the header's gap-2,
+              which is never narrower than 8 px, and on the right inside its 12 px px-3, so the
+              tap area never covers the nav. */}
           <button
             type="button"
             onClick={() => {
