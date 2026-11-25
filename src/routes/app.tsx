@@ -104,13 +104,15 @@ function AppLayout() {
           {/* From lg up only, and cut short: a long address beside the links left the
               navigation a sliver at tablet widths. */}
           <span className="text-xs text-muted-foreground hidden lg:block max-w-[16rem] truncate" title={user.email}>{user.email}</span>
+          {/* Below sm only the 14 px icon shows: p-2 gives it a 30 px tap area, and -m-2 keeps it
+              where it was (the padding reaches exactly to the nav across the gap-2). */}
           <button
             type="button"
             onClick={() => {
               if (demoSignOutWarning) setConfirmingSignOut(true);
               else void finishSignOut();
             }}
-            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition"
+            className="-m-2 p-2 sm:m-0 sm:p-0 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition"
             title="Sign out"
             aria-label="Sign out"
           >

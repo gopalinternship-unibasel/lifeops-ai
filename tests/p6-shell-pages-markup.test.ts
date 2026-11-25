@@ -45,9 +45,10 @@ vi.mock("@/functions/chat.functions", () => ({ fetchCalendar: vi.fn() }));
 const { MondayMark } = await import("@/components/MondayMark");
 const { Route: LoginRoute } = await import("@/routes/login");
 const { Route: AppRoute } = await import("@/routes/app");
-const { ProfileForm } = await import("@/routes/app.profile");
-const { OnboardingProfileForm } = await import("@/routes/onboarding.profile");
-const { WeekGrid, Route: CalendarRoute } = await import("@/routes/app.calendar");
+const { ProfileForm } = await import("@/components/profile/ProfileForm");
+const { OnboardingProfileForm } = await import("@/components/onboarding/OnboardingProfileForm");
+const { Route: CalendarRoute } = await import("@/routes/app.calendar");
+const { WeekGrid } = await import("@/components/calendar/WeekGrid");
 const { hourLabel } = await import("@/lib/calendar-grid");
 
 const componentOf = (route: unknown) =>
@@ -149,6 +150,23 @@ describe("signed-in header", () => {
     const signOut = tagWith(html, "aria-label", "Sign out");
     expect(signOut).toContain("<button");
     expect(html).toContain('<span class="hidden sm:inline">Sign out</span>');
+  });
+
+  it("gives the icon-only Sign out button a phone-sized tap target without moving it", () => {
+    const signOut = tagWith(header(), "aria-label", "Sign out");
+    const classes = signOut.match(/class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+    // Tailwind spacing: one step is 4 px.
+    const step = (prefix: string) => {
+      const value = classes.find((c) => new RegExp(`^${prefix}-(\\d+(?:\\.\\d+)?)$`).test(c));
+      return value ? Number(value.slice(prefix.length + 1)) * 4 : 0;
+    };
+    const padding = step("p");
+    // Below sm only the 14 px icon (h-3.5) shows; WCAG 2.5.8 asks for at least 24 px.
+    expect(14 + 2 * padding).toBeGreaterThanOrEqual(24);
+    // An equal negative margin keeps the button's place in the header.
+    expect(step("-m")).toBe(padding);
+    // From sm up the label shows and the button looks as before.
+    expect(classes).toEqual(expect.arrayContaining(["sm:p-0", "sm:m-0"]));
   });
 
   it("marks only the current page's link as active", () => {
