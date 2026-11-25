@@ -59,7 +59,7 @@ vi.mock("@/server/google/gmail.server", () => ({ listUnreadMessages: vi.fn(), li
 vi.mock("@/server/deployment.server", () => ({ isHostedDeployment: () => true }));
 
 import { clearChatHistory } from "@/functions/chat.functions";
-import { dbError, rowLimitSentence } from "@/server/public-error.server";
+import { dbError, isRowLimitError, publicError, rowLimitSentence } from "@/server/public-error.server";
 
 const root = process.cwd();
 const migrationFiles = readdirSync(join(root, "supabase/migrations"))
@@ -95,13 +95,26 @@ describe("dbError passes the database's row-limit sentence on (finding 41)", () 
   afterEach(() => logged.mockRestore());
 
   const sentence =
-    "This demo account has reached its limit of 1000 calendar events. Ask the assistant to cancel events you no longer need, then try again.";
+    "This demo account has reached its limit of 1000 calendar events that are not over yet. Ask the assistant to cancel upcoming events you no longer need, or wait until some are over, then try again.";
 
   it("shows the visitor the sentence of a row-limit refusal instead of 'try again in a moment'", () => {
     const error = dbError("add the event to your calendar", refusal(sentence, "Row limit 1000 per user on public.calendar_events."));
     expect(error.message).toBe(sentence);
     // The cause is still logged for the operator, with the table.
     expect(String(logged.mock.calls[0]?.[1])).toContain("public.calendar_events");
+    // Marked, so a loop over many writes can stop on it (approveWeekPlan).
+    expect(isRowLimitError(error)).toBe(true);
+  });
+
+  it("marks only dbError's row-limit Errors as row-limit errors", () => {
+    expect(isRowLimitError(dbError("save it", { code: "57014", message: "canceling statement" }))).toBe(false);
+    expect(isRowLimitError(publicError(sentence))).toBe(false);
+    expect(isRowLimitError(new Error(sentence))).toBe(false);
+    expect(isRowLimitError(refusal(sentence, "Row limit 1000 per user on public.calendar_events."))).toBe(false);
+    // The Error itself carries nothing extra to the browser: only its message.
+    const error = dbError("add the event", refusal(sentence, "Row limit 1000 per user on public.calendar_events."));
+    expect(Object.keys(error)).toEqual([]);
+    expect(error.constructor).toBe(Error);
   });
 
   it("also reads a Postgres driver's error (detail, not details)", () => {
@@ -159,6 +172,7 @@ describe("row limits that bound storage without locking an account out (finding 
         .map(([table, t]) => [table, t.limit]),
     );
     expect(keep).toEqual({
+      calendar_events: 1000,
       chat_card_actions: 900,
       chat_messages: 1000,
       email_drafts: 100,
@@ -174,8 +188,24 @@ describe("row limits that bound storage without locking an account out (finding 
         .filter(([, t]) => t.fn === "enforce_user_row_limit")
         .map(([table, t]) => [table, t.limit]),
     );
-    expect(refuse).toEqual({ calendar_events: 1000, chat_sessions: 100, connector_status: 20 });
-    expect(inForce.calendar_events.sentence).toMatch(/Ask the assistant to cancel events/);
+    expect(refuse).toEqual({ chat_sessions: 100, connector_status: 20 });
+  });
+
+  it("removes only calendar events that are over, the demo events last, and refuses with what to do", () => {
+    expect(inForce.calendar_events.file).toMatch(/^20261125120000/);
+    expect(rolling).toContain(
+      "when 'calendar_events' then -- Only events that are over, the one that ended first first; the demo events last. v_removable := 'ends_at <= now()'; v_order := 'seed_key is not null, ends_at, id';",
+    );
+    expect(inForce.calendar_events.sentence).toBe(
+      "This demo account has reached its limit of 1000 calendar events that are not over yet. Ask the assistant to cancel upcoming events you no longer need, or wait until some are over, then try again.",
+    );
+  });
+
+  it("removes dismissed card records first and a claim of the last hour last", () => {
+    const fn = rolling.slice(rolling.indexOf("when 'chat_card_actions' then"));
+    expect(fn).toContain(
+      "v_order := 'status <> ''dismissed'', (result_id is null and created_at > now() - interval ''1 hour''), ' 'created_at, card_id';",
+    );
   });
 
   it("tells no visitor to clear the chat history, which the app has no control for", () => {

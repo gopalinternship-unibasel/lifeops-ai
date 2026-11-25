@@ -557,8 +557,9 @@ export async function runChatTurn(
     role: "user",
     content: message,
   });
-  // At the demo's limit of stored messages the database's own sentence says what to do (clear
-  // the chat history); "Please try again in a moment" could never succeed.
+  // A row-limit refusal is passed on as the database's own sentence, not "Please try again in a
+  // moment". Since migration 20261125120000 the database keeps each account's newest 1000
+  // messages instead of refusing one.
   if (insertMessageError) throw storageError("save your message", insertMessageError);
 
   // From here on the turn always ends with a stored assistant message, so a page that was
