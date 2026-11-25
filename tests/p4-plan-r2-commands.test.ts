@@ -11,6 +11,7 @@ import {
   liveRegionReply,
   namesPlanItem,
   parseApproveCommand,
+  planCalendarState,
   refinementClear,
 } from "@/lib/plan-state";
 import { PlanWeekGrid } from "@/components/plan/PlanWeekGrid";
@@ -116,6 +117,87 @@ describe("what a refinement asks to remove (finding 8)", () => {
     // Words such as "week", "time" or "morning" name no activity.
     const week = clear("remove the week review");
     expect(namesPlanItem(week as { words: string[] }, "Morning walk")).toBe(false);
+  });
+});
+
+describe("only what a request asks to clear counts (finding 8, round 2 review)", () => {
+  const clear = (text: string) => refinementClear(text, MONDAY, TODAY);
+
+  it.each([
+    "remove everything and add a swim on Sunday",
+    "Clear the plan, I'm sick until Friday",
+    "I'm away on Saturday, clear the rest of the week",
+    "clear the rest of the week because I'm away on Saturday",
+    "clear everything and book a massage on Sunday evening",
+    "Change of plans: cancel everything",
+    "clear my schedule",
+    "move the gym to Wednesday and clear everything else",
+  ])("'%s' still clears the whole plan", (text) => {
+    expect(clear(text)).toEqual({ kind: "all" });
+  });
+
+  it("days named where something is moved or added are not days to clear; what is moved counts", () => {
+    expect(clear("Move the gym from Monday to Wednesday and remove the yoga")).toEqual({
+      kind: "some",
+      dates: [],
+      words: ["gym", "yoga"],
+    });
+    expect(clear("remove the hike and add a swim on Sunday")).toEqual({ kind: "some", dates: [], words: ["hik"] });
+    expect(clear("cancel the hike, then move the yoga to Friday")).toEqual({
+      kind: "some",
+      dates: [],
+      words: ["hik", "yoga"],
+    });
+    // After an article, "book" is a noun, not a verb that starts something to add.
+    expect(clear("remove the book club on Saturday")).toEqual({ kind: "some", dates: [SAT], words: ["book", "club"] });
+  });
+
+  it("a short day name after an article is a word, and generic words name no activity", () => {
+    expect(clear("remove the sun bathing")).toEqual({ kind: "some", dates: [], words: ["bath"] });
+    expect(clear("clear sat and sun")).toMatchObject({ kind: "some", dates: [SAT, SUN] });
+    const reading = clear("remove the reading session") as { words: string[] };
+    expect(reading).toEqual({ kind: "some", dates: [], words: ["read"] });
+    expect(namesPlanItem(reading, "Deep work session")).toBe(false);
+    expect(namesPlanItem(reading, "📖 Reading session")).toBe(true);
+    expect(namesPlanItem(clear("drop the focus time") as { words: string[] }, "Family time")).toBe(false);
+  });
+
+  it("'until' a day runs from today to that day", () => {
+    expect(clear("clear everything until Friday")).toEqual({ kind: "some", dates: [TUE, WED, THU, FRI], words: [] });
+    expect(clear("cancel everything up to Thursday")).toMatchObject({ kind: "some", dates: [TUE, WED, THU] });
+    // A range keeps its own start.
+    expect(clear("clear thursday until saturday")).toMatchObject({ kind: "some", dates: [THU, FRI, SAT] });
+  });
+
+  it("a clause that only says when belongs to the request", () => {
+    expect(clear("On Saturday, remove everything")).toEqual({ kind: "some", dates: [SAT], words: [] });
+    expect(clear("This weekend: cancel everything")).toEqual({ kind: "some", dates: [SAT, SUN], words: [] });
+    expect(clear("In the evenings, clear everything")).toEqual({ kind: "some", dates: [], words: [] });
+    // Something to keep in another clause still keeps the request from being the whole plan.
+    expect(clear("Clear the week, but keep Saturday")).toEqual({ kind: "some", dates: [], words: [] });
+  });
+});
+
+describe("an item stored without an emoji matches the event it was approved as before (finding 49, round 2 review)", () => {
+  const at = (day: number, hour: number) => new Date(Date.UTC(2026, 10, day, hour)).toISOString();
+  const plan = (emoji: string): WeekPlan => ({
+    week_start: MONDAY,
+    days: [{ date: WED, headline: "", items: [{ emoji, title: "Read", starts_at: at(25, 17), ends_at: at(25, 18) }] }],
+  });
+  const event = (title: string) => ({ id: "ev-1", title, starts_at: at(25, 17), ends_at: at(25, 18) });
+  const now = Date.UTC(2026, 10, 24, 8);
+
+  it("counts '• <title>' and '<title>' as the item, but only for an item without an emoji", () => {
+    for (const title of ["• Read", "Read"]) {
+      const state = planCalendarState(plan(""), [event(title)], now);
+      expect(state.addedItems).toEqual({ [WED]: [0] });
+      expect(state.approvedDates).toEqual([WED]);
+      expect(state.otherEvents).toEqual([]);
+      expect(state.addedEventIds).toEqual(["ev-1"]);
+    }
+    const withEmoji = planCalendarState(plan("📖"), [event("• Read")], now);
+    expect(withEmoji.addedItems).toEqual({});
+    expect(withEmoji.otherEvents).toHaveLength(1);
   });
 });
 

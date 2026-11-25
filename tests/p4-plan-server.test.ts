@@ -667,6 +667,136 @@ describe("a request to remove something may empty only what it names (finding 8,
   });
 });
 
+describe("only what a request asks to clear limits what an answer may empty (finding 8, round 2 review)", () => {
+  it("'remove everything and add a swim on Sunday' may empty the other days", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(
+      answerDays(week({ [SUN]: [{ emoji: "🏊", title: "Swim", start: "10:00", end: "11:00" }] }), "Cleared, swim added."),
+    );
+
+    const result = await refine("remove everything and add a swim on Sunday");
+
+    expect(result.reply).toBe("Cleared, swim added.");
+    expect(storedPlan().days.slice(1, 6).every((day) => day.items.length === 0)).toBe(true);
+    expect(storedPlan().days[6].items.map((item) => item.title)).toEqual(["Swim"]);
+  });
+
+  it("'Clear the plan, I'm sick until Friday' may empty the plan", async () => {
+    storePlan(savedPlan());
+    mockedCallAI.mockResolvedValue(answerDays(week({}), "Cleared your week."));
+
+    await refine("Clear the plan, I'm sick until Friday");
+
+    expect(storedPlan().days.slice(1).every((day) => day.items.length === 0)).toBe(true);
+    expect(requests()[0]).toMatchObject({ status: "done" });
+  });
+
+  it("the days of a move are not days to empty, but the moved item may leave its day", async () => {
+    const plan = savedPlan();
+    plan.days[1].items = [{ emoji: "🏋️", title: "Gym", starts_at: at(TUE, 14), ends_at: at(TUE, 15), notes: null }];
+    plan.days[5].items = [{ emoji: "🧘", title: "Yoga", starts_at: at(SAT, 10), ends_at: at(SAT, 11), notes: null }];
+    const thursday = [
+      { emoji: "🏋️", title: "Gym", start: "14:00", end: "15:00" },
+      { emoji: "📖", title: "Read 4", start: "18:00", end: "19:00" },
+    ];
+    const request = "Move the gym from Tuesday to Thursday and remove the yoga";
+
+    // Wednesday's reading was not asked about ("Tuesday to Thursday" is where the gym goes).
+    storePlan(plan);
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: TUE, items: [] },
+        { date: WED, items: [] },
+        { date: THU, items: thursday },
+        { date: SAT, items: [] },
+      ]),
+    );
+    await expect(refine(request)).rejects.toThrow(
+      "The AI's answer would have removed everything planned on Wednesday, which your request did not ask for",
+    );
+    expect(storedPlan()).toEqual(plan);
+
+    // Tuesday held only the gym, Saturday only the yoga: both may be emptied.
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: TUE, items: [] },
+        { date: THU, items: thursday },
+        { date: SAT, items: [] },
+      ]),
+    );
+    await refine(request);
+    expect(storedPlan().days[1].items).toEqual([]);
+    expect(storedPlan().days[3].items.map((item) => item.title)).toEqual(["Gym", "Read 4"]);
+    expect(storedPlan().days[5].items).toEqual([]);
+    expect(storedPlan().days[2]).toEqual(plan.days[2]);
+  });
+
+  it("a generic word such as 'session' names no item", async () => {
+    const plan = savedPlan();
+    plan.days[1].items[0].title = "Deep work session";
+    storePlan(plan);
+    mockedCallAI.mockResolvedValue(answerDays(week({})));
+
+    await expect(refine("remove the reading session")).rejects.toThrow(
+      "would have removed everything planned on Tuesday, which your request did not ask for",
+    );
+    expect(storedPlan()).toEqual(plan);
+  });
+
+  it("a day that keeps an item may lose others (documented choice: only emptied days are refused)", async () => {
+    const plan = savedPlan();
+    plan.days[1].items.push({ emoji: "🚶", title: "Walk", starts_at: at(TUE, 16), ends_at: at(TUE, 17), notes: null });
+    plan.days[5].items = [{ emoji: "🥾", title: "Hike", starts_at: at(SAT, 10), ends_at: at(SAT, 14), notes: null }];
+    storePlan(plan);
+    mockedCallAI.mockResolvedValue(
+      answerDays([
+        { date: TUE, items: [{ emoji: "🎯", title: "Deep work", start: "14:00", end: "15:00" }] },
+        { date: SAT, items: [] },
+      ]),
+    );
+
+    await refine("remove the hike on Saturday");
+
+    expect(storedPlan().days[1].items.map((item) => item.title)).toEqual(["Deep work"]);
+    expect(storedPlan().days[5].items).toEqual([]);
+  });
+});
+
+describe("a stored item without an emoji also matches the event it was approved as before (finding 49, round 2 review)", () => {
+  it("'• <title>' shows as added, is not approved again, and is no repeat of a new suggestion", async () => {
+    const plan = savedPlan();
+    delete (plan.days[2].items[0] as { emoji?: string }).emoji;
+    storePlan(plan);
+    // Approved while reading the plan still gave an item without an emoji a bullet.
+    h.calendar.events.push({
+      id: "ev-wed",
+      title: "• Read 3",
+      starts_at: at(WED, 18),
+      ends_at: at(WED, 19),
+      notes: null,
+      source: "plan",
+    });
+
+    const loaded = await fetchPlan();
+    expect(loaded.addedItems).toEqual({ [WED]: [0] });
+    expect(loaded.busyEvents).toEqual([]);
+
+    const result = await approve({ dayDate: WED });
+    expect(result).toMatchObject({ created: 0, skipped: 1, conflicts: 0 });
+    expect(createEvent).not.toHaveBeenCalled();
+
+    // A second reading block that day is not refused as a repeat of the plan's own event.
+    mockedCallAI.mockResolvedValue(
+      answerDays([{ date: WED, items: [{ emoji: "📖", title: "Read 3", start: "16:00", end: "17:00" }] }]),
+    );
+    await refine("Add a second reading block on Wednesday at 16:00");
+    expect(storedPlan().days[2].items.map((item) => [item.title, item.starts_at])).toEqual([
+      ["Read 3", at(WED, 16)],
+      ["Read 3", at(WED, 18)],
+    ]);
+  });
+});
+
 describe("a stored item without an emoji keeps matching its calendar event (finding 49, round 2)", () => {
   it("shows as added, is not approved again, and an edit of another item keeps it as stored", async () => {
     const plan = savedPlan();

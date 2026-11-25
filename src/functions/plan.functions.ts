@@ -4,6 +4,7 @@ import {
   planCalendarState,
   planItemEmoji,
   planItemEventTitle,
+  planItemEventTitles,
   refinementClear,
   type PlanCalendarEvent,
 } from "@/lib/plan-state";
@@ -715,7 +716,9 @@ async function callPlanAI(opts: {
   // suggestion was dropped as a "repeat" of the plan's own event.
   const planItemKeys = new Set(
     (currentPlan?.days ?? []).flatMap((day) =>
-      day.items.map((item) => eventFingerprint(planItemEventTitle(item), item.starts_at, item.ends_at)),
+      day.items.flatMap((item) =>
+        planItemEventTitles(item).map((title) => eventFingerprint(title, item.starts_at, item.ends_at)),
+      ),
     ),
   );
   const isPlanItemEvent = (event: PlanCalendarEvent) =>
@@ -925,6 +928,10 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
   // days or activities to remove ("remove the hike on Saturday") may empty only the days it names
   // or whose items it names; any clearing word used to let an emptied plan through. Any other
   // refinement may empty days, but not the whole plan without adding anything.
+  // Only emptied days are checked, on purpose: a day that keeps an item may lose others. A
+  // refinement may reshape a day (move or retime an item, which reads as a removal plus a new
+  // item, or "make Tuesday lighter"), and a re-suggested item can be dropped by the checks above,
+  // so refusing every unnamed removal would refuse answers that do what was asked.
   if (opts.mode === "refine" && currentPlan) {
     const clear = refinementClear(opts.instructions ?? "", opts.monday, localDateTime(opts.nowMs, opts.timeZone).date);
     if (clear.kind !== "all") {
@@ -1320,7 +1327,11 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
           };
           const key = eventFingerprint(input.title, input.starts_at, input.ends_at);
           targetKeys.add(key);
-          if (existingFingerprints.has(key)) {
+          // Also under the title an item without an emoji was approved with before ("• <title>").
+          const inCalendar = planItemEventTitles(item).some((title) =>
+            existingFingerprints.has(eventFingerprint(title, item.starts_at, item.ends_at)),
+          );
+          if (inCalendar) {
             skipped++;
             continue;
           }

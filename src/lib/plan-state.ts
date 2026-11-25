@@ -31,6 +31,17 @@ export function planItemEventTitle(item: { emoji?: string; title: string }): str
   return `${item.emoji ?? ""} ${item.title}`.trim();
 }
 
+/**
+ * Every title under which a plan item can be in the calendar: the one approving writes now, and
+ * for an item stored without an emoji also "• <title>", the title such an item was approved with
+ * while reading the plan still gave it a bullet as its emoji. Without it, an item approved then
+ * showed as not added, and approving it again was held back as a conflict.
+ */
+export function planItemEventTitles(item: { emoji?: string; title: string }): string[] {
+  const title = planItemEventTitle(item);
+  return item.emoji ? [title] : [title, `• ${item.title}`.trim()];
+}
+
 function key(title: string, startsAt: string, endsAt: string): string {
   return `${title.trim()}|${Date.parse(startsAt)}|${Date.parse(endsAt)}`;
 }
@@ -43,9 +54,9 @@ export function planCalendarState(plan: WeekPlan | null, events: PlanCalendarEve
   for (const day of plan.days) {
     const added: number[] = [];
     day.items.forEach((item, index) => {
-      const itemKey = key(planItemEventTitle(item), item.starts_at, item.ends_at);
-      itemKeys.add(itemKey);
-      if (eventKeys.has(itemKey)) added.push(index);
+      const keys = planItemEventTitles(item).map((title) => key(title, item.starts_at, item.ends_at));
+      keys.forEach((itemKey) => itemKeys.add(itemKey));
+      if (keys.some((itemKey) => eventKeys.has(itemKey))) added.push(index);
     });
     if (added.length > 0) state.addedItems[day.date] = added;
     const allDone = day.items.every((item, index) => added.includes(index) || Date.parse(item.starts_at) < nowMs);
@@ -109,6 +120,9 @@ const DAY_NAME_TO_OFFSET = new Map<string, number>([
 /** Words that join two day names into a range: "Monday to Wednesday", "mon through wed". */
 const RANGE_WORDS = new Set(["to", "through", "thru", "till", "until"]);
 
+/** Words before a day that run up to it from today: "clear everything until Friday". */
+const UNTIL_WORDS = new Set(["through", "thru", "till", "until"]);
+
 /** Lower case, typographic quotes made plain, and a possessive "'s" removed ("Saturday's plan"). */
 function plainMessage(text: string): string {
   return text.toLowerCase().replace(/[’`]/g, "'").replace(/'s\b/g, " ");
@@ -146,11 +160,19 @@ type DayPhrase =
  * The days named by the words starting at `index`: a day name, a range ("monday to wednesday",
  * "from mon through wed"), "weekdays", "weekend", or "today"/"tomorrow" (in the week of `monday`
  * only). With `openEnded`, "from thursday", "since thursday", "after wednesday" and "thursday
- * onwards" also run to Sunday. Null when the words there name no day. `next` is the index after
- * the phrase.
+ * onwards" also run to Sunday, and "until friday" (or "till", "through", "up to") runs from today
+ * (in the week of `monday`) to Friday. Null when the words there name no day. `next` is the index
+ * after the phrase.
  */
 function dayPhraseAt(words: string[], index: number, monday: string, today: string, openEnded = false): DayPhrase | null {
   const word = words[index];
+  if (openEnded && (UNTIL_WORDS.has(word) || (word === "up" && words[index + 1] === "to"))) {
+    const endAt = word === "up" ? index + 2 : index + 1;
+    const last = DAY_NAME_TO_OFFSET.get(words[endAt] ?? "");
+    if (last !== undefined) {
+      return { kind: "days", offsets: offsetSpan(Math.max(0, daysBetweenISO(monday, today)), last), next: endAt + 1 };
+    }
+  }
   const start = word === "from" || (openEnded && (word === "after" || word === "since")) ? index + 1 : index;
   const first = DAY_NAME_TO_OFFSET.get(words[start] ?? "");
   if (first !== undefined) {
@@ -303,13 +325,14 @@ function isClearWordAt(words: string[], index: number): boolean {
 
 /**
  * The words a request to clear the whole plan is made of: "remove everything", "clear the rest of
- * the week", "Could you please wipe my whole plan". A clearing clause with any other word ("remove
- * the hike", "clear all evenings", "clear Saturday") asks for less than the whole plan.
+ * the week", "Could you please wipe my whole plan", "…and clear everything else" (after what is
+ * moved). A clearing clause with any other word ("remove the hike", "clear all evenings", "clear
+ * Saturday") asks for less than the whole plan.
  */
 const WHOLE_PLAN_WORDS = new Set([
   ...CLEAR_VERBS, "get", "take", "out", "no",
   "everything", "all", "it", "them", "week", "weeks", "plan", "plans", "item", "items", "activity", "activities",
-  "event", "events", "thing", "things", "stuff", "rest", "remaining", "remainder", "whole", "entire", "full",
+  "event", "events", "thing", "things", "stuff", "rest", "else", "remaining", "remainder", "whole", "entire", "full",
   "days", "schedule", "calendar",
   "the", "my", "this", "our", "of", "for", "from", "off", "up", "on", "a", "and", "so", "then", "also", "too",
   "just", "now", "please", "can", "could", "would", "will", "you", "i", "id", "d", "ll", "m", "im", "like",
@@ -339,13 +362,74 @@ const EXCEPTION_WORDS = new Set(["except", "excluding", "but", "besides", "apart
 /** Words after which a clause gives a reason: "clear the rest of the week because I'm travelling". */
 const REASON_WORDS = new Set(["because", "since", "cause", "cuz", "as", "due", "while"]);
 
+/** Verbs after which a clause adds something, so what follows is nothing to remove: "…and add a swim on Sunday". */
+const ADD_VERBS = new Set(["add", "schedule", "book", "include", "insert", "squeeze", "fit", "create"]);
+
+/**
+ * Verbs after which a clause moves something. The item moved leaves its day, so the activity
+ * counts, but the days named are not days to clear: "move the gym from Monday to Wednesday" asks
+ * to empty no Tuesday.
+ */
+const MOVE_VERBS = new Set(["move", "shift", "push", "swap", "switch", "reschedule", "postpone", "put", "replace", "change"]);
+
+/** Articles before which a short day name is a word: "remove the sun bathing" names no Sunday. */
+const ARTICLES = new Set(["the", "a", "an", "my", "your", "our"]);
+
+/** Words after which a verb of ADD_VERBS or MOVE_VERBS is a noun: "remove the book club", "clear my schedule". */
+const NOUN_BEFORE = new Set([...ARTICLES, "this", "that", "these", "those", "his", "her", "their", "some", "any", "every", "each"]);
+
+/**
+ * Words that say what kind of block a plan item is, not which activity: "remove the reading
+ * session" names the reading, not "Deep work session".
+ */
+const GENERIC_TITLE_WORDS = new Set([
+  "session", "sessions", "time", "times", "block", "blocks", "slot", "slots", "break", "breaks", "minute",
+  "minutes", "min", "mins", "practice", "routine", "task", "tasks", "quick", "short", "long", "little", "bit",
+  "new", "extra", "another", "other",
+]);
+
 /** Words that name no activity of the plan: "remove the hike on Saturday" names only the hike. */
 const NOT_ACTIVITY_WORDS = new Set([
-  ...WHOLE_PLAN_WORDS, ...TIME_WORDS, ...RANGE_WORDS, ...EXCEPTION_WORDS, ...REASON_WORDS,
+  ...WHOLE_PLAN_WORDS, ...TIME_WORDS, ...RANGE_WORDS, ...EXCEPTION_WORDS, ...REASON_WORDS, ...GENERIC_TITLE_WORDS,
   "at", "in", "with", "or", "an", "by", "its", "that", "these", "those", "there", "here", "any", "some", "one",
   "every", "each", "both", "again", "more", "less", "do", "dont", "don", "not", "is", "are", "be", "day",
   "today", "tomorrow", "weekday", "weekdays", "weekend", "weekends", "add", "move", "put", "make",
 ]);
+
+/** Words a clause that only says when may have besides days and times: "On Saturday, …", "For the weekend: …". */
+const WHEN_WORDS = new Set([
+  ...RANGE_WORDS, ...TIME_WORDS, "on", "for", "this", "the", "next", "coming", "in", "at", "and", "or", "so", "then",
+  "please", "also", "my", "of", "both", "from", "by", "only", "just", "all", "day", "days", "whole", "entire",
+  "rest", "week", "since", "onwards", "onward", "up", "weekday", "weekdays", "weekend", "weekends", "today",
+  "tomorrow",
+]);
+
+/** True when a clause only says when ("On Saturday", "this weekend", "after 6pm"): it belongs to the request. */
+function onlySaysWhen(clause: string[]): boolean {
+  return clause.length > 0 && clause.every((word) => WHEN_WORDS.has(word) || DAY_NAME_TO_OFFSET.has(word) || /\d/.test(word));
+}
+
+/** What a word of a clause belongs to: what to clear, a reason, what to keep, or what to move or add. */
+type ClausePart = "clear" | "reason" | "keep" | "move" | "add";
+
+/**
+ * The part of the clause each word belongs to. A clause starts as what to clear; "because" starts
+ * a reason, "except", "but" or "keep" what to keep, and "add" or "move" (as verbs) what to add or
+ * move, until a clearing word starts what to clear again.
+ */
+function clauseParts(clause: string[]): ClausePart[] {
+  let part: ClausePart = "clear";
+  return clause.map((word, index) => {
+    const previous = clause[index - 1] ?? "";
+    const verb = index === 0 || (!NOUN_BEFORE.has(previous) && !isClearWordAt(clause, index - 1));
+    if ((part === "keep" || part === "move" || part === "add") && isClearWordAt(clause, index)) part = "clear";
+    else if (EXCEPTION_WORDS.has(word) || (word === "other" && clause[index + 1] === "than")) part = "keep";
+    else if (part !== "reason" && verb && ADD_VERBS.has(word)) part = "add";
+    else if (part !== "reason" && verb && MOVE_VERBS.has(word)) part = "move";
+    else if (part === "clear" && REASON_WORDS.has(word) && !DAY_NAME_TO_OFFSET.has(clause[index + 1] ?? "")) part = "reason";
+    return part;
+  });
+}
 
 /** A rough stem, so that "hikes", "hiking" and "Hike" match: plural, "-ing", a final "e" and a doubled last consonant go. */
 function wordStem(word: string): string {
@@ -380,11 +464,16 @@ export type RefinementClear =
 /**
  * What a refinement asks to remove. Only a request whose clearing clause is made of whole-plan
  * words, says how much ("everything", "all", "the week", "the rest"), and names no day, no time
- * of day and nothing to keep, is "all": any clearing word
- * used to count as a request to empty the plan, so "remove the hike on Saturday" let an answer of
- * seven empty days through. Clauses without a clearing word ("…, I'm travelling") and reasons
- * ("because …") do not narrow the request, but the days they name count. "today" and "tomorrow"
- * count when they are in the week of `monday`; "from Thursday" and "after Wednesday" run to Sunday.
+ * of day and nothing to keep, is "all": any clearing word used to count as a request to empty the
+ * plan, so "remove the hike on Saturday" let an answer of seven empty days through.
+ *
+ * Only what the request asks to clear counts: the clearing part of a clause, and a clause that
+ * only says when ("On Saturday, remove everything"). Days and activities named elsewhere do not:
+ * in a clause without a clearing word ("Clear the plan, I'm sick until Friday"), a reason
+ * ("because I'm away on Saturday"), something to keep, add ("remove everything and add a swim on
+ * Sunday") or move ("move the gym from Monday to Wednesday"). The activity of what is moved still
+ * counts, since it leaves its day. "today" and "tomorrow" count when they are in the week of
+ * `monday`; "from Thursday" and "after Wednesday" run to Sunday, "until Friday" from today.
  */
 export function refinementClear(text: string, monday: string, today: string): RefinementClear {
   if (!CLEAR_REQUEST_RE.test(text)) return { kind: "none" };
@@ -396,30 +485,30 @@ export function refinementClear(text: string, monday: string, today: string): Re
   let limited = false;
   const clauses = dayRangeDashes(plainMessage(text)).split(/[.!?;,:()\n]+|\s[-‐–—]+\s|[–—]/);
   for (const clause of clauses.map(wordsOf)) {
-    // Each word belongs to what to clear, a reason, or (after "except", "but", "keep") what to keep.
-    let part: "clear" | "reason" | "keep" = "clear";
-    const parts = clause.map((word, index) => {
-      if (part === "keep" && isClearWordAt(clause, index)) part = "clear";
-      else if (EXCEPTION_WORDS.has(word) || (word === "other" && clause[index + 1] === "than")) part = "keep";
-      else if (part === "clear" && REASON_WORDS.has(word) && !DAY_NAME_TO_OFFSET.has(clause[index + 1] ?? "")) part = "reason";
-      return part;
-    });
+    const parts = clauseParts(clause);
     if (parts.includes("keep")) limited = true;
+    // What is moved leaves its day, in this clause or another ("cancel the hike, then move the gym").
+    const moved = clause.filter((word, index) => parts[index] === "move" && !MOVE_VERBS.has(word) && !ADD_VERBS.has(word));
+    activityStems(moved).forEach((stem) => words.add(stem));
+    const clearing = clause.some((_, index) => parts[index] === "clear" && isClearWordAt(clause, index));
+    if (!clearing && !onlySaysWhen(clause)) continue;
 
-    const notKept = clause.filter((_, index) => parts[index] !== "keep");
-    for (let index = 0; index < notKept.length; ) {
-      const phrase = dayPhraseAt(notKept, index, monday, today, true);
+    const toClear = clause.filter((_, index) => parts[index] === "clear");
+    for (let index = 0; index < toClear.length; ) {
+      if (ARTICLES.has(toClear[index - 1] ?? "") && /^(mon|tues?|wed|thu(rs)?|fri|sat|sun)$/.test(toClear[index])) {
+        index++;
+        continue;
+      }
+      const phrase = dayPhraseAt(toClear, index, monday, today, true);
       if (phrase?.kind === "days") phrase.offsets.forEach((offset) => offsets.add(offset));
       index = phrase ? phrase.next : index + 1;
     }
-
-    const toClear = clause.filter((_, index) => parts[index] === "clear");
     activityStems(toClear).forEach((stem) => words.add(stem));
-    if (clause.some((_, index) => parts[index] === "clear" && isClearWordAt(clause, index))) {
+    if (toClear.some((word) => TIME_WORDS.has(word) || /\d/.test(word))) limited = true;
+    if (clearing) {
       clearingClauses++;
       if (!toClear.every((word) => WHOLE_PLAN_WORDS.has(word))) wholePlan = false;
       if (toClear.some((word) => WHOLE_PLAN_SCOPE.has(word))) scoped = true;
-      if (toClear.some((word) => TIME_WORDS.has(word) || /\d/.test(word))) limited = true;
     }
   }
   if (clearingClauses > 0 && wholePlan && scoped && !limited && offsets.size === 0) return { kind: "all" };
