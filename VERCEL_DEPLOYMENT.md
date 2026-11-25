@@ -303,11 +303,16 @@ first. In this order:
 2. `supabase db push --dry-run`, then `supabase db push`: the four new files, applied as `postgres`.
 3. Right before the deploy, run `supabase/hosted/close_stale_running_requests.sql` in the SQL Editor. It
    closes requests that have been "running" for more than 15 minutes and can be run again. Then deploy
-   the new code to both editions together: the web app with `npx vercel@latest deploy --prod` (section 6,
-   step 11) and the Pages edition with `npm run release:pages` (`PAGES_DEPLOYMENT.md`). Keep the time
-   between steps 2 and 3 short: a week plan or a "Plan it" that a host cuts off in between stays
-   "running"; the old code shows it as interrupted, and the next request for that week, or the next
-   "Plan it", then fails with an error until this file or the new code closes the row.
+   the new code to the planner and both editions together, in the order of section 6, step 11: the
+   planner first with `npx vercel@latest deploy --prod --cwd fastapi-backend` (the new fields of its plan
+   request are optional, and it creates its new table for repeated plan requests itself when it
+   starts), then the web app with `npx vercel@latest deploy --prod`, then the Pages edition with
+   `npm run release:pages` (`PAGES_DEPLOYMENT.md`). The old planner ignores the calendar times that the
+   new web app sends it, so its "Plan it" blocks can lie on existing events and then fail the conflict
+   check when they are run. Keep the time between steps 2 and 3 short: a week plan or a "Plan it" that a
+   host cuts off in between stays "running"; the old code shows it as interrupted, and the next request
+   for that week, or the next "Plan it", then fails with an error until this file or the new code
+   closes the row.
 4. Run `supabase/hosted/cleanup_anonymous_users.sql` again (section 5.2). It replaces the job that the
    earlier version scheduled; its last query should list two jobs.
 5. Check: the queries commented out at the end of the check file (who may read the ledger, who may run

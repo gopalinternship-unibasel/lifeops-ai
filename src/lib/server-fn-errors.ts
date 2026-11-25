@@ -4,12 +4,13 @@
  *
  * In the browser (guardServerFnResponse): TanStack Start's client (serverFnFetcher) returns any
  * JSON answer that lacks its `x-tss-serialized` header as the function's result, whatever the HTTP
- * status. An error in JSON, such as the Supabase gateway's 546 WORKER_LIMIT or 504, or TanStack's
- * own 500 for a server function the server does not have, therefore "succeeded": the page got an
- * object without the fields it expected, and "Plan it" for example cleared the user's text and
- * showed no error. The guard turns such answers into a plain-text error with a short sentence,
- * which serverFnFetcher throws as an Error, so the page's own error handling shows it and keeps
- * what the user typed.
+ * status. An error in JSON, such as the Supabase gateway's 546 WORKER_LIMIT or 504, or h3's 500
+ * `{ unhandled: true }`, therefore "succeeded": the page got an object without the fields it
+ * expected, and "Plan it" for example cleared the user's text and showed no error. The guard turns
+ * such answers into a plain-text error with a short sentence (messageForStatus), which
+ * serverFnFetcher throws as an Error, so the page's own error handling shows it and keeps what the
+ * user typed. A server without serverFnStatusHandler (a build from before it existed) also sends
+ * that 500 for a server function it does not have; servers with it answer with a 404 instead.
  *
  * On the server (serverFnStatusHandler): TanStack answers a call to a server function the build
  * does not have, and a payload it cannot read, with HTTP 500. Both are the caller's fault (an

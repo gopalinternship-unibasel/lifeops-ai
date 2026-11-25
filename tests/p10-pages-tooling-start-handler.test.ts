@@ -107,6 +107,12 @@ process.stdout.write(JSON.stringify(out));
 );
 
 type Answer = { status: number; serialized: string | null; body: string };
+/**
+ * How long one child run may take. Alone, a run took well under a second on the development PC;
+ * with two runs of the whole suite at once, one took more than vitest's default 5 s per test and
+ * failed. So each test gets the child's own limit.
+ */
+const RUN_TIMEOUT_MS = 60_000;
 function runHandler(withMiddleware: boolean): Record<string, Answer> {
   const res = spawnSync(process.execPath, [runPath], {
     encoding: "utf8",
@@ -117,7 +123,7 @@ function runHandler(withMiddleware: boolean): Record<string, Answer> {
       TSS_SERVER_FN_BASE: "/lifeops-ai/_serverFn/",
       WITH_STATUS_MIDDLEWARE: withMiddleware ? "1" : "",
     },
-    timeout: 60_000,
+    timeout: RUN_TIMEOUT_MS,
   });
   if (res.status !== 0) throw new Error(`the handler run failed (${res.status}): ${res.stderr}`);
   return JSON.parse(res.stdout) as Record<string, Answer>;
@@ -130,7 +136,7 @@ describe("TanStack Start's request handler", () => {
     expect(JSON.parse(out.unknownId.body)).toMatchObject({ unhandled: true, message: "HTTPError" });
     expect(out.notSeroval.status).toBe(500);
     expect(out.notSeroval.body).toContain("Seroval Error (step: 3)");
-  });
+  }, RUN_TIMEOUT_MS);
 
   it("with the middleware answers 404 and 400 with sentences, and leaves real answers alone", () => {
     const out = runHandler(true);
@@ -146,5 +152,5 @@ describe("TanStack Start's request handler", () => {
     expect(out.ownError.body).toContain("The AI assistant is not available right now.");
     // The CSRF check still runs first.
     expect(out.crossOrigin.status).toBe(403);
-  });
+  }, RUN_TIMEOUT_MS);
 });
