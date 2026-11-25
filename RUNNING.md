@@ -87,7 +87,7 @@ analytics 55327, pooler 55329, edge-function inspector 8084.
 
 Nothing to do by hand. The start script, on its first run:
 
-1. starts the local Supabase stack and applies the 17 migrations in `supabase/migrations`
+1. starts the local Supabase stack and applies the 20 migrations in `supabase/migrations`
    (the first start downloads the Supabase images, several minutes); on every later run
    `supabase migration up` applies migrations added since, so an existing database keeps up,
 2. writes `.env.local` and `fastapi-backend/.env` from `supabase status` (local keys only, nothing is
@@ -720,14 +720,15 @@ a hosted model, and deploy (see `VERCEL_DEPLOYMENT.md`, not exercised here).
   used for 7 days. The clean-up is a one-off file for the hosted project, `supabase/hosted/cleanup_anonymous_users.sql`,
   and not a migration: the local database image has `pg_cron` too, so as a migration it would delete
   local anonymous users as well. The grants migration (`20261114120000_data_api_grants.sql`) is one of
-  the 17 migrations and runs here too, where it repeats grants that already exist. So do the four of
-  24 Nov 2026 (`VERCEL_DEPLOYMENT.md`, section 5.1): the AI usage ledger stays empty here while no
-  `AI_*` limit is set, and the size and row limits per account apply here as on the hosted sites (for
-  example 1,000 stored chat messages; clearing the chat history frees them).
+  the 20 migrations and runs here too, where it repeats grants that already exist. So do the seven of
+  24 and 25 Nov 2026 (`VERCEL_DEPLOYMENT.md`, section 5.1): the AI usage ledger stays empty here while
+  no `AI_*` limit is set, and the size and row limits per account apply here as on the hosted sites (for
+  example each account keeps its newest 1,000 stored chat messages; older ones are removed).
   Limits of the hosted demo: each allowed request that calls the model records one use in a ledger in the
   database that only the server writes (`public.ai_usage`), in the same database call that checks the cap
   and under a lock, so parallel requests are counted one at a time and cannot pass a cap together, and a
-  request that is cut off in the middle still counts. Each `Plan it` records one planner use, also when it
+  request that is cut off in the middle still counts. Each `Plan it` records one planner use once its
+  request holds the one running slot, also when it
   falls back to the in-app assistant; that fallback chat turn is checked against the chat and daily caps
   but records no use of its own, and if one of them refuses it, the planner request stays stored as failed
   with the limit sentence. The global allowance is counted per UTC day across all users. The caps are

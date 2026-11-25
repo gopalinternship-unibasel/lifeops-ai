@@ -16,6 +16,7 @@ const list = (dir: string) => readdirSync(new URL(`../${dir}/`, import.meta.url)
 const migrations = list("supabase/migrations");
 const limitsSql = read("supabase/migrations/20261124110100_text_and_row_limits.sql");
 const serverRowsSql = read("supabase/migrations/20261124110300_server_written_rows.sql");
+const rollingSql = read("supabase/migrations/20261125120000_rolling_row_limits.sql");
 const cleanupSql = read("supabase/hosted/cleanup_anonymous_users.sql");
 const closeStaleSql = read("supabase/hosted/close_stale_running_requests.sql");
 
@@ -25,7 +26,7 @@ const number = (value: number) => value.toLocaleString("en-US");
 describe("the migration count", () => {
   it("is the number of files in supabase/migrations", () => {
     const count = migrations.length;
-    expect(count).toBe(17);
+    expect(count).toBe(20);
     expect(vercel).toContain(`applies the ${count} files in \`supabase/migrations\``);
     expect(vercel).toContain(`The migration list should show ${count} applied`);
     expect(vercel).toContain(`The ${count} migrations, then the one-off clean-up file`);
@@ -33,9 +34,9 @@ describe("the migration count", () => {
     expect(running).toContain(`is one of the ${count} migrations`);
   });
 
-  it("names each migration of 24 Nov 2026 and each file in supabase/hosted", () => {
-    const newer = migrations.filter((name) => name.startsWith("20261124"));
-    expect(newer).toHaveLength(4);
+  it("names each migration of 24 and 25 Nov 2026 and each file in supabase/hosted", () => {
+    const newer = migrations.filter((name) => name.startsWith("20261124") || name.startsWith("20261125"));
+    expect(newer).toHaveLength(7);
     for (const name of newer) expect(vercel, name).toContain(`\`${name}\``);
     for (const name of list("supabase/hosted")) expect(vercel, name).toContain(`supabase/hosted/${name}`);
   });
@@ -43,7 +44,7 @@ describe("the migration count", () => {
 
 describe("the hosted upgrade order", () => {
   it("runs the check, the migrations, the stale-request file and the deploy, then the clean-up again", () => {
-    const start = vercel.indexOf("Applying the migrations of 24 Nov 2026 to the hosted project");
+    const start = vercel.indexOf("Applying the migrations of 24 and 25 Nov 2026 to the hosted project");
     expect(start).toBeGreaterThan(-1);
     const section = vercel.slice(start, vercel.indexOf("### 5.2", start));
     const order = [
@@ -70,11 +71,14 @@ describe("the hosted upgrade order", () => {
 });
 
 describe("the size and row limits", () => {
-  /** The per-user row limit of each table, from the triggers of 20261124110100. */
+  /** The per-user row limit in force for each table: the triggers of 20261124110100, replaced by
+   * those of 20261125120000 (rolling limits for most tables) where it redefines them. */
   function rowLimits(): Record<string, number> {
     const limits: Record<string, number> = {};
-    const triggers = /before insert on public\.(\w+)\s+for each row execute function public\.enforce_(?:user_row|weekly_plan)_limit\(\s*'(\d+)'/g;
-    for (const [, table, limit] of limitsSql.matchAll(triggers)) limits[table] = Number(limit);
+    const triggers = /before insert on public\.(\w+)\s+for each row execute function public\.(?:enforce_(?:user_row|weekly_plan)_limit|keep_newest_user_rows)\(\s*'(\d+)'/g;
+    for (const sql of [limitsSql, rollingSql]) {
+      for (const [, table, limit] of sql.matchAll(triggers)) limits[table] = Number(limit);
+    }
     return limits;
   }
 

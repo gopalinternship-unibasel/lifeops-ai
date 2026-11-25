@@ -17,8 +17,11 @@
 --                                can only cancel those), and Save to Calendar,
 --                                Plan it and approved week plans (up to 7 x 24 items each) add
 --                                events all the time, so a refusing limit locked an active account
---                                out of adding events for good. The four demo events go last (the
---                                app moves them forward while the demo inbox talks about them).
+--                                out of adding events for good. Events with a seed_key go last:
+--                                the four demo events (the app moves them forward while the demo
+--                                inbox talks about them) and the blocks the dashboard's planner
+--                                actions add ("planner-action-<id>", which keeps a second Run from
+--                                adding the block twice).
 --      chat_messages       1000  the oldest messages (the chat shows a session's newest 200)
 --      chat_card_actions    900  the oldest records of handled chat suggestions, dismissed ones
 --                                first, a claim of the last hour (an action still running) last.
@@ -59,13 +62,14 @@
 --   planner_requests     200 rows x  6007             =  1,201,400
 --   week_plan_requests   300 rows x  1506             =    451,800
 --   connector_status 20 x 50, chat_sessions 100 (no text), one profile of 2200
---   together 10,328,600 characters: about 10 MB of plain text (2.1% of the free plan's 500 MB), at
---   most about 41 MB if every character takes 4 bytes, plus row and index overhead. Server-written
---   parts come on top: weekly_plans at most 52 x 192 kB (about 10 MB; each new plan needs an
---   allowed AI request). The assistant's answers now share the same 1000 chat rows; an answer
---   holds at most 12000 characters and needs an allowed AI request, so the chat rows hold at most
---   12 million characters even if every row were a longest answer. Calendar events and card
---   records now keep their newest rows instead of refusing; their bound per account is the same.
+--   together 10,328,600 characters with chat rows at the 4000 a user can write. The assistant's
+--   answers now share the same 1000 chat rows; an answer holds at most 12000 characters and needs
+--   an allowed AI request, so if every chat row were a longest answer the sum is 18,328,600
+--   characters: about 18 MB of plain text (3.7% of the free plan's 500 MB), at most about 73 MB if
+--   every character takes 4 bytes, plus row and index overhead. Server-written weekly_plans come
+--   on top: at most 52 x 192 kB (about 10 MB; each new plan needs an allowed AI request).
+--   Calendar events and card records now keep their newest rows instead of refusing; their bound
+--   per account is the same.
 --
 -- What changes for visitors: the database now removes an account's oldest rows of these tables
 -- by itself: at 1000 events, each new event removes the event that ended first. Counts of stored
@@ -107,7 +111,8 @@ begin
     when 'chat_messages', 'email_drafts' then
       null;
     when 'calendar_events' then
-      -- Only events that are over, the one that ended first first; the demo events last.
+      -- Only events that are over, the one that ended first first; seeded events (demo events and
+      -- planner blocks) last.
       v_removable := 'ends_at <= now()';
       v_order := 'seed_key is not null, ends_at, id';
     when 'chat_card_actions' then

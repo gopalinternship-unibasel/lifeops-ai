@@ -24,7 +24,7 @@ function between(text: string, from: string, to: string): string {
 }
 
 describe("the hosted upgrade of 24 Nov 2026", () => {
-  const upgrade = between(vercel, "Applying the migrations of 24 Nov 2026 to the hosted project", "### 5.2");
+  const upgrade = between(vercel, "Applying the migrations of 24 and 25 Nov 2026 to the hosted project", "### 5.2");
   const firstDeploy = between(vercel, "## 6. Order of the steps", "## 7.");
 
   it("deploys the planner first, then the web app, then the Pages edition, as section 6 does", () => {

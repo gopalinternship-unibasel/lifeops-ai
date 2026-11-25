@@ -507,18 +507,21 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     messageId: MessageId,
     instruction: z.string().max(500).optional(),
     save: z.boolean().optional(),
+    // The visitor's time zone, as the chat's inbox list uses it: the demo emails are dated
+    // relative to the visitor's today, so the email read here is the one the list showed.
+    timeZone: z.string().max(100).optional(),
   }), d))
   .handler(async ({ context, data }) => {
     // A site without an AI provider asks no model (callAI would refuse at once), so it reads no
     // email and records no use of the shared AI allowance: that counts only requests to the AI.
     if (!resolveLLMConfig("draft").configured) {
-      console.warn("[google] No AI provider is set on this hosted deployment; the reply suggestion was not started.");
+      console.warn("[google] The AI provider is not set up on this hosted deployment; the reply suggestion was not started.");
       return { ok: false, error: new AiNotConfiguredError().message, suggestion: null, draft: null };
     }
     let msg: { from: string; subject: string; bodyText: string } | null;
     try {
       const connected = await isGoogleConnected(context.userId);
-      const demoEmail = connected ? null : getMockEmail(data.messageId);
+      const demoEmail = connected ? null : getMockEmail(data.messageId, data.timeZone);
       msg = connected
         ? await getMessage(context.userId, data.messageId)
         : demoEmail && { from: demoEmail.from, subject: demoEmail.subject, bodyText: demoEmail.snippet };

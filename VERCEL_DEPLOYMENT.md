@@ -11,7 +11,7 @@ statement where the two differ.
 | -------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Web app              | <https://lifeops-ai-sigma.vercel.app> | Vercel project `lifeops-ai`, region fra1 (from the root `vercel.json`). The plain name `lifeops-ai.vercel.app` belongs to someone else's project.                                                                                                                                |
 | Planner              | <https://lifeops-planner.vercel.app>  | Vercel project `lifeops-planner`, framework preset FastAPI, region fra1. `/api/*` answers 401 without the token.                                                                                                                                                                 |
-| Database and sign-in | Supabase project in Frankfurt         | The 13 migrations of that day (four more were added on 24 Nov 2026; section 5.1 says how to apply them), the clean-up job, the planner role and schema. Site URL and redirect URLs point at the web address above.                                                               |
+| Database and sign-in | Supabase project in Frankfurt         | The 13 migrations of that day (seven more were added on 24 and 25 Nov 2026; section 5.1 says how to apply them), the clean-up job, the planner role and schema. Site URL and redirect URLs point at the web address above.                                                       |
 | AI                   | Cloudflare Workers AI                 | Web app: `@cf/zai-org/glm-4.7-flash`, fallback `@cf/google/gemma-4-26b-a4b-it`, `LLM_STRUCTURED_OUTPUT=tools_required`. Planner: `@cf/google/gemma-4-26b-a4b-it` with `LLM_RESPONSE_FORMAT=none`. Both send `LLM_EXTRA_BODY={"chat_template_kwargs":{"enable_thinking":false}}`. |
 
 Checked on the live site that day, as an anonymous demo visitor in a browser: the first-visit
@@ -46,7 +46,7 @@ What the deployment taught, beyond the plan below:
 | ------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Web app (TanStack Start, React) | Vercel project `lifeops-ai`, root directory = repository root             | One function for server rendering and server functions, static files from the CDN. Node 22.x.                                                                                                                     |
 | Planner (FastAPI)               | Vercel project `lifeops-planner`, root directory = `fastapi-backend`      | Python 3.13 function, entry point `app/main.py` (`app`). Only the web app's server calls it.                                                                                                                      |
-| Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 17 migrations, then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql` (section 5). The planner uses the same project through its own role and schema.                                   |
+| Database and sign-in            | A new Supabase project (free plan), region Frankfurt                      | The 20 migrations, then the one-off clean-up file `supabase/hosted/cleanup_anonymous_users.sql` (section 5). The planner uses the same project through its own role and schema.                                   |
 | AI model                        | Cloudflare Workers AI (free allowance), through its OpenAI-compatible API | Chosen by the owner on 14 Nov 2026. In use since 17 Nov 2026; see section 0 and section 2.                                                                                                                        |
 | Monitoring                      | GitHub Actions workflow `smoke.yml`                                       | Once a day.                                                                                                                                                                                                       |
 
@@ -218,8 +218,8 @@ stored. When a limit is
 reached the visitor gets a plain sentence, for example "You have reached this demo's limit of 20 chat
 messages per hour. Please try again later." or "This demo's AI allowance for today is used up. It starts
 again at midnight UTC. Please try again tomorrow." A refused request records no use and the model is not
-called. "Plan it" checks the planner limits and records one planner use before it stores its planner
-request; when the planner service cannot be reached, the request falls back to a chat turn, which is
+called. "Plan it" stores its planner request first and records one planner use once that request holds
+the one running slot; a request the limit refuses is removed again, so it leaves no row. When the planner service cannot be reached, the request falls back to a chat turn, which is
 checked against the chat and daily limits on its own but records no use of its own, and if one of them
 refuses it, the planner request stays stored as failed with the limit sentence. The automatic briefing of a first visit is never refused: it gives its rule-based
 answer instead. A later briefing over the limit is refused like any other message.
@@ -251,7 +251,7 @@ provider, do not enter personal information.
 
 ### 5.1 Migrations
 
-`supabase db push` applies the 17 files in `supabase/migrations` in order. The newer ones:
+`supabase db push` applies the 20 files in `supabase/migrations` in order. The newer ones:
 
 - `20261114120000_data_api_grants.sql` gives `authenticated` and `service_role` access to the tables
   (`service_role` alone for `google_oauth_tokens`; `anon` gets nothing). New Supabase projects no longer do
@@ -266,14 +266,8 @@ provider, do not enter personal information.
   column a signed-in user can write gets a length limit (for example 100 characters for the profile's
   name, 2,000 for its goals, 300 for a task title, 200 for an event title, 12,000 for a chat message and
   128 kB for a week plan). These constraints are `NOT VALID`: rows stored before stay as they are and
-  readable, every new or changed row is checked. Rows per account, counted for writes made with the
-  user's own token (the server's own writes are not limited): 1,000 calendar events, 1,000 handled chat
-  cards, 1,000 chat messages (the assistant's answers count too; clearing the chat history frees them),
-  100 chat sessions, 20 connected services, 100 email drafts, 200 "Plan it" requests and 300 week plan
-  requests; and 52 saved week plans, for every role. At a limit the database refuses the row with a
-  sentence for the visitor, for example "This demo account has reached its limit of 1000 stored chat
-  messages. Clear the chat history to continue." The file's header works out the most one account can
-  store: about 10 MB of text and up to about 10 MB of week plans.
+  readable, every new or changed row is checked. It also gave every account a number of rows per table
+  that refused a write over it; `20261125120000_rolling_row_limits.sql` replaces most of these limits.
 - `20261124110200_one_running_request.sql`: one running week plan request per user and week, and one
   running "Plan it" per user, held by unique indexes; a second one gets the "still being drafted" or
   "already running" sentence. Before each index is built, running rows older than an hour, and all but
@@ -282,15 +276,38 @@ provider, do not enter personal information.
   write tasks, assistant messages, stored results, request times or new week plans. It inserts its own
   chat messages (role `user`, no card, at most 4,000 characters) and the input columns of its plan
   requests, edits its own week plans, and can mark its own running "Plan it" as failed.
+- `20261125100000_google_oauth_states.sql`: a table only the server reaches, `public.google_oauth_states`,
+  that makes each "Connect Google" sign-in usable once. The code writes a row when a sign-in starts and
+  refuses to finish one without it, so this migration goes before the code. It matters only once Google
+  sign-in is set up; neither hosted site has it.
+- `20261125110000_planner_draft_reference.sql`: at most one saved draft per dashboard planner action
+  (a partial unique index on the action's reference), so a second Run of the same action returns the
+  first draft instead of saving another. Existing duplicates are renamed, none deleted. Without it the
+  code still works (it looks up, then inserts), but two Runs at the same moment can both save.
+- `20261125120000_rolling_row_limits.sql`: row limits that bound storage without locking an account out.
+  For most tables a new row at the limit first removes that account's oldest rows, for every role (the
+  server's writes count too): 1,000 calendar events (only events that are over; those with a
+  `seed_key`, the demo events and the dashboard's planner blocks, go last), 1,000 chat messages (the
+  assistant's answers included), 900 handled chat cards (dismissed ones first), 100 email drafts,
+  200 "Plan it" requests and 300 week plan requests (finished ones only) and 52 saved week plans. A
+  running request and an event that is not over are never removed; only when nothing can go is the row
+  refused, with a sentence that
+  says what to do ("This demo account has reached its limit of 1000 calendar events that are not over
+  yet. Ask the assistant to cancel upcoming events you no longer need, or wait until some are over, then
+  try again."). The limits of 100 chat sessions and 20 connected services still refuse; the app keeps
+  one chat session and one row per service, so only writes from outside the app reach them. The
+  file's header works out the most one account can store: about 18 MB of text if every chat row were a
+  longest answer, and up to about 10 MB of week plans. The dashboard's message and draft counts stop
+  growing at these limits.
 
 `supabase/tests/check-migrations.mjs` checks all migrations and the files in `supabase/hosted` in an
 in-process Postgres (PGlite). It is not part of `npm test`; its header says how to run it. Its header also
 says that on 24 Nov 2026 the same scenarios, a race of 30 parallel calls and the clean-up jobs ran against
 the `supabase/postgres` 17.11 image with PostgREST. Not yet run on the hosted project.
 
-#### Applying the migrations of 24 Nov 2026 to the hosted project
+#### Applying the migrations of 24 and 25 Nov 2026 to the hosted project
 
-The hosted project has the 13 older migrations. The new app code needs the four new ones: without
+The hosted project has the 13 older migrations. The new app code needs the seven new ones: without
 `public.ai_allowance` it refuses every AI request, while an `AI_*` limit is set, with "The demo's usage
 limits could not be checked right now. Please try again in a moment." The code from before keeps working
 on the new schema (the database change checked its writes against the new grants), so the migrations go
@@ -300,7 +317,9 @@ first. In this order:
    that the ledger does not exist yet, the running requests the migration will close, accounts already at
    a new row limit (they can add nothing more to that table afterwards) and rows over the new length
    limits (they stay readable). Expect zeros on the demo.
-2. `supabase db push --dry-run`, then `supabase db push`: the four new files, applied as `postgres`.
+2. `supabase db push --dry-run`, then `supabase db push`: the seven new files in one push, applied as
+   `postgres`. `20261124110100` and `20261125120000` belong together: the first alone would lock busy
+   accounts out of a table for good.
 3. Right before the deploy, run `supabase/hosted/close_stale_running_requests.sql` in the SQL Editor. It
    closes requests that have been "running" for more than 15 minutes and can be run again. Then deploy
    the new code to the planner and both editions together, in the order of section 6, step 11: the
@@ -316,7 +335,7 @@ first. In this order:
 4. Run `supabase/hosted/cleanup_anonymous_users.sql` again (section 5.2). It replaces the job that the
    earlier version scheduled; its last query should list two jobs.
 5. Check: the queries commented out at the end of the check file (who may read the ledger, who may run
-   `ai_allowance`, the two new indexes), and `curl -sI https://lifeops-ai-sigma.vercel.app/`, whose
+   `ai_allowance`, the new indexes and the row-limit triggers on their tables), and `curl -sI https://lifeops-ai-sigma.vercel.app/`, whose
    answer should carry `X-Frame-Options: DENY`, a `Content-Security-Policy` with `frame-ancestors 'none'`,
    `X-Content-Type-Options: nosniff` and a `Referrer-Policy` (set in the root `vercel.json`; not yet seen
    on the live site). After the first night, `cron.job_run_details` should say `succeeded` for both
@@ -405,7 +424,7 @@ done with `git`, `gh`, the Supabase CLI and the Vercel CLI once the owner has si
    `supabase projects create`). Leave "Automatically expose new tables" off: the grants migration handles access.
 4. Merge this branch to `main` and let CI pass.
 5. `supabase link --project-ref PROJECT_REF`, then `supabase db push --dry-run`, then `supabase db push`. The
-   migration list should show 17 applied. Then apply `supabase/hosted/cleanup_anonymous_users.sql` once
+   migration list should show 20 applied. Then apply `supabase/hosted/cleanup_anonymous_users.sql` once
    (section 5.2). A project that already has the 13 older migrations follows the order at the end of
    section 5.1 instead.
 6. Push the auth settings of section 5.4 (dashboard, or `supabase config push` from a scratch folder that
@@ -510,8 +529,9 @@ If GitHub emails that the workflow was turned off anyway, push a commit or run
   request: the ledger function `public.ai_allowance` does not exist (the migrations of 24 Nov 2026 are not
   applied; section 5.1) or the database did not answer. The runtime log has the database's error after
   `[lifeops] AI allowance (chat)` (or `plan`, `planner`, `draft`).
-- **"This demo account has reached its limit of ..."**: one account reached a row limit of section 5.1;
-  clearing the chat history frees chat messages and sessions. Where the page shows "Could not ... Please
+- **"This demo account has reached its limit of ..."**: one account reached a row limit of section 5.1
+  that cannot make room on its own (all its calendar events are still to come, or a request is still
+  running). Most tables remove the account's oldest rows instead of refusing. Where the page shows "Could not ... Please
   try again in a moment." instead, the runtime log says which limit (`Row limit N per user on public....`).
 - **"Missing Supabase environment variable"**: one of the five Supabase settings in section 3.1 is missing.
   `VITE_` settings are read at build time, so redeploy after changing them.

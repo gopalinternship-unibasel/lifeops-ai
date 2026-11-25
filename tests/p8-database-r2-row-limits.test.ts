@@ -191,10 +191,10 @@ describe("row limits that bound storage without locking an account out (finding 
     expect(refuse).toEqual({ chat_sessions: 100, connector_status: 20 });
   });
 
-  it("removes only calendar events that are over, the demo events last, and refuses with what to do", () => {
+  it("removes only calendar events that are over, seeded events last, and refuses with what to do", () => {
     expect(inForce.calendar_events.file).toMatch(/^20261125120000/);
     expect(rolling).toContain(
-      "when 'calendar_events' then -- Only events that are over, the one that ended first first; the demo events last. v_removable := 'ends_at <= now()'; v_order := 'seed_key is not null, ends_at, id';",
+      "when 'calendar_events' then -- Only events that are over, the one that ended first first; seeded events (demo events and -- planner blocks) last. v_removable := 'ends_at <= now()'; v_order := 'seed_key is not null, ends_at, id';",
     );
     expect(inForce.calendar_events.sentence).toBe(
       "This demo account has reached its limit of 1000 calendar events that are not over yet. Ask the assistant to cancel upcoming events you no longer need, or wait until some are over, then try again.",

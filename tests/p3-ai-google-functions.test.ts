@@ -599,6 +599,21 @@ describe("reply suggestions use the shared AI allowance (finding 45)", () => {
     expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
   });
 
+  it("reads the demo email in the visitor's time zone, as the inbox list shows it (finding 42)", async () => {
+    // Thursday 00:30 in Zurich, still Wednesday in UTC: the paper is due "in two days".
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-25T23:30:00Z"));
+    try {
+      mocks.callAI.mockResolvedValueOnce(answer("Thanks!"));
+      await draftReplySuggestion({ data: { messageId: "e1", timeZone: "Europe/Zurich" } });
+      const prompt = JSON.stringify(mocks.callAI.mock.calls.at(-1)?.[0]);
+      expect(prompt).toContain("due Saturday");
+      expect(prompt).not.toContain("due Friday");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not count a request that ends before the AI call (unknown email)", async () => {
     const result = await draftReplySuggestion({ data: { messageId: "no-such-email" } });
     expect(result.ok).toBe(false);
