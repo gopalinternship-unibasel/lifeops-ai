@@ -12,7 +12,7 @@ import {
   patchCalendarEvent,
 } from "@/server/google/calendar.server";
 import { listRecentMessages, getMessage } from "@/server/google/gmail.server";
-import { callAI } from "@/server/ai/llm.server";
+import { AiNotConfiguredError, callAI, resolveLLMConfig } from "@/server/ai/llm.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
   assertGoogleOAuthConfigured,
@@ -509,6 +509,12 @@ export const draftReplySuggestion = createServerFn({ method: "POST" })
     save: z.boolean().optional(),
   }), d))
   .handler(async ({ context, data }) => {
+    // A site without an AI provider asks no model (callAI would refuse at once), so it reads no
+    // email and records no use of the shared AI allowance: that counts only requests to the AI.
+    if (!resolveLLMConfig("draft").configured) {
+      console.warn("[google] No AI provider is set on this hosted deployment; the reply suggestion was not started.");
+      return { ok: false, error: new AiNotConfiguredError().message, suggestion: null, draft: null };
+    }
     let msg: { from: string; subject: string; bodyText: string } | null;
     try {
       const connected = await isGoogleConnected(context.userId);

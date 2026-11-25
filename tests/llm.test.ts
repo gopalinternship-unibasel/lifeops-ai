@@ -307,8 +307,10 @@ describe("callAI", () => {
       "fetch",
       vi.fn(async () => new Response("payment required", { status: 402 })),
     );
+    // A hosted provider gets the plain sentence; the token wording is for a model on this machine
+    // (tests/p3-ai-google-r2-llm-errors.test.ts).
     await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
-      "Hugging Face credits exhausted for this token.",
+      "The AI assistant has used up its allowance for now. Please try again later.",
     );
 
     setEnv({});

@@ -27,27 +27,51 @@ const harness = vi.hoisted(() => {
     return builder;
   }
 
-  /** A tiny in-memory Supabase client: select/eq/maybeSingle/upsert, with an optional forced error. */
+  /**
+   * A tiny in-memory Supabase client: select/eq/lt/maybeSingle/upsert/insert/delete, with an
+   * optional forced error.
+   */
   function fakeClient() {
     const tables = new Map<string, Row[]>();
     const errors = new Map<string, unknown>();
     const queries: string[] = [];
     function from(table: string) {
-      const filters: [string, unknown][] = [];
+      const filters: ((row: Row) => boolean)[] = [];
+      let deleting = false;
+      const matches = (row: Row) => filters.every((filter) => filter(row));
       const builder = {
         select: () => builder,
         eq: (col: string, val: unknown) => {
-          filters.push([col, val]);
+          filters.push((row) => row[col] === val);
+          return builder;
+        },
+        lt: (col: string, val: string) => {
+          filters.push((row) => String(row[col]) < val);
           return builder;
         },
         in: () => builder,
         maybeSingle: async () => {
           queries.push(table);
           if (errors.has(table)) return { data: null, error: errors.get(table) };
-          const row = (tables.get(table) ?? []).find((r) => filters.every(([c, v]) => r[c] === v));
+          const row = (tables.get(table) ?? []).find(matches);
           return { data: row ?? null, error: null };
         },
         upsert: async () => ({ error: errors.get(table) ?? null }),
+        insert: async (row: Row) => {
+          if (errors.has(table)) return { error: errors.get(table) };
+          tables.set(table, [...(tables.get(table) ?? []), { ...row }]);
+          return { error: null };
+        },
+        delete: () => {
+          deleting = true;
+          return builder;
+        },
+        then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => {
+          if (!deleting) return Promise.reject(new Error("fake client: only a delete is awaited")).then(resolve, reject);
+          if (errors.has(table)) return Promise.resolve({ data: null, error: errors.get(table) }).then(resolve, reject);
+          tables.set(table, (tables.get(table) ?? []).filter((row) => !matches(row)));
+          return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+        },
       };
       return builder;
     }
@@ -111,7 +135,16 @@ vi.mock("@/server/google/gmail.server", () => ({
   getMessage: mocks.getMessage,
   listRecentMessages: vi.fn(async () => []),
 }));
-vi.mock("@/server/ai/llm.server", () => ({ callAI: mocks.callAI }));
+vi.mock("@/server/ai/llm.server", async () => {
+  // The real settings check (configured unless a hosted site has no AI provider); the call is fake.
+  const actual =
+    await vi.importActual<typeof import("@/server/ai/llm.server")>("@/server/ai/llm.server");
+  return {
+    AiNotConfiguredError: actual.AiNotConfiguredError,
+    callAI: mocks.callAI,
+    resolveLLMConfig: actual.resolveLLMConfig,
+  };
+});
 vi.mock("@/server/limits.server", async () => {
   const actual =
     await vi.importActual<typeof import("@/server/limits.server")>("@/server/limits.server");
@@ -347,6 +380,37 @@ describe("event ids and dates are checked before they reach the database (findin
       }),
     ).resolves.toEqual({ events: [], error: null });
   });
+
+  it("checks timeMin and timeMax each on its own: an ISO date-time with an offset or Z", async () => {
+    const now = new Date().toISOString();
+    // One bad field at a time, so a loose check on either field alone fails this test.
+    for (const data of [
+      { timeMin: "1" },
+      { timeMax: "1" },
+      { timeMin: now, timeMax: "2" },
+      { timeMin: "1", timeMax: now },
+      { timeMin: "2026-11-25" },
+      { timeMax: "2026-11-25T10:00:00" },
+      { timeMin: "next monday" },
+    ]) {
+      await expect(listMyCalendar({ data }), JSON.stringify(data)).rejects.toThrow();
+    }
+    expect(mocks.listCalendarEvents).not.toHaveBeenCalled();
+
+    await expect(listMyCalendar({ data: { timeMin: now } })).resolves.toEqual({
+      events: [],
+      error: null,
+    });
+    expect(mocks.listCalendarEvents).toHaveBeenLastCalledWith(USER, now, expect.any(String));
+    await expect(
+      listMyCalendar({ data: { timeMax: "2026-11-25T10:00:00+01:00" } }),
+    ).resolves.toEqual({ events: [], error: null });
+    expect(mocks.listCalendarEvents).toHaveBeenLastCalledWith(
+      USER,
+      expect.any(String),
+      "2026-11-25T10:00:00+01:00",
+    );
+  });
 });
 
 describe("no internal error text reaches the browser (finding 50)", () => {
@@ -430,6 +494,10 @@ describe("starting and finishing a Google sign-in (finding 98)", () => {
     const payload = await verifySignedOAuthState(state);
     expect(payload?.uid).toBe(USER);
     expect(payload?.nonce).toBe(await browserKeyHash(browserKey));
+    // The server records the sign-in as pending, so it can be finished once (finding 98).
+    expect(harness.admin.tables.get("google_oauth_states")).toEqual([
+      expect.objectContaining({ nonce: payload?.nonce, user_id: USER }),
+    ]);
   });
 
   it("ignores a return path an older page still sends", async () => {
@@ -483,6 +551,52 @@ describe("reply suggestions use the shared AI allowance (finding 45)", () => {
         "You have reached this demo's limit of 20 chat messages per hour. Please try again later.",
     });
     expect(mocks.callAI).not.toHaveBeenCalled();
+  });
+
+  it("on a hosted site without an AI provider: the sentence, and no use recorded, no AI call, no email read", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    vi.stubEnv("LLM_BASE_URL", "");
+    vi.stubEnv("HUGGINGFACE_API_KEY", "");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await draftReplySuggestion({ data: { messageId: "e1" } });
+    expect(result).toEqual({
+      ok: false,
+      error: "The AI assistant is not set up on this site yet, so this request could not be answered.",
+      suggestion: null,
+      draft: null,
+    });
+    expect(mocks.enforceAiAllowance).not.toHaveBeenCalled();
+    expect(mocks.callAI).not.toHaveBeenCalled();
+    expect(mocks.isGoogleConnected).not.toHaveBeenCalled();
+
+    // The same hosted site with a provider set counts the use as before.
+    vi.stubEnv("LLM_BASE_URL", "https://api.example.test/v1");
+    mocks.callAI.mockResolvedValueOnce(answer("Thanks!"));
+    expect(await draftReplySuggestion({ data: { messageId: "e1" } })).toMatchObject({ ok: true });
+    expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
+  });
+
+  it("on a hosted site whose provider is the Hugging Face router without a key: the same, no use recorded", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    vi.stubEnv("LLM_BASE_URL", "https://router.huggingface.co/v1");
+    vi.stubEnv("LLM_API_KEY", "");
+    vi.stubEnv("HUGGINGFACE_API_KEY", "");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await draftReplySuggestion({ data: { messageId: "e1" } })).toEqual({
+      ok: false,
+      error: "The AI assistant is not set up on this site yet, so this request could not be answered.",
+      suggestion: null,
+      draft: null,
+    });
+    expect(mocks.enforceAiAllowance).not.toHaveBeenCalled();
+    expect(mocks.callAI).not.toHaveBeenCalled();
+    expect(mocks.isGoogleConnected).not.toHaveBeenCalled();
+
+    // With a key the same site counts the use as before.
+    vi.stubEnv("HUGGINGFACE_API_KEY", "hf_test");
+    mocks.callAI.mockResolvedValueOnce(answer("Thanks!"));
+    expect(await draftReplySuggestion({ data: { messageId: "e1" } })).toMatchObject({ ok: true });
+    expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
   });
 
   it("does not count a request that ends before the AI call (unknown email)", async () => {

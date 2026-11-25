@@ -61,7 +61,8 @@ export interface LLMConfig {
   /**
    * False when this is the hosted demo and no AI provider is set (no LLM_BASE_URL and no legacy
    * HUGGINGFACE_API_KEY): the localhost Ollama default is only meant for a local run, so callAI
-   * refuses at once instead of trying it.
+   * refuses at once instead of trying it. Also false on the hosted demo when LLM_BASE_URL is the
+   * Hugging Face router and neither LLM_API_KEY nor HUGGINGFACE_API_KEY is set.
    */
   configured: boolean;
   provider: string;
@@ -159,12 +160,15 @@ function findErrorText(value: unknown, depth = 0): string | undefined {
   return undefined;
 }
 
+/** The length providerErrorDetail cuts a provider's error text to (the last character is "…"). */
+const PROVIDER_DETAIL_MAX = 160;
+
 /**
  * The provider's error text from an error response body, as one short readable line: the
  * message inside a JSON error object, or plain text. JSON without a message, HTML error pages
  * and anything that still looks like JSON give "" so users never see a raw provider body.
  */
-export function providerErrorDetail(body: string, max = 160): string {
+export function providerErrorDetail(body: string, max = PROVIDER_DETAIL_MAX): string {
   const text = (body ?? "").trim();
   if (!text) return "";
   let detail: string | undefined;
@@ -176,6 +180,33 @@ export function providerErrorDetail(body: string, max = 160): string {
   const line = detail.replace(/\s+/g, " ").trim();
   if (!line || /^[[{<]/.test(line)) return "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** Characters that end an address or a path inside a sentence. */
+const END = String.raw`[^\s,;()[\]"'<>]`;
+
+/**
+ * A provider's error text (see providerErrorDetail) as users of a hosted site may read it:
+ * addresses, request paths and long ids are replaced by "…". The provider quotes them as it sees
+ * them, and they can hold the operator's account: Cloudflare's routing error (code 7003) quotes the
+ * request path, which carries the account id. Returns "" when nothing readable is left.
+ */
+export function visitorDetail(detail: string): string {
+  // A word cut off by providerErrorDetail's length limit may be the start of an id. A shorter
+  // text was not cut, so a "…" the provider wrote itself keeps its word.
+  const cut = detail.length >= PROVIDER_DETAIL_MAX && detail.endsWith("…");
+  const shown = (cut ? detail.replace(/\S*…$/u, "…") : detail)
+    .replace(new RegExp(String.raw`\b[a-z][a-z0-9+.-]*://${END}*`, "gi"), "…")
+    .replace(new RegExp(String.raw`(^|[\s(["'=:])/${END}+`, "g"), "$1…")
+    .replace(new RegExp(String.raw`${END}*accounts?/${END}*`, "gi"), "…")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "…")
+    .replace(/\b[0-9a-f]{24,}\b/gi, "…")
+    // Token-like words: 24 or more letters, digits or "_", with a digit and a letter. (Model names
+    // such as gemma-4-26b-a4b-it are split by their hyphens and stay readable.)
+    .replace(/\b(?=\w*\d)(?=\w*[a-z])\w{24,}\b/gi, "…")
+    .replace(/…(?:\s*…)+/gu, "…")
+    .trim();
+  return /^[\s….,;:!?-]*$/u.test(shown) ? "" : shown;
 }
 
 function errorStatus(error: unknown): number | undefined {
@@ -281,13 +312,18 @@ export function resolveLLMConfig(
 
   const structured = envValue(env, "LLM_STRUCTURED_OUTPUT");
   const temperature = Number.parseFloat(envValue(env, "LLM_TEMPERATURE") ?? "");
-  const configured = !!explicitBaseUrl || useLegacyHf || !hosted;
+  const provider = providerName(baseUrl);
+  // The Hugging Face router answers nothing without a key, so callAI refuses before sending; on a
+  // hosted site that is "not set up" too, and callers that check `configured` first record no use.
+  const configured =
+    (!!explicitBaseUrl || useLegacyHf || !hosted) &&
+    !(hosted && provider === "Hugging Face" && !apiKey);
 
   return {
     configured,
     // A hosted site without a provider has no model server at all: it is not "Ollama" (the
     // localhost default is for a local run), and no address is kept that a call could reach.
-    provider: configured ? providerName(baseUrl) : "the AI provider",
+    provider: configured ? provider : "the AI provider",
     baseUrl: configured ? baseUrl : "",
     apiKey,
     model,
@@ -577,7 +613,7 @@ export async function callAI(opts: {
   const config = resolveLLMConfig(opts.role ?? "chat");
   if (!config.configured) {
     console.warn(
-      "[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty); the request was not sent.",
+      "[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty, or it is the Hugging Face router without HUGGINGFACE_API_KEY or LLM_API_KEY); the request was not sent.",
     );
     throw new AiNotConfiguredError();
   }
@@ -696,7 +732,12 @@ export function friendly(
       NOT_SET_UP_CORRECTLY,
       `${config.provider} rejected the API key (HTTP ${status}); check ${config.provider === "Hugging Face" ? "HUGGINGFACE_API_KEY or " : ""}LLM_API_KEY.`,
     );
-  if (status === 402) return new Error(`${who} credits exhausted for this token.`);
+  if (status === 402)
+    return pick(
+      `${who} credits exhausted for this token.`,
+      "The AI assistant has used up its allowance for now. Please try again later.",
+      `${config.provider} answered HTTP 402: the API token's credits are used up.`,
+    );
   if (status === 404)
     return pick(
       `${who} does not serve the configured model (LLM_MODEL).`,
@@ -705,7 +746,9 @@ export function friendly(
     );
   if (status !== undefined) {
     // Every other HTTP status: a sentence with the provider's own message (never its raw body).
-    const detail = e instanceof HttpStatusError ? e.detail : "";
+    // Users of a hosted site get it without addresses, paths and ids (the raw body is logged).
+    const raw = e instanceof HttpStatusError ? e.detail : "";
+    const detail = developer ? raw : visitorDetail(raw);
     const code = `HTTP ${status}${detail ? `: ${detail}` : ""}`;
     if (status === 413)
       return new Error(`${who} refused the request as too large (${code}). Try a shorter message.`);
