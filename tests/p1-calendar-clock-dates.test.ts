@@ -240,6 +240,41 @@ describe("numeric and impossible dates (finding 3)", () => {
     }
   });
 
+  // Reviewer of 25 Nov 2026: a fraction next to the time was taken for a date that might be meant,
+  // so the model's correct answer became "I could not tell which date you mean".
+  it.each([
+    ["Push the team sync back by 1/2 an hour", update("sync", "2026-11-24", [19, 30], [20, 30])],
+    [
+      "Move the team sync to Friday, 3/4 of the team is away tonight",
+      update("sync", "2026-11-27", [19, 0], [20, 0]),
+    ],
+    [
+      "Move the team sync to 8 pm, 2/3 of us cannot make 7",
+      update("sync", "2026-11-24", [20, 0], [21, 0]),
+    ],
+  ])("keeps the model's change when a fraction stands next to the time: %s", (message, change) => {
+    const result = reconcile(message, [change]);
+    expect(result.note).toBeUndefined();
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0].next).toMatchObject({
+      starts_at: change.starts_at,
+      ends_at: change.ends_at,
+    });
+  });
+
+  it("does not read a fraction as a date after 'for' either, and still reads real dates", () => {
+    expect(parse("Move the dentist appointment to Friday for 3/4 of an hour")).toMatchObject({
+      day: { dates: ["2026-11-27"] },
+      dayUnclear: false,
+    });
+    expect(parse("Move the team sync to 8 pm, 2/3 of us cannot make 7")).toMatchObject({
+      start: { minutes: [1200] },
+      dayUnclear: false,
+    });
+    // A pair that is a date is still asked about ("4 pm, 3/12"), see above.
+    expect(parse("Move the dentist appointment to 4 pm, 3/12")?.dayUnclear).toBe(true);
+  });
+
   it("does not read a dotted number in a name or an amount as a leftover date", () => {
     expect(
       reconcile("Move the team sync to 8 pm for the 2.5 release").changes[0].next?.starts_at,

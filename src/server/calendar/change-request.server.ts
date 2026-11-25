@@ -249,6 +249,12 @@ const NEXT_CLAUSE_RE =
 // and the request got no card and no note (reviewer of 24 Nov 2026).
 const APPOSITIVE =
   "(?:the|my|our|his|her|their|your)\\s+(?:[a-z'-]+\\s+){0,3}?(?:that|which|who)\\b[^,;()]*(?:,|\\)|\\s-)\\s*(?:to|for|until|till|on|at)\\s";
+/**
+ * The same without the noun: "Move the team sync, which is at 7 pm, to 8 pm", "Move the dentist
+ * appointment, which is on Thursday, to Friday". Cut as a reason at ", which", the destination
+ * went with it and the request got no card and no note (review of 25 Nov 2026).
+ */
+const RELATIVE_APPOSITIVE = "(?:which|who|that)\\b[^,;()]*(?:,|\\)|\\s-)\\s*(?:to|for|until|till|on|at)\\s";
 const REASON_SENTENCE =
   `(?!${APPOSITIVE})(?:the|my|our|his|her|their|your)\\s+(?!ones?\\b)(?:[a-z'-]+\\s+){0,3}?(?:is|are|was|were|ends?|starts?|begins?|finish(?:es)?|runs?|has|have|clash(?:es)?|overlaps?)\\b`;
 // After a colon, a bracket or a dash: a pronoun or such a sentence ("(I have a lecture at 3 pm)",
@@ -256,8 +262,11 @@ const REASON_SENTENCE =
 const REASON_SUBJECT = `(?:(?:i|i'm|im|we|we're|it|it's|there|he|she|they|since|because|as|due)\\b|${REASON_SENTENCE})`;
 const REASON_RE = new RegExp(
   "\\s(?:because|since|so|if|unless|when|while|although|though|but|due to|in case|otherwise|or else|'?cause|cuz|coz|bc|b/c|as (?:i|we|it|there|he|she|they|my|the))\\s" +
-    "|,\\s*(?:it|i|we|that|which|she|he|they|there)\\b" +
+    `|,\\s*(?!${RELATIVE_APPOSITIVE})(?:it|i|we|that|which|she|he|they|there)\\b` +
     `|,\\s*(?=${REASON_SENTENCE})` +
+    // ", 3/4 of the team is away tonight", ", half of us cannot make it" (review of 25 Nov 2026:
+    // "tonight" there was read as the new day).
+    "|,\\s*(?=(?:\\d{1,2}/\\d{1,2}|half|most|some|all|many|few|none|several|both)\\s+of\\s+(?:us|them|you|the|my|our|his|her|their|your)\\b)" +
     `|\\s*:\\s*(?=${REASON_SUBJECT})|\\s\\(\\s*(?=${REASON_SUBJECT})|\\s-\\s(?=${REASON_SUBJECT})`,
 );
 
@@ -562,8 +571,9 @@ export function parseDay(text: string, today: string, opts: { subject?: boolean 
     cut(m);
     return numericDate(m, Number(m[2]), Number(m[3]));
   }
+  // "for 3/4 of an hour" is a fraction (FRACTION_NOUN), not 3 April.
   const slashDate = (lead: string, year: string) =>
-    new RegExp(`${lead}(\\d{1,2})/(\\d{1,2})${year}(?![\\d/])(?!\\s?(?:hours?|hrs?|h|minutes?|mins?|an?\\s+hour)\\b)`);
+    new RegExp(`${lead}(\\d{1,2})/(\\d{1,2})${year}(?![\\d/])(?!\\s?(?:hours?|hrs?|h|minutes?|mins?|an?\\s+hour)\\b)(?!${FRACTION_NOUN})`);
   m = take(slashDate(numericLead, "/(\\d{4}|\\d{2})")) ?? take(slashDate(weakNumericLead, ""));
   if (m) {
     const [first, second] = [Number(m[2]), Number(m[3])];
@@ -680,6 +690,8 @@ const TIME_AFTER_DATE_RE =
   /^\s*,?\s*(?:(?:at|@|from|between|around)\s*)?(?:\d{1,2}(?:[:.h]\d{2})?\s?(?:am|pm)\b|\d{1,2}(?:[:h]\d{2}|\.(?:1[3-9]|[2-5]\d))\b|noon\b|midday\b|midnight\b)|^\s*,?\s*(?:at|@)\s*\d{1,2}\b/;
 /** Where an hour may start: not inside another number ("8.15 pm" is not "15 pm", "1.12.2026" holds no time). */
 const HOUR_START = "(?<![\\d.:/])";
+/** What follows a fraction, not a date: "1/2 an hour", "3/4 of the team", "2/3 of us", "1/2 a day". */
+const FRACTION_NOUN = "\\s+(?:of|an?|the|my|our|your|their|his|her|its|us|them|people)\\b";
 /** Minutes after the hour: "16:00", "8.15" (British and Swiss), "14h30" (French and Swiss). */
 const MINUTES = "(?:[:.h](\\d{2}))";
 
@@ -715,6 +727,11 @@ export function parseClock(text: string): {
     return m;
   };
   const out: ReturnType<typeof parseClock> = { rest: "" };
+  // Fractions as the text has them, before an amount is cut out of it: "1/2" in "back by 1/2 an
+  // hour" is left alone in the text once "an hour" is read as a shift (see the day.month check below).
+  const fractions = new Set(
+    [...rest.matchAll(new RegExp(`(?<![\\d.:/])(\\d{1,2}[./]\\d{1,2})(?=${FRACTION_NOUN}|\\s?${AMOUNT_UNIT}\\b)`, "g"))].map((m) => m[1]),
+  );
 
   // Duration: "for an hour", "for 90 minutes", "for 1.5 hours", "for half an hour", "for an hour
   // and a half", "for 1h30".
@@ -866,10 +883,12 @@ export function parseClock(text: string): {
   }
   // Whatever time was read, a day.month pair left over may be the new date ("4 pm, 3.12"); until
   // the review of 24 Nov 2026 it was dropped and the event moved on its own day by rule. A number
-  // in a name or an amount has a word in front of it ("Python 3.12", "the 2.5 km run").
-  for (const pair of rest.matchAll(/(?<![\d.:/])(\d{1,2})[./](\d{1,2})(?![\d./])(?!\s?(?:%|am|pm|hours?|hrs?|h|minutes?|mins?|m|km|kg|mi|miles?|days?|weeks?)\b)/g)) {
+  // in a name or an amount has a word in front of it ("Python 3.12", "the 2.5 km run"), and a
+  // fraction a noun after it ("by 1/2 an hour", "3/4 of the team"; review of 25 Nov 2026: these
+  // asked which date was meant).
+  for (const pair of rest.matchAll(new RegExp(`(?<![\\d.:/])(\\d{1,2})[./](\\d{1,2})(?![\\d./])(?!\\s?(?:%|am|pm|hours?|hrs?|h|minutes?|mins?|m|km|kg|mi|miles?|days?|weeks?)\\b)(?!${FRACTION_NOUN})`, "g"))) {
     const [dayNumber, month] = [Number(pair[1]), Number(pair[2])];
-    if (dayNumber < 1 || dayNumber > 31 || month < 1 || month > 12) continue;
+    if (dayNumber < 1 || dayNumber > 31 || month < 1 || month > 12 || fractions.has(pair[0])) continue;
     const word = /([a-z']+)\s*$/.exec(rest.slice(0, pair.index))?.[1];
     if (word && !new RegExp(`^(?:on|to|for|from|or|and|until|till|by|at|am|pm|noon|midday|midnight|${WEEKDAY_RE.slice(1, -1)})$`).test(word)) continue;
     out.unreadDate = true;
@@ -1093,6 +1112,7 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
       destination = afterVerb.slice(shift.index);
     }
   }
+  const destinationNamed = destination.trim() !== "" || Boolean(particle);
   if (verb.kind === "move") {
     if (particle && !/\b(later|earlier|back|forward|ahead)\b/.test(destination)) destination += ` ${particle}`;
     // "push ... back" / "bring ... forward" name the direction with the verb.
@@ -1144,6 +1164,10 @@ function readChangeRequest(text: string, verb: ChangeVerb, today: string): Chang
   }
   const reasonTimes = readReasonTimes(reason);
   if (reasonTimes.length > 0) request.reasonTimes = reasonTimes;
+  // A destination the reason took with it ("Move the team sync, it is at 7 pm, to 8 pm"): the new
+  // day and time are not known, so MONDAY asks for them instead of saying nothing (review of 25
+  // Nov 2026: such a request got no card and no note).
+  if (!destinationNamed && new RegExp(`\\s(?:to|until|till)\\s${destinationWords}`).test(reason)) request.vagueTime = true;
   return request;
 }
 
@@ -1572,9 +1596,47 @@ const TENTATIVE_RE =
  * An explicit go-ahead next to a question or a thought ("Should the team sync be moved to 8 pm? Yes
  * please do it", "I'm thinking it should move to 8 pm, go ahead"): the message asks for the change
  * after all (reviewer of 24 Nov 2026). "Should I do it?", "don't do it" and "Yes or no?" are not one.
+ * It must be a direct imperative at the start of a sentence or a clause, after "please", "yes",
+ * "ok" or "so" at most ("Please do it", "Go ahead", "Yes, do it", "If so, do it", "Yes, cancel it").
+ * Until the review of 25 Nov 2026 any "do it" counted, so "Should I cancel the team sync? I'll do it
+ * myself later", "Let me do it later" and "Maybe, do it if it clashes" kept the model's cancel card.
  */
-const GO_AHEAD_RE =
-  /(?<!\b(?:i|we|you|to|should|shall|could|can|would|will|might|must|not|never|don't|dont|do not|didn't|won't|can't)\s)\b(?:do (?:it|that|this)|go ahead|go for it|make it so|make that change)\b|[?.!]\s*(?:yes|yeah|yep|sure)\b(?!\s+or\b)(?!\s*\?)/;
+const GO_AHEAD_START_RE = new RegExp(
+  "^(?:(?:please|pls|yes|yeah|yep|sure|ok|okay|alright|so|just)[,!]?\\s+)*" +
+    "(?:(do (?:it|that|this)|go ahead|go for it|make it so|make that change)|" +
+    "(?:move|reschedule|postpone|cancel|call off|delete|remove|push|shift|delay|scrap)\\s+(?:it|that|this|them|the|my|our))" +
+    "\\b(.*)$",
+);
+/** Words after a go-ahead that make it a maybe or a condition, or the user's own doing: "do it if it clashes", "do it myself". */
+const NOT_NOW_RE =
+  /\b(?:myself|ourselves|maybe|perhaps|probably|possibly|if(?! (?:you can|possible)\b)|when(?! you can\b)|whenever|unless|once|in case)\b/;
+/** After "do it" or "go ahead", a later time puts it off ("do it later", "do it next week"); after "move it" it is where to. */
+const LATER_RE = /\b(?:later|tomorrow|next|another time|other time|sometime|some ?day|eventually|after(?! all\b))\b/;
+/** A clause right before the go-ahead that makes it a maybe or a condition ("Maybe, do it", "If it clashes, do it"); "If so, do it" is a go-ahead. */
+const HEDGE_CLAUSE_RE = /^(?:maybe|perhaps|probably|possibly|(?:only )?if\b(?! (?:so|possible|you can)$)|when\b|whenever\b|unless\b|once\b|in case\b)/;
+/** A clause right after the go-ahead that does the same ("Do it, if it clashes", "Cancel it, maybe"). */
+const HEDGE_AFTER_RE = /^(?:(?:but|and|or)\s+)?(?:only\s+)?(?:if|when|whenever|unless|once|in case|maybe|perhaps|probably|possibly)\b/;
+
+/** Does the message say to go ahead (see GO_AHEAD_START_RE)? A sentence that is a question does not. */
+function saysGoAhead(message: string): boolean {
+  const raw = (message ?? "").trim().toLowerCase().replace(/[‘’ʼ]/g, "'");
+  const sentences = raw.match(/[^.?!;\n]+[.?!;\n]*/g) ?? [];
+  return sentences.some((whole, index) => {
+    if (/\?/.test(whole)) return false;
+    const sentence = whole.replace(/[.?!;\n]+$/, "").trim();
+    // "Should I cancel the team sync? Yes.": an answer to the question the message asks.
+    if (index > 0 && /^(?:yes|yeah|yep|sure)(?:[\s,!]+(?:please|pls))?$/.test(sentence)) return true;
+    const clauses = sentence.split(/\s*,\s*|\s+[-–—]\s+/).map((clause) => clause.trim());
+    return clauses.some((clause, i) => {
+      const go = GO_AHEAD_START_RE.exec(clause);
+      if (!go || NOT_NOW_RE.test(go[2]) || (go[1] && LATER_RE.test(go[2]))) return false;
+      if (i > 0 && HEDGE_CLAUSE_RE.test(clauses[i - 1])) return false;
+      const next = clauses[i + 1] ?? "";
+      // "Do it, but later": put off (the first words of the next clause).
+      return !HEDGE_AFTER_RE.test(next) && !(go[1] && LATER_RE.test(next.split(/\s+/).slice(0, 3).join(" ")));
+    });
+  });
+}
 /** Words that allow a time between 00:00 and 05:59. */
 const EARLY_OK = /\b(\d{1,2}(?::\d{2})? ?am|morning|early|night|midnight|0[0-5]:\d{2}|[0-5]:\d{2})\b/;
 
@@ -1635,6 +1697,23 @@ function namesSomethingElse(answer: string, asked: KnownEvent[], events: KnownEv
   return titleWords(answer).some(
     (word) => !own.has(word) && !GENERIC_NOUNS.has(word) && !ANSWER_WORD_RE.test(word) && (others.has(word) || ACTIVITY_WORDS.has(word)),
   );
+}
+
+/**
+ * The part of free model text whose bold event names an answer can be about: the questions the
+ * text asks when they name an event in bold; nothing when they ask about something else ("Your
+ * **Dentist appointment** is on Thursday. Which day works best for the gym session?": "Friday at 6
+ * pm" answers about the gym session, review of 25 Nov 2026); otherwise the whole text (the
+ * "nothing was added" notice asks no question, "Which day works for you?" names nothing).
+ */
+function freeTextScope(text: string, events: KnownEvent[]): string {
+  const questions = text.match(/(?:\*\*[^*\n]+\*\*|[^.!?\n*]|\*(?!\*))+\?/g) ?? [];
+  if (questions.length === 0) return text;
+  const asking = questions.join(" ");
+  if (/\*\*[^*\n]+\*\*/.test(asking)) return asking;
+  const bold = [...text.matchAll(/\*\*([^*\n]+)\*\*/g)].map((match) => match[1]);
+  const named = events.filter((event) => bold.some((title) => sameTitle(event.title, title)));
+  return namesSomethingElse(normalizeRequest(asking), named, events) ? "" : text;
 }
 
 /** An answer to MONDAY's own question back, read together with the request it answers. */
@@ -1783,7 +1862,7 @@ function readFollowUp(
   if (!ownQuestion && current) return null;
   const candidates: KnownEvent[] = askedEvent ? [askedEvent] : [];
   if (!askedEvent) {
-    for (const bold of (list?.[1] ?? question).matchAll(/\*\*([^*\n]+)\*\*/g)) {
+    for (const bold of (list?.[1] ?? freeTextScope(question, events)).matchAll(/\*\*([^*\n]+)\*\*/g)) {
       const event = events.find((e) => sameTitle(e.title, bold[1]));
       if (event && !candidates.includes(event)) candidates.push(event);
     }
@@ -1826,6 +1905,42 @@ function readFollowUp(
   // "Yes, go ahead": the earlier request again, now with the model's current answer.
   if (!timeAnswer) return { target, request: { ...base, certainty: "clear" }, timeAnswer };
   return { target, request: mergeAnswer(base, said, half), timeAnswer };
+}
+
+/**
+ * "4 pm please, and cancel the team sync" after "Did you mean 4:00 AM or 4:00 PM for **Dentist
+ * appointment**?": the message answers MONDAY's question and then asks for a change of another
+ * event. One change is prepared per message, so the answer is asked about again, in a form the
+ * next message can answer with "yes" (review of 25 Nov 2026: it was dropped without a word).
+ */
+function answerBeforeRequest(
+  previous: PreviousTurn,
+  text: string,
+  request: ChangeRequest,
+  events: KnownEvent[],
+  today: string,
+  timeZone: string,
+): string | undefined {
+  const asked = ASKED_EVENT_RE.exec(previous.assistant ?? "");
+  const askedTitle = asked?.slice(1).find(Boolean);
+  const askedEvent = askedTitle ? events.find((e) => sameTitle(e.title, askedTitle)) : undefined;
+  if (!askedEvent) return undefined;
+  const named = matchEvent(request, events, timeZone);
+  if (named.status === "one" && named.event.id === askedEvent.id) return undefined;
+  // The words before the request: "4 pm please" in "4 pm please, and cancel the team sync". They
+  // are an answer of their own only with "and", "then" or "also", or a full stop, before the
+  // request: in "Tomorrow, cancel the lecture" the day is the lecture's.
+  const verb = findChangeVerbs(text)[0];
+  const lead = verb ? text.slice(0, verb.index).replace(/[\s,;:.!?-]+$/, "").trim() : "";
+  if (!lead || !verb || !/(?:^|[\s,])(?:and|then|also)\s|[.;!?]/.test(text.slice(lead.length, verb.index + verb.length))) return undefined;
+  const answer = readFollowUp(previous, lead, null, events, today, timeZone);
+  if (!answer?.request || answer.target.id !== askedEvent.id || answer.request.kind !== "move") return undefined;
+  const resolved = resolveMove(answer.request, askedEvent, timeZone, undefined, today);
+  const again =
+    resolved.status === "resolved"
+      ? `Did you mean ${describeLocal(resolved.starts_at, timeZone, today.slice(0, 4))} for **${askedEvent.title}**?`
+      : resolved.question;
+  return `Your message also answers my question about **${askedEvent.title}**, but I prepare one change per message, so I did not prepare that one. ${again}`;
 }
 
 /**
@@ -1877,6 +1992,8 @@ export function reconcileCalendarChanges(opts: {
   const request = parseChangeRequest(message, opts.today);
   /** The request the result is built from: the message's own, or an answer read into an earlier one. */
   let active = request;
+  /** A note about an answer to MONDAY's question that the message also gives (see answerBeforeRequest). */
+  let alsoAnswered: string | undefined;
   /**
    * The proposals that are left, as the user will see them: a reminder the model titled exactly
    * like the event it is about is called "Reminder: ..." (QA round 4's "Set a reminder for my
@@ -1896,7 +2013,8 @@ export function reconcileCalendarChanges(opts: {
       sameTitleAs.push({ title: proposal.title, event: same });
       return proposal;
     });
-    return { request: active, ...base, proposals: shown, sameTitleAs, log };
+    const note = alsoAnswered ? [base.note, alsoAnswered].filter(Boolean).join(" ") : base.note;
+    return { request: active, ...base, note, proposals: shown, sameTitleAs, log };
   };
 
   const finish = (target: KnownEvent | null, changes: ReconciledChange[], note?: string): Reconciled => {
@@ -1963,7 +2081,7 @@ export function reconcileCalendarChanges(opts: {
         (/\?\s*$/.test(raw) && IF_QUESTION_RE.test(text)) ||
         TAG_QUESTION_RE.test(raw) ||
         TENTATIVE_RE.test(text)) &&
-        !GO_AHEAD_RE.test(raw));
+        !saysGoAhead(message));
     // "Move on", "moving forward with ..." and "Push workout" are not about changing an event.
     const withoutIdioms = text.replace(NOUN_USE_RE, " ").replace(/\bmov(?:e|ing) (?:on|over|out|along|away|in|(?:forward|ahead) with)\b/g, " ");
     const asksChange = acceptChanges && !creating && !negated && !question && (Boolean(followUp) || CHANGE_WORD_ANYWHERE.test(withoutIdioms));
@@ -2129,6 +2247,12 @@ export function reconcileCalendarChanges(opts: {
       return withoutRequest(true, followUp);
     }
   }
+  // "4 pm please, and cancel the team sync" after MONDAY's question about the dentist appointment:
+  // the cancel is read as usual, and the answer is asked about again.
+  if (opts.previousTurn && request && !unnamedRequest) {
+    alsoAnswered = answerBeforeRequest(opts.previousTurn, text, request, events, opts.today, timeZone);
+    if (alsoAnswered) log.push("the message also answers MONDAY's question about another event; asked about it again");
+  }
   if (!request) return withoutRequest();
 
   const readable = request.day !== undefined || request.start !== undefined || request.shiftMin !== undefined || request.weekStart !== undefined;
@@ -2261,11 +2385,22 @@ export function asksToSend(message: string): boolean {
   if (!OUTBOUND_RE.test(text) && !FORWARD_RE.test(text)) return false;
   if (NOUN_USE_OUTBOUND_RE.test(text)) return false;
   // "Send the dentist appointment to Friday": to a day or a time, not to someone, so it is a move.
-  return !SEND_TO_DAY_RE.test(text);
+  // Only the words before the message itself count: in "Reply to Alicia that the team sync can
+  // move to 8 pm" the "to 8 pm" is part of what to write (review of 25 Nov 2026).
+  return !SEND_TO_DAY_RE.test(text.split(SEND_CONTENT_RE)[0]);
 }
 /** "Forward the email to Sam", "Fwd the invite to Ana"; "Forward me the email" asks for it in the chat. */
 const FORWARD_RE = new RegExp(`${MESSAGE_START}(?:forward|fwd)\\b(?!\\s+me\\b)`);
-/** A send verb whose "to" names a day or a time ("Send the team sync to next week", "Text it to 5 pm"). */
+/**
+ * A send verb whose "to" names a day or a time ("Send the team sync to next week", "Text it to 5
+ * pm"). "To today's attendees" and "to Friday's meeting" name people, not a day.
+ */
 const SEND_TO_DAY_RE = new RegExp(
-  `\\bto\\s+(?:(?:the\\s+)?(?:same\\s+day|day after|${WEEKDAY_RE}\\b|${MONTH_RE}\\b)|today|tonight|tomorrow|next\\s+(?:week|month|${WEEKDAY_RE})\\b|this\\s+(?:week|month|${WEEKDAY_RE})\\b|noon\\b|midnight\\b|\\d{1,2}(?:[:.h]\\d{2})?\\s?(?:am|pm)\\b|\\d{1,2}[:h]\\d{2}\\b)`,
+  `\\bto\\s+(?:(?:the\\s+)?(?:same\\s+day|day after|${WEEKDAY_RE}|${MONTH_RE})|today|tonight|tomorrow|next\\s+(?:week|month|${WEEKDAY_RE})|this\\s+(?:week|month|${WEEKDAY_RE})|noon|midnight|\\d{1,2}(?:[:.h]\\d{2})?\\s?(?:am|pm)|\\d{1,2}[:h]\\d{2})\\b(?!'s\\b)`,
 );
+/**
+ * Where the words to send start: "... that the team sync moved", "... saying I'm late", "Email
+ * Sam: ...". "Send that meeting to Friday" is not one: "that" there is the thing to send.
+ */
+const SEND_CONTENT_RE =
+  /\s(?:that\s+(?=(?:i|i'm|i'll|i've|i'd|we|we're|we'll|we've|you|you're|he|she|they|it|it's|there|the|my|our|his|her|their|your)\b)|saying\s|to say\s|and (?:say|tell|ask)\s)|:\s/;

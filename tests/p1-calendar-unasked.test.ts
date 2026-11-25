@@ -157,6 +157,11 @@ describe("questions, thoughts and messages to others (finding 23)", () => {
     "I might move the team sync to 8 pm. Yes, do it.",
     // "thinking" without about, of, if or whether is not a thought about whether to do it.
     "I'm thinking the team sync should move to 8 pm",
+    // A direct imperative at the start of a sentence or a clause (review of 25 Nov 2026).
+    "Should the team sync move to 8 pm? If so, do it.",
+    "Should the team sync move to 8 pm? Yes.",
+    "Should the team sync move to 8 pm? Just do it.",
+    "Should the team sync move to 8 pm? Please do it when you can.",
   ])("keeps the change when the message also says to go ahead: %s", (message) => {
     const result = reconcile(message, [syncTo8]);
     expect(result.changes).toHaveLength(1);
@@ -170,6 +175,17 @@ describe("questions, thoughts and messages to others (finding 23)", () => {
     ["I can't cancel the team sync, yes?", cancelSync],
     ["Not sure if I should cancel the team sync, don't do it yet", cancelSync],
     ["I'm wondering whether to move the team sync to 8 pm", syncTo8],
+    // "do it" about the user's own doing, put off, or as a maybe (review of 25 Nov 2026).
+    ["Should I cancel the team sync? I'll do it myself later", cancelSync],
+    ["I'm thinking of cancelling the team sync. Let me do it later.", cancelSync],
+    ["Should I cancel the team sync or just do it next week?", cancelSync],
+    ["Should I cancel the team sync? I'd rather do it tomorrow", cancelSync],
+    ["Should I cancel the team sync? Maybe, do it if it clashes", cancelSync],
+    ["Should I cancel the team sync? If it clashes, do it.", cancelSync],
+    ["Should I cancel the team sync? Yes, but I'll do it myself later", cancelSync],
+    ["Should the team sync move to 8 pm? Do it later.", syncTo8],
+    ["Should the team sync move to 8 pm? Go ahead, but only if Alicia agrees.", syncTo8],
+    ["Should the team sync move to 8 pm? Yes?", syncTo8],
   ])("a go-ahead word that is not one does not keep the change: %s", (message, change) => {
     const result = reconcile(message, [change]);
     expect(result.changes).toHaveLength(0);
@@ -188,6 +204,12 @@ describe("a request to send something (finding 86, calendar part)", () => {
     "Forward the email to Sam",
     "Fwd the recruiter's email to Ana",
     "Send the meeting notes to Sam tomorrow",
+    // A day or a time in what to write, or a day's people, is not where it goes (review of 25 Nov 2026).
+    "Reply to Alicia that the team sync can move to 8 pm",
+    "Send Sam a message that I'm moving the team sync to 8 pm",
+    "Email Alicia that I need to cancel the team sync",
+    "Send the slides to today's attendees",
+    "Email Sam: the team sync moves to Friday",
   ])("asksToSend: %s", (message) => {
     expect(asksToSend(message)).toBe(true);
     expect(asksForAction(message)).toBe(true);
@@ -207,6 +229,9 @@ describe("a request to send something (finding 86, calendar part)", () => {
     "Send the team sync to 8 pm",
     "Email Sam the agenda and move the team sync to 8 pm",
     "Forward me the recruiter's email",
+    // "that" naming the thing to send, and a day with its own word boundary.
+    "Send that meeting to Friday",
+    "Send the team sync to tomorrow",
   ])("not a send request: %s", (message) => {
     expect(asksToSend(message)).toBe(false);
   });

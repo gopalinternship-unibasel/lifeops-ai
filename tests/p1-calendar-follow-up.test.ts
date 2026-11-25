@@ -305,12 +305,76 @@ describe("a bold event name in a reply that did not ask about it", () => {
     expect(result.changes).toEqual([{ kind: "delete", event: event("dentist"), byRule: false }]);
   });
 
+  it("a bare day or time after free text that asks about something else keeps no model move", () => {
+    // Review of 25 Nov 2026: the model's move of the bold dentist appointment was kept although
+    // the question was about the gym session.
+    const dentistFriday6 = update("dentist", "2026-11-27", [18, 0], [19, 30]);
+    const result = reconcile("Friday at 6 pm", [dentistFriday6], generic);
+    expect(result.changes).toEqual([]);
+    expect(result.unasked).toBe(true);
+    // A question that names the event, or names nothing else, still keeps the model's move.
+    for (const assistant of [
+      "Which day works best for the **Dentist appointment**?",
+      "Your **Dentist appointment** is on Thursday. Which day works for you?",
+    ]) {
+      const kept = reconcile("Friday at 6 pm", [dentistFriday6], { assistant });
+      expect(kept.changes, assistant).toEqual([
+        {
+          kind: "update",
+          event: event("dentist"),
+          next: { starts_at: zrh("2026-11-27", 18), ends_at: zrh("2026-11-27", 19, 30) },
+          byRule: false,
+        },
+      ]);
+    }
+  });
+
   it("'yes' or a cancel after free text keeps no model change of the bold event", () => {
     const result = reconcile("Yes", [{ kind: "delete", event: event("dentist") }], generic);
     expect(result.changes).toEqual([]);
     expect(
       reconcile("Friday at 6 pm", [{ kind: "delete", event: event("dentist") }], generic).changes,
     ).toEqual([]);
+  });
+});
+
+describe("an answer and another request in one message", () => {
+  it("prepares the other request and asks about the answer again, so 'yes' then moves it", () => {
+    // Review of 25 Nov 2026: the answer about the dentist appointment was dropped without a note.
+    const previous = asked("Move the dentist appointment to 4");
+    expect(previous.assistant).toMatch(
+      /Did you mean 4:00 AM or 4:00 PM for \*\*Dentist appointment\*\*\?/,
+    );
+    const mixed = reconcile("4 pm please, and cancel the lecture", [], previous);
+    expect(mixed.changes).toEqual([{ kind: "delete", event: event("lecture"), byRule: true }]);
+    expect(mixed.note).toBe(
+      "Your message also answers my question about **Dentist appointment**, but I prepare one change per message, so I did not prepare that one. Did you mean Thu, Nov 26, 4:00 PM for **Dentist appointment**?",
+    );
+    const next = reconcile("Yes", [], {
+      user: "4 pm please, and cancel the lecture",
+      assistant: `Done.\n\n${mixed.note}`,
+    });
+    expect(next.changes).toEqual([
+      {
+        kind: "update",
+        event: event("dentist"),
+        next: { starts_at: zrh("2026-11-26", 16), ends_at: zrh("2026-11-26", 17, 30) },
+        byRule: true,
+      },
+    ]);
+  });
+
+  it("adds no such note when the request is about the event asked about, or nothing came before it", () => {
+    const previous = asked("Move the dentist appointment to 4");
+    expect(reconcile("Cancel the lecture", [], previous).note).toBeUndefined();
+    // A day right before the request is the request's own ("tomorrow's lecture").
+    expect(reconcile("Tomorrow, cancel the lecture", [], previous).note).toBeUndefined();
+    expect(reconcile("4 pm. Cancel the lecture", [], previous).note).toMatch(
+      /also answers my question about \*\*Dentist appointment\*\*/,
+    );
+    expect(
+      reconcile("Move the dentist appointment to Friday at 4 pm", [], previous).note,
+    ).toBeUndefined();
   });
 });
 
