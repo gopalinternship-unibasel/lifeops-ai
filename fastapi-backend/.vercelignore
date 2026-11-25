@@ -1,5 +1,4 @@
 # Keep these out of the Vercel function bundle.
-lifeos/
 tests/
 .venv/
 .pytest_cache/

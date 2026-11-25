@@ -3,7 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_name: str = "LifeOps AI Backend"
-    env: str = "development"
+    # "production" unless set: a hosted deployment that leaves ENV out must not log SQL with its
+    # values (user text) or publish /docs. "local" (written by scripts/write-local-env.mjs) serves
+    # /docs; "development" also logs every SQL statement with its values.
+    env: str = "production"
     # SQLite file by default (local use and tests). For PostgreSQL use a URL such as
     # postgresql+psycopg://USER:PASSWORD@HOST:5432/postgres?sslmode=require ("postgres://" and
     # "postgresql://" are accepted too). On a serverless host the URL should point at a pooler.
@@ -57,6 +60,10 @@ class Settings(BaseSettings):
     execution_backend: str = "mock"
     zapier_mcp_url: str | None = None
     zapier_mcp_auth_token: str | None = None
+    # Comma-separated names of the Zapier tools the executor may call (for example the Gmail
+    # "create draft" and Google Calendar "create event" tools of your Zapier MCP server). The
+    # tools run without a second approval, so without this list the Zapier backend runs nothing.
+    zapier_mcp_allowed_tools: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -66,6 +73,17 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8-sig",
         extra="ignore",
     )
+
+    def sql_echo(self) -> bool:
+        """Log every SQL statement with its values: only when ENV=development is set on purpose."""
+        return self.env.strip().lower() == "development"
+
+    def public_docs(self) -> bool:
+        """Serve /docs, /redoc and /openapi.json, and name the model on '/': local runs only."""
+        return self.env.strip().lower() in {"development", "local"}
+
+    def zapier_tools(self) -> list[str]:
+        return [name.strip() for name in (self.zapier_mcp_allowed_tools or "").split(",") if name.strip()]
 
     def llm_endpoint(self) -> tuple[str, str | None, str] | None:
         """(base_url, api_key, model) of the configured LLM, or None for the demo planner."""

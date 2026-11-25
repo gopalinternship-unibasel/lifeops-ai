@@ -22,18 +22,30 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
-def build_engine(url: str, *, schema: str | None = None, echo: bool = False) -> Engine:
+def build_engine(
+    url: str,
+    *,
+    schema: str | None = None,
+    echo: bool = False,
+    hide_parameters: bool = False,
+) -> Engine:
     """SQLite stays as it was (local default and tests). PostgreSQL is made for serverless use.
 
     A serverless instance should not hold a connection pool of its own: the database side has a
     pooler (Supabase's Supavisor), so each unit of work opens a connection and closes it again
     (NullPool). With `schema` set, every new connection puts that schema first on its search_path.
+    `hide_parameters` keeps bound values (user text) out of logged database errors.
     """
     url = normalize_database_url(url)
     if url.startswith("sqlite"):
-        return create_engine(url, echo=echo, connect_args={"check_same_thread": False})
+        return create_engine(
+            url,
+            echo=echo,
+            hide_parameters=hide_parameters,
+            connect_args={"check_same_thread": False},
+        )
 
-    engine = create_engine(url, echo=echo, poolclass=NullPool)
+    engine = create_engine(url, echo=echo, hide_parameters=hide_parameters, poolclass=NullPool)
     if schema:
         if not _SCHEMA_RE.match(schema):
             raise ValueError("DATABASE_SCHEMA must be a plain identifier (letters, digits, underscore).")
@@ -53,7 +65,8 @@ def build_engine(url: str, *, schema: str | None = None, echo: bool = False) -> 
 engine = build_engine(
     settings.database_url,
     schema=(settings.database_schema or "").strip() or None,
-    echo=settings.env == "development",
+    echo=settings.sql_echo(),
+    hide_parameters=not settings.sql_echo(),
 )
 
 
@@ -62,5 +75,8 @@ def create_db_and_tables() -> None:
 
 
 def get_session():
-    with Session(engine) as session:
+    # expire_on_commit=False: objects keep their loaded values after a commit. With the default,
+    # every attribute read after a commit reloaded the row, and with NullPool each reload opened a
+    # new connection to the pooler (TCP, TLS and SET search_path) for values already in memory.
+    with Session(engine, expire_on_commit=False) as session:
         yield session

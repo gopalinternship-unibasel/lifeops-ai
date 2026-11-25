@@ -18,7 +18,12 @@ class BusyInterval(BaseModel):
 
 class PlanRequest(BaseModel):
     user_input: str = Field(..., min_length=3, max_length=4000)
-    autonomous_mode: bool = False
+    # None (left out) uses the owner's stored setting; an explicit false switches it off for this
+    # request even when the stored setting is on.
+    autonomous_mode: bool | None = None
+    # Optional key the caller chooses for this request (for example its own request id). A repeat
+    # with the same key returns the stored answer instead of planning and storing a second time.
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=100)
     # Optional context from the caller: the user's local wall-clock time and IANA zone.
     # Planned times are naive local times in that zone.
     current_datetime: datetime | None = None
@@ -68,6 +73,7 @@ class PlanResponse(BaseModel):
     executed_safe_actions: int
     plan: PlannerOutput
     # "llm" when the configured model planned, "demo" when the keyword planner did.
+    # planner_note is shown to the user: plain sentences, no setting names or parser output.
     planner: str = "demo"
     planner_note: str | None = None
 

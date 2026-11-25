@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.core.config import settings
@@ -12,15 +13,32 @@ from app.schemas import AutonomousModeRequest
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _find_settings(session: Session, owner: str) -> AppSettings | None:
+    return session.exec(select(AppSettings).where(AppSettings.owner == owner)).first()
+
+
 def get_or_create_settings(session: Session, owner: str = "local") -> AppSettings:
-    row = session.exec(select(AppSettings).where(AppSettings.owner == owner)).first()
+    """The owner's settings row, created on first use.
+
+    Two first requests of a new owner can both miss the row and both insert it; the owner column
+    is unique, so the slower insert fails. That request then reads the row the other one made
+    instead of failing. Call this before the request writes anything else: the losing insert is
+    undone with a rollback of the whole session.
+    """
+    row = _find_settings(session, owner)
     if row:
         return row
 
     row = AppSettings(owner=owner, autonomous_mode=settings.autonomous_mode_default)
     session.add(row)
-    session.commit()
-    session.refresh(row)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        existing = _find_settings(session, owner)
+        if existing is None:
+            raise
+        return existing
     return row
 
 
@@ -42,6 +60,5 @@ def set_autonomous_mode(
 
     session.add(row)
     session.commit()
-    session.refresh(row)
 
     return row

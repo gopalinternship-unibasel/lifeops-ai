@@ -55,16 +55,18 @@ def test_root_reports_keyword_planner_without_llm(client):
 def test_keyword_planner_turns_messy_input_into_tasks_and_actions(client):
     plan = make_plan(client)
     assert plan["planner"] == "demo"
-    assert plan["tasks_created"] == 4
+    # One task each for the exams, the assignments and the meeting (the keyword planner no
+    # longer invents "assignment 1" and "assignment 2").
+    assert plan["tasks_created"] == 3
     assert plan["actions_created"] == 4
     kinds = sorted(action["action_type"] for action in plan["plan"]["actions"])
     assert kinds == ["calendar_block", "calendar_block", "email_draft", "reminder"]
 
     dashboard = client.get("/api/dashboard", headers=ALICE).json()
-    assert dashboard["metrics"]["total_tasks"] == 4
+    assert dashboard["metrics"]["total_tasks"] == 3
     assert dashboard["metrics"]["pending_actions"] == 4
     # Highest priority first.
-    assert dashboard["next_best_actions"][0]["title"] == "Prepare for upcoming exam"
+    assert dashboard["next_best_actions"][0]["title"] == "Prepare for the exams"
     assert dashboard["last_plan"]["planner"] == "demo"
 
 
@@ -162,9 +164,11 @@ def test_outcome_of_externally_executed_action_is_recorded(client):
     assert stored["status"] == "executed"
     assert stored["provider"] == "demo_calendar"
     assert stored["external_id"] == "evt-123"
-    # Executing again does not run it twice.
-    again = client.post(f"/api/actions/{block['id']}/execute", headers=ALICE).json()
-    assert again["result"]["status"] == "already_executed"
+    # Executing again does not run it twice, and leaves the recorded outcome as it was.
+    again = client.post(f"/api/actions/{block['id']}/execute", headers=ALICE)
+    assert again.status_code == 200
+    assert again.json()["result"]["status"] == "already_executed"
+    assert client.get(f"/api/actions/{block['id']}", headers=ALICE).json() == stored
 
 
 def test_email_actions_are_drafts_only(client):
@@ -173,7 +177,7 @@ def test_email_actions_are_drafts_only(client):
     assert draft["email_to"] is None  # never an invented address; the user fills it in
     client.post(f"/api/actions/{draft['id']}/approve", headers=ALICE)
     result = client.post(f"/api/actions/{draft['id']}/execute", headers=ALICE).json()
-    assert result["provider"] == "gmail"
+    assert result["provider"] == "mock_gmail"  # the built-in adapter is a stand-in, and says so
     assert result["external_id"].startswith("mock-gmail-draft-")
 
 
@@ -300,8 +304,12 @@ def test_llm_failure_falls_back_to_keyword_planner(client, fake_llm):
     fake_llm.error = RuntimeError("connection refused")
     plan = make_plan(client)
     assert plan["planner"] == "demo"
-    assert "connection refused" in plan["planner_note"]
-    assert plan["tasks_created"] == 4
+    # The note is shown to the user: a fixed sentence, not the raw exception text.
+    assert "connection refused" not in plan["planner_note"]
+    assert plan["planner_note"] == (
+        "The AI model could not make this plan (the model call failed), so the keyword planner made it instead."
+    )
+    assert plan["tasks_created"] == 3
 
 
 def test_model_http_error_note_is_a_sentence_without_the_raw_body(client, fake_llm):
@@ -325,7 +333,9 @@ def test_planner_mode_keyword_skips_a_configured_llm(client, fake_llm, use_setti
     use_settings(planner_mode="keyword")
     plan = make_plan(client)
     assert plan["planner"] == "demo"
-    assert "PLANNER_MODE=keyword" in plan["planner_note"]
+    # Plain words for the user; setting names stay in the log.
+    assert plan["planner_note"] == "No AI model is set up for the planner, so the keyword planner made this plan."
+    assert "PLANNER_MODE" not in plan["planner_note"] and "LLM_BASE_URL" not in plan["planner_note"]
     assert fake_llm.calls == []
 
 
@@ -417,7 +427,11 @@ def test_invented_email_addresses_are_not_kept(client, fake_llm):
     plan = make_plan(client, text="Draft an email to Sam about lunch, and one to ana@uni.example. Remind me to call.")
     to = {action["title"]: action["email_to"] for action in plan["plan"]["actions"]}
     assert to == {"Lunch with Sam": None, "Note to Ana": "Ana@Uni.example", "Call": None}
-    assert "sam@example.com" in plan["planner_note"] and "Fill it in" in plan["planner_note"]
+    assert "sam@example.com" in plan["planner_note"]
+    # The approval center's To field is where the user adds it (before, the note said "Fill it in
+    # on the draft", which no screen allowed).
+    assert "To field before you run the draft" in plan["planner_note"]
+    assert "Fill it in on the draft" not in plan["planner_note"]
 
 
 def test_recipient_is_kept_only_if_the_user_wrote_it():

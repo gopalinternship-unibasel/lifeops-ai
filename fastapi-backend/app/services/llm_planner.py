@@ -1,10 +1,12 @@
 import json
 import logging
+import math
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from openai import APIStatusError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from pydantic import ValidationError
 
 from app.core.config import settings
@@ -12,6 +14,17 @@ from app.schemas import PlannerAction, PlannerOutput, PlannerTask
 from app.services.demo_planner import build_demo_plan
 
 logger = logging.getLogger(__name__)
+
+# Below this many seconds left before the caller's deadline the model is not asked at all.
+_MIN_MODEL_SECONDS = 1.0
+# Seconds kept back from the caller's deadline for storing the plan and answering.
+_DEADLINE_MARGIN_SECONDS = 2.0
+
+
+class PlannerAnswerError(ValueError):
+    """A model answer the planner cannot use. The message is written for the user: it goes into
+    the plan's note ("The AI model could not make this plan (<message>) ...")."""
+
 
 SYSTEM_PROMPT = """
 You are LifeOps AI, an agentic operations planner for personal productivity.
@@ -98,7 +111,7 @@ def _extract_json(raw: str) -> dict[str, Any]:
                 raise
             data = json.loads(text[start : end + 1])
     if not isinstance(data, dict):
-        raise ValueError("The model did not return a JSON object")
+        raise PlannerAnswerError("the model's answer was not a readable plan")
     return data
 
 
@@ -130,16 +143,61 @@ def recipient_from_user(value: str, user_input: str) -> str | None:
     return recipient if re.search(rf"(?<!\w){re.escape(recipient.lower())}(?!\w)", text) else None
 
 
+# Longest texts kept from a model answer. The MONDAY app copies an action's title and description
+# into a calendar entry (title up to 200, notes up to 2000 characters) and a draft (subject 300,
+# body 12000, recipient 320); longer values would be refused there.
+_TITLE_MAX = 200
+_DESCRIPTION_MAX = 2000
+_SUBJECT_MAX = 300
+_BODY_MAX = 12000
+_RECIPIENT_MAX = 320
+_SUMMARY_MAX = 1000
+_STEP_MAX = 300
+_DATE_ONLY = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*$")
+
+
+def _number(value: Any, default: int, low: int, high: int) -> int:
+    """A whole number from a model's value, clamped to [low, high].
+
+    Models write 4, 4.7, "4.5", "0" or null; int() truncated 4.7 to 4, sent "4.5" and a falsy 0 to
+    the default, and let 10**12 minutes through (the column is a 32-bit integer on PostgreSQL).
+    Halves round up; values beyond a bound (infinity included) are clamped to it. Missing, empty,
+    boolean and unreadable values, and NaN, give the default.
+    """
+    if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        number = float(value)
+    except OverflowError:  # an integer with hundreds of digits
+        number = math.inf if value > 0 else -math.inf
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number):
+        return default
+    return math.floor(min(high, max(low, number)) + 0.5)
+
+
+def _text(value: Any, limit: int) -> str | None:
+    """A stripped, length-capped text, or None for a missing or blank value."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:limit] if text else None
+
+
 def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOutput, list[str]]:
     """Validate a model answer item by item, so one bad entry does not discard the plan.
 
     Safety rules enforced here, whatever the model said:
     - unknown action types are dropped (there is no "send email" action at all);
     - calendar blocks need a start and an end, and must end after they start;
-    - medium/high risk actions always require human approval;
+    - medium/high risk actions always require human approval, and so does an action whose
+      requires_approval is missing or not a true/false value;
     - an email address is kept only if the user wrote it: the planner knows no address book, and
       the model invented "sam@example.com" for "draft an email to Sam" (QA round 4), which the app
       then saved as the draft's recipient.
+    Common model quirks are repaired instead of dropping the item: "" for a time or text, null for
+    requires_approval, numbers as text, a single string as the execution order.
     """
     notes: list[str] = []
     had_offsets = False
@@ -148,23 +206,28 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
         if not isinstance(raw_task, dict):
             continue
         candidate = dict(raw_task)
-        try:
-            priority = int(candidate.get("priority") or 3)
-        except (TypeError, ValueError):
-            priority = 3
-        candidate["priority"] = min(5, max(1, priority))
-        try:
-            minutes = int(candidate.get("estimated_minutes") or 60)
-        except (TypeError, ValueError):
-            minutes = 60
-        candidate["estimated_minutes"] = max(5, minutes)
+        title = _text(candidate.get("title"), _TITLE_MAX)
+        if not title:
+            notes.append("Dropped a task without a title.")
+            continue
+        candidate["title"] = title
+        candidate["description"] = _text(candidate.get("description"), _DESCRIPTION_MAX)
+        candidate["priority"] = _number(candidate.get("priority"), 3, 1, 5)
+        candidate["estimated_minutes"] = _number(candidate.get("estimated_minutes"), 60, 5, 1440)
+        deadline = candidate.get("deadline")
+        if isinstance(deadline, str):
+            if not deadline.strip():
+                candidate["deadline"] = None
+            elif match := _DATE_ONLY.match(deadline):
+                # A date without a time means "by the end of that day", not its first minute.
+                candidate["deadline"] = f"{match.group(1)}T23:59:00"
         try:
             tasks.append(PlannerTask.model_validate(candidate))
         except ValidationError:
             candidate.pop("deadline", None)
             try:
                 tasks.append(PlannerTask.model_validate(candidate))
-                notes.append(f"Ignored an unreadable deadline on task '{candidate.get('title')}'.")
+                notes.append(f"Ignored an unreadable deadline on task '{title}'.")
             except ValidationError:
                 notes.append("Dropped a task the model returned in an invalid shape.")
 
@@ -182,14 +245,32 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
             notes.append(f"Dropped unsupported action type '{action_type or '?'}'.")
             continue
         candidate["action_type"] = action_type
+        title = _text(candidate.get("title"), _TITLE_MAX)
+        if not title:
+            notes.append(f"Dropped a {action_type.replace('_', ' ')} without a title.")
+            continue
+        candidate["title"] = title
+        # "" (or blanks) for an optional field means "none"; pydantic rejected "" as a time and
+        # dropped the whole action.
+        for key, limit in (
+            ("description", _DESCRIPTION_MAX),
+            ("email_to", _RECIPIENT_MAX),
+            ("email_subject", _SUBJECT_MAX),
+            ("email_body", _BODY_MAX),
+        ):
+            candidate[key] = _text(candidate.get(key), limit)
+        for key in ("start_time", "end_time"):
+            value = candidate.get(key)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                candidate[key] = None
         risk = str(candidate.get("risk_level") or "low").strip().lower()
         candidate["risk_level"] = risk if risk in _RISK_LEVELS else "medium"
-        if candidate["risk_level"] != "low":
+        if candidate["risk_level"] != "low" or not isinstance(candidate.get("requires_approval"), bool):
             candidate["requires_approval"] = True
         try:
             action = PlannerAction.model_validate(candidate)
         except ValidationError:
-            notes.append(f"Dropped action '{candidate.get('title')}' with invalid fields.")
+            notes.append(f"Dropped action '{title}' with invalid fields.")
             continue
         # Before comparing: a naive and an offset time cannot be compared.
         had_offsets |= any(t is not None and t.tzinfo is not None for t in (action.start_time, action.end_time))
@@ -206,19 +287,25 @@ def sanitize_plan(data: dict[str, Any], user_input: str = "") -> tuple[PlannerOu
             written = action.email_to.strip()
             action.email_to = recipient_from_user(written, user_input) if action.action_type == "email_draft" else None
             if action.email_to is None and action.action_type == "email_draft":
+                # The MONDAY approval center has a To field for this, filled in before Run.
                 notes.append(
                     f"Left the recipient of '{action.title}' empty: the model wrote '{written[:80]}', "
-                    "which is not in your text. Fill it in on the draft."
+                    "which is not in your text. Type the recipient in the To field before you run the draft."
                 )
         actions.append(action)
 
     if had_offsets:
         notes.append("Read the model's times as local times (ignored a time zone offset).")
 
-    summary = str(data.get("summary") or "").strip() or "Here is your plan."
-    order = [str(step) for step in (data.get("execution_order") or []) if str(step).strip()]
+    summary = _text(data.get("summary"), _SUMMARY_MAX) or "Here is your plan."
+    raw_order = data.get("execution_order")
+    if isinstance(raw_order, str):
+        raw_order = [raw_order]  # one step as text; iterating it gave one step per character
+    elif not isinstance(raw_order, list):
+        raw_order = []
+    order = [step for step in (_text(item, _STEP_MAX) for item in raw_order if item is not None) if step]
     if not tasks and not actions:
-        raise ValueError("The model returned no usable tasks or actions")
+        raise PlannerAnswerError("the model returned no usable tasks or actions")
     return PlannerOutput(summary=summary, tasks=tasks, actions=actions, execution_order=order), notes
 
 
@@ -264,38 +351,113 @@ def _error_text(body: Any) -> str | None:
     return None
 
 
-def readable_failure(error: Exception) -> str:
-    """One readable line for a failed model call; the provider's raw JSON body never reaches the UI."""
+def readable_failure(error: Exception, timeout_seconds: float | None = None) -> str:
+    """One readable phrase for a failed model call, for the plan's note.
+
+    Only fixed wording reaches the user: the provider's raw JSON body, parser messages ("Expecting
+    ',' delimiter: line 1 column 40") and Python errors ("list index out of range") stay in the log.
+    """
+    if isinstance(error, PlannerAnswerError):
+        return str(error)
     if isinstance(error, APITimeoutError):
-        return f"the model did not answer within {settings.llm_timeout_seconds:g} s"
+        seconds = settings.llm_timeout_seconds if timeout_seconds is None else timeout_seconds
+        return f"the model did not answer within {seconds:.0f} s"
     if isinstance(error, APIStatusError):
         detail = _error_text(error.body)
         line = " ".join(detail.split())[:160] if detail else ""
         if line.startswith(("{", "[", "<")):
             line = ""
         return f"the model service answered HTTP {error.status_code}" + (f": {line}" if line else "")
-    text = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
-    return text
+    if isinstance(error, APIConnectionError):
+        return "the model service could not be reached"
+    if isinstance(error, ValueError):  # JSON and validation errors are ValueErrors too
+        return "the model's answer was not a readable plan"
+    return "the model call failed"
+
+
+_ZONE_NAME = re.compile(r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$")
+
+
+def _zone_name(timezone: str | None) -> str | None:
+    """The caller's IANA zone name if it looks like one (it is also written into the prompt)."""
+    name = (timezone or "").strip()
+    return name if name and _ZONE_NAME.match(name) else None
+
+
+def _zone(timezone: str | None) -> ZoneInfo | None:
+    name = _zone_name(timezone)
+    if name is None:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # An unknown zone, or no time zone data on this host: read times without a zone. Logged,
+        # because on a host without zone data every request would quietly use the server clock.
+        logger.warning("Time zone %r is unknown here; the caller's times are read without a zone.", name)
+        return None
+
+
+def local_now(now: datetime | None, timezone: str | None) -> datetime:
+    """The caller's current local wall-clock time, naive, as both planners and the prompt use it.
+
+    - A naive `now` is the caller's own wall-clock time (what the MONDAY app sends): unchanged.
+    - An aware `now` is converted to the caller's zone (or keeps its own offset's wall time when
+      the zone is unknown) and loses the offset. Before, the offset went on into the keyword
+      planner's times, and PostgreSQL stored 10:00+01:00 as 09:00 in the naive columns.
+    - Without `now`, the current time in the caller's zone; only without a usable zone the
+      server's clock (UTC on Vercel, which was labelled as the caller's zone before).
+    """
+    zone = _zone(timezone)
+    if now is None:
+        return datetime.now(zone).replace(tzinfo=None) if zone else datetime.now()
+    if now.tzinfo is not None:
+        return (now.astimezone(zone) if zone else now).replace(tzinfo=None)
+    return now
 
 
 def create_plan(
     user_input: str,
     now: datetime | None = None,
     timezone: str | None = None,
+    time_budget: float | None = None,
 ) -> tuple[PlannerOutput, str, str | None]:
-    """Return (plan, planner, note). planner is "llm" or "demo"."""
+    """Return (plan, planner, note). planner is "llm" or "demo".
+
+    `time_budget` is the number of seconds until the caller stops waiting (None: no limit); the
+    model call is given at most that time minus a small margin. The note is shown to the user.
+    """
+    caller_wall_clock = now is not None and now.tzinfo is None
+    local = local_now(now, timezone)
     endpoint = settings.llm_endpoint()
     if endpoint is None:
-        return build_demo_plan(user_input, now), "demo", "No LLM configured (LLM_BASE_URL unset or PLANNER_MODE=keyword): keyword planner used."
+        logger.info("No LLM configured (LLM_BASE_URL unset or PLANNER_MODE=keyword): keyword planner used.")
+        return (
+            build_demo_plan(user_input, local),
+            "demo",
+            "No AI model is set up for the planner, so the keyword planner made this plan.",
+        )
+
+    timeout = settings.llm_timeout_seconds
+    if time_budget is not None:
+        timeout = min(timeout, time_budget - _DEADLINE_MARGIN_SECONDS)
+        if timeout < _MIN_MODEL_SECONDS:
+            logger.info("No time left for the model before the caller's deadline: keyword planner used.")
+            return (
+                build_demo_plan(user_input, local),
+                "demo",
+                "There was no time left to ask the AI model, so the keyword planner made this plan.",
+            )
 
     base_url, api_key, model = endpoint
-    now = now or datetime.now()
-    zone = f" ({timezone})" if timezone else ""
+    # The zone label is true when the time is the caller's own wall clock or was converted to the
+    # zone; a server-clock time is not labelled with the caller's zone.
+    zone_name = _zone_name(timezone)
+    zone = f" ({zone_name})" if zone_name and (caller_wall_clock or _zone(timezone)) else ""
     try:
         client = OpenAI(
             base_url=base_url,
             api_key=api_key or "not-needed",
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
             max_retries=0,
         )
         response_format = _response_format()
@@ -312,8 +474,8 @@ def create_plan(
                 {
                     "role": "user",
                     "content": (
-                        f"Current local datetime{zone}: {now.replace(microsecond=0).isoformat()}\n"
-                        f"Dates: {upcoming_dates(now)}\n\n"
+                        f"Current local datetime{zone}: {local.replace(microsecond=0).isoformat()}\n"
+                        f"Dates: {upcoming_dates(local)}\n\n"
                         f"User input:\n{user_input}"
                     ),
                 },
@@ -322,14 +484,37 @@ def create_plan(
             max_tokens=settings.llm_max_tokens,
             **extra,
         )
-        raw = response.choices[0].message.content or "{}"
-        plan, notes = sanitize_plan(_extract_json(raw), user_input)
+        plan, notes = sanitize_plan(_read_answer(response), user_input)
         return plan, "llm", " ".join(notes) or None
     except Exception as error:  # noqa: BLE001 - any failure falls back so the demo stays alive
-        logger.warning("LLM planner failed, using the keyword planner: %s", error)
-        reason = readable_failure(error)
+        logger.warning("LLM planner failed, using the keyword planner: %r", error)
+        reason = readable_failure(error, timeout)
         return (
-            build_demo_plan(user_input, now),
+            build_demo_plan(user_input, local),
             "demo",
-            f"The LLM planner failed ({reason}); the keyword planner was used instead.",
+            f"The AI model could not make this plan ({reason}), so the keyword planner made it instead.",
         )
+
+
+def _read_answer(response: Any) -> dict[str, Any]:
+    """The plan object in a chat completion, or a PlannerAnswerError that says what was wrong."""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        raise PlannerAnswerError("the model returned an empty answer")
+    choice = choices[0]
+    cut_off = getattr(choice, "finish_reason", None) == "length"
+    message = getattr(choice, "message", None)
+    raw = (getattr(message, "content", None) or "").strip()
+    if not raw:
+        if cut_off:
+            # Seen with a thinking model: the whole token budget went into thinking.
+            raise PlannerAnswerError("the model used up its length limit before it answered")
+        raise PlannerAnswerError("the model returned an empty answer")
+    try:
+        return _extract_json(raw)
+    except PlannerAnswerError:
+        raise
+    except ValueError:
+        if cut_off:
+            raise PlannerAnswerError("the model's answer was cut off at its length limit") from None
+        raise PlannerAnswerError("the model's answer was not a readable plan") from None
