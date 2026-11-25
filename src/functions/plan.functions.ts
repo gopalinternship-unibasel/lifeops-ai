@@ -1,8 +1,11 @@
 import { createServerFn } from "@tanstack/react-start";
 import {
+  namesPlanItem,
   planCalendarState,
   planItemEmoji,
   planItemEventTitle,
+  planItemEventTitles,
+  refinementClear,
   type PlanCalendarEvent,
 } from "@/lib/plan-state";
 import { z } from "zod";
@@ -347,9 +350,18 @@ function parseStoredPlan(payload: unknown, monday: string): WeekPlan | null {
       if (!title || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
       if (endMs <= startMs || startMs < earliestMs || endMs > latestMs) return null;
       items.push({
-        // A short stored emoji stays as it is: it is part of the title of an approved event, and
-        // changing it would no longer match that event.
-        emoji: typeof item.emoji === "string" && item.emoji.length <= 16 ? item.emoji : planItemEmoji(item.emoji),
+        // The stored emoji stays as it is: it is part of the title of an approved event ("<emoji>
+        // <title>", see planItemEventTitle), and changing it would no longer match that event. A
+        // missing one stays missing (""): such an item was approved under its title alone, and the
+        // dashboard, which reads the stored row as it is, matches it that way. The page shows
+        // planItemEmoji of it. Only a value the planner never wrote (not a string, or a string
+        // longer than any emoji it stored) is replaced.
+        emoji:
+          item.emoji === undefined || item.emoji === null
+            ? ""
+            : typeof item.emoji === "string" && item.emoji.length <= 16
+              ? item.emoji
+              : planItemEmoji(item.emoji),
         title,
         starts_at: item.starts_at,
         ends_at: item.ends_at,
@@ -633,11 +645,18 @@ function noUsableSuggestionsMessage(rejected: Rejections, suggested: number): st
     : `None of the AI's suggestions could be used (they ${rejectionText(rejected, true)}), so your plan was not changed. Please try again.`;
 }
 
-// A refinement that asks to clear or remove items: an answer that removes every remaining item
-// is then what was asked for. Words such as "free" or "off" are left out on purpose ("add a run
-// in my free time" does not ask to empty the plan).
-const CLEAR_REQUEST_RE =
-  /\b(clear|remove|delete|drop|cancel|empty|erase|wipe|scrap|skip|nothing|get rid|take out|no (plans?|items?|activities))\b/i;
+/** "Tuesday", "Tuesday and Sunday", "Tuesday, Wednesday and Sunday". */
+function weekdayNames(dates: string[]): string {
+  const names = dates.map((date) =>
+    new Date(`${date}T00:00:00Z`).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "long" }),
+  );
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** The refusal when an answer empties days a request to remove something did not name. */
+function unaskedEmptiedDaysMessage(dates: string[]): string {
+  return `The AI's answer would have removed everything planned on ${weekdayNames(dates)}, which your request did not ask for, so your plan was not changed. Please try again. To clear whole days, name them, for example “clear Saturday and Sunday”.`;
+}
 
 /** Local times (minutes after midnight) in which a meal may start. */
 const MEAL_WINDOWS: { pattern: RegExp; from: number; to: number; label: string }[] = [
@@ -697,7 +716,9 @@ async function callPlanAI(opts: {
   // suggestion was dropped as a "repeat" of the plan's own event.
   const planItemKeys = new Set(
     (currentPlan?.days ?? []).flatMap((day) =>
-      day.items.map((item) => eventFingerprint(planItemEventTitle(item), item.starts_at, item.ends_at)),
+      day.items.flatMap((item) =>
+        planItemEventTitles(item).map((title) => eventFingerprint(title, item.starts_at, item.ends_at)),
+      ),
     ),
   );
   const isPlanItemEvent = (event: PlanCalendarEvent) =>
@@ -901,18 +922,35 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
   if ((opts.mode === "create" || !currentPlan) && suggested === 0 && hasFreeTime) {
     throw publicError(NO_ITEMS_ANSWER, { days: byDate.size }, "plan: the model's answer has no items");
   }
-  // A refinement may remove items on purpose, but one that would remove every remaining item and
-  // add none is refused unless the request asks for that: a small model can answer with seven
-  // empty days, and that emptied the saved plan and still read as a success.
-  if (
-    opts.mode === "refine" &&
-    currentPlan &&
-    accepted === 0 &&
-    !CLEAR_REQUEST_RE.test(opts.instructions ?? "") &&
-    openItemCount(currentPlan, opts.events, opts.nowMs) > 0 &&
-    openItemCount({ week_start: opts.monday, days }, opts.events, opts.nowMs) === 0
-  ) {
-    throw publicError(EMPTIED_PLAN_ANSWER, { days: byDate.size }, "plan: the refinement would empty the plan");
+  // A refinement may remove items on purpose, but what it removes is checked against what it asked
+  // for: a small model can answer with seven empty days, and that emptied the saved plan and still
+  // read as a success. Only a request to clear the whole plan may empty it. A request that names
+  // days or activities to remove ("remove the hike on Saturday") may empty only the days it names
+  // or whose items it names; any clearing word used to let an emptied plan through. Any other
+  // refinement may empty days, but not the whole plan without adding anything.
+  // Only emptied days are checked, on purpose: a day that keeps an item may lose others. A
+  // refinement may reshape a day (move or retime an item, which reads as a removal plus a new
+  // item, or "make Tuesday lighter"), and a re-suggested item can be dropped by the checks above,
+  // so refusing every unnamed removal would refuse answers that do what was asked.
+  if (opts.mode === "refine" && currentPlan) {
+    const clear = refinementClear(opts.instructions ?? "", opts.monday, localDateTime(opts.nowMs, opts.timeZone).date);
+    if (clear.kind !== "all") {
+      const before = openItemsByDate(currentPlan, opts.events, opts.nowMs);
+      const after = openItemsByDate({ week_start: opts.monday, days }, opts.events, opts.nowMs);
+      const openBefore = [...before.values()].flat();
+      const named = clear.kind === "some" ? clear : null;
+      if (named && (named.dates.length > 0 || openBefore.some((item) => namesPlanItem(named, item.title)))) {
+        const unasked = [...before]
+          .filter(([date, items]) => items.length > 0 && (after.get(date)?.length ?? 0) === 0)
+          .filter(([date, items]) => !named.dates.includes(date) && !items.every((item) => namesPlanItem(named, item.title)))
+          .map(([date]) => date);
+        if (unasked.length > 0) {
+          throw publicError(unaskedEmptiedDaysMessage(unasked), { days: unasked }, "plan: the refinement would empty days it did not name");
+        }
+      } else if (accepted === 0 && openBefore.length > 0 && [...after.values()].every((items) => items.length === 0)) {
+        throw publicError(EMPTIED_PLAN_ANSWER, { days: byDate.size }, "plan: the refinement would empty the plan");
+      }
+    }
   }
 
   let reply = typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim().slice(0, 400) : DEFAULT_REPLY;
@@ -923,14 +961,14 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
   return { reply, days };
 }
 
-/** Items of a plan that are still ahead and not in the calendar yet (what a refinement can remove). */
-function openItemCount(plan: WeekPlan, events: PlanCalendarEvent[], nowMs: number): number {
+/** Per date, the items of a plan that are still ahead and not in the calendar yet (what a refinement can remove). */
+function openItemsByDate(plan: WeekPlan, events: PlanCalendarEvent[], nowMs: number): Map<string, WeekPlanItem[]> {
   const { addedItems } = planCalendarState(plan, events, nowMs);
-  return plan.days.reduce(
-    (count, day) =>
-      count +
-      day.items.filter((item, index) => toMs(item.starts_at) >= nowMs && !(addedItems[day.date] ?? []).includes(index)).length,
-    0,
+  return new Map(
+    plan.days.map((day) => [
+      day.date,
+      day.items.filter((item, index) => toMs(item.starts_at) >= nowMs && !(addedItems[day.date] ?? []).includes(index)),
+    ]),
   );
 }
 
@@ -1292,7 +1330,11 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
           };
           const key = eventFingerprint(input.title, input.starts_at, input.ends_at);
           targetKeys.add(key);
-          if (existingFingerprints.has(key)) {
+          // Also under the title an item without an emoji was approved with before ("• <title>").
+          const inCalendar = planItemEventTitles(item).some((title) =>
+            existingFingerprints.has(eventFingerprint(title, item.starts_at, item.ends_at)),
+          );
+          if (inCalendar) {
             skipped++;
             continue;
           }

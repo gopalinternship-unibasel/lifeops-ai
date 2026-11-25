@@ -14,6 +14,7 @@ import {
   WEEK_OVER_REPLY,
   draftingWaitText,
   initialPlanWeekView,
+  liveRegionReply,
   parseApproveCommand,
   planCreateInstructions,
   planDayStatus,
@@ -38,7 +39,13 @@ export const Route = createFileRoute("/app/plan")({
   component: PlanPage,
 });
 
-interface ChatTurn { id: string; role: "user" | "assistant"; content: string; }
+interface ChatTurn {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  /** Also shown as a toast, which screen readers announce: the live region leaves it out. */
+  toasted?: boolean;
+}
 
 function startOfWeekMondayISO(d: Date): string {
   const x = new Date(d); x.setHours(0, 0, 0, 0);
@@ -182,8 +189,8 @@ function PlanPage() {
     setMonday(startOfWeekMondayISO(d));
   };
 
-  const say = (content: string) =>
-    setMessages((m) => [...m, { id: `a-${Date.now()}-${m.length}`, role: "assistant", content }]);
+  const say = (content: string, toasted = false) =>
+    setMessages((m) => [...m, { id: `a-${Date.now()}-${m.length}`, role: "assistant", content, toasted }]);
 
   const dismissRequest = (id: string) => {
     saveDismissedRequest(id);
@@ -203,7 +210,8 @@ function PlanPage() {
       applyPlanState(week, r);
       if (refusalStoredNoRequest(previousRequestId, r.request)) {
         if (previousRequestId) setHiddenRequests((current) => new Set([...current, previousRequestId]));
-        say(message);
+        // The same sentence was a toast already (see generate and handleSend).
+        say(message, true);
       }
     } catch {
       /* the toast already reports the failure */
@@ -353,7 +361,7 @@ function PlanPage() {
       if (totals.failed > 0) parts.push(`${totals.failed} failed`);
       const summary = `${parts.join(", ")} for ${niceDays}.`;
       toast.success(summary);
-      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: `✅ ${summary}` }]);
+      setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content: `✅ ${summary}`, toasted: true }]);
     } catch (e: unknown) {
       toast.error(getErrorMessage(e, "Approval failed"));
       if (approvedSome) await refresh();
@@ -368,8 +376,9 @@ function PlanPage() {
     : ["Please create this week's plan for me"];
 
   const banner = planRequestBanner(request, { loading, waitingHere: busyWeek === monday, hidden: hiddenRequests });
-  // The newest reply of MONDAY, for screen readers (see the live region below).
-  const latestReply = [...messages].reverse().find((m) => m.role === "assistant");
+  // The newest reply of MONDAY that was not a toast too, for screen readers (see the live region
+  // below): a toast is announced on its own, and the same sentence was read out twice.
+  const latestReply = liveRegionReply(messages);
 
   return (
     <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
