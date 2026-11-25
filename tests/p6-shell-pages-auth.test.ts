@@ -95,14 +95,20 @@ describe("sign-out flow of the signed-in pages", () => {
     expect(flow.guardRedirect(false, false)).toBeNull();
   });
 
-  it("still leaves for the landing page when the sign-out call fails", async () => {
+  it("still leaves for the landing page when the sign-out call throws, without a rejection", async () => {
+    // The Sign out button starts the flow with `void`, so a rejection here would be unhandled.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const flow = createSignOutFlow();
     const call = pendingSignOut();
     const goToLanding = vi.fn();
     const done = flow.signOut(call.signOut, goToLanding);
-    call.fail(new Error("network down"));
-    await expect(done).rejects.toThrow("network down");
+    const failure = new Error("network down");
+    call.fail(failure);
+    await expect(done).resolves.toBeUndefined();
     expect(goToLanding).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith("Sign-out failed:", failure);
+    // The guard stays quiet: the landing page decides where a still-signed-in visitor goes.
+    expect(flow.guardRedirect(false, false)).toBeNull();
   });
 
   it("gives every layout its own flow, so an expired session in a new one still goes to /login", () => {

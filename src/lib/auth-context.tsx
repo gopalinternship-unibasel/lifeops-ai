@@ -116,11 +116,18 @@ export function createSignOutFlow() {
     guardRedirect(loading: boolean, signedIn: boolean): "/login" | null {
       return !loading && !signedIn && !signingOut ? "/login" : null;
     },
-    /** Sign out, then go to the landing page. */
+    /**
+     * Sign out, then go to the landing page. Never rejects: the Sign out button starts this
+     * without waiting for it, so a thrown error used to end as an unhandled rejection. auth-js
+     * reports a failed sign-out as a returned error, so a throw is unexpected; it is logged, and
+     * the landing page still opens (it sends a visitor who is still signed in back to /app).
+     */
     async signOut(signOut: () => Promise<void>, goToLanding: () => void): Promise<void> {
       signingOut = true;
       try {
         await signOut();
+      } catch (error) {
+        console.error("Sign-out failed:", error);
       } finally {
         goToLanding();
       }
