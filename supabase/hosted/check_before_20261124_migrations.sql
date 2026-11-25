@@ -1,5 +1,5 @@
 -- Read-only checks for the HOSTED project, to run in the SQL Editor before (and after) applying the
--- migrations 20261124110000 to 20261124110300. Nothing here changes data.
+-- migrations 20261124110000 to 20261125120000. Nothing here changes data.
 
 -- 1. Nothing of the ledger exists yet (both counts 0 before; 1 after).
 select
@@ -16,17 +16,22 @@ union all
 select 'planner_requests', count(*) filter (where created_at < now() - interval '1 hour'), count(*)
   from public.planner_requests where status = 'running';
 
--- 3. Users already at or over a new per-user row limit (20261124110100). Such a user cannot add
---    rows to that table any more (the message names the limit). Expect no rows.
-select 'calendar_events' as table_name, user_id, count(*) from public.calendar_events group by user_id having count(*) >= 1000
-union all select 'chat_card_actions', user_id, count(*) from public.chat_card_actions group by user_id having count(*) >= 1000
-union all select 'chat_messages', user_id, count(*) from public.chat_messages group by user_id having count(*) >= 1000
-union all select 'chat_sessions', user_id, count(*) from public.chat_sessions group by user_id having count(*) >= 100
-union all select 'connector_status', user_id, count(*) from public.connector_status group by user_id having count(*) >= 20
-union all select 'email_drafts', user_id, count(*) from public.email_drafts group by user_id having count(*) >= 100
-union all select 'planner_requests', user_id, count(*) from public.planner_requests group by user_id having count(*) >= 200
-union all select 'week_plan_requests', user_id, count(*) from public.week_plan_requests group by user_id having count(*) >= 300
-union all select 'weekly_plans', user_id, count(*) from public.weekly_plans group by user_id having count(*) >= 52;
+-- 3. Users already at or over a per-user row limit (20261124110100, 20261125120000). After
+--    20261125120000 the next row such a user stores removes their oldest rows of that table
+--    (calendar events that are over, chat messages, handled-suggestion records, drafts, finished
+--    requests, week plans); only chat_sessions and connector_status refuse new rows at the limit,
+--    and calendar_events when none of the user's events is over (the message names the limit;
+--    not_over_yet below). Expect no rows on a demo.
+select 'calendar_events' as table_name, user_id, count(*), count(*) filter (where ends_at > now()) as not_over_yet
+  from public.calendar_events group by user_id having count(*) >= 1000
+union all select 'chat_card_actions', user_id, count(*), null from public.chat_card_actions group by user_id having count(*) >= 900
+union all select 'chat_messages', user_id, count(*), null from public.chat_messages group by user_id having count(*) >= 1000
+union all select 'chat_sessions', user_id, count(*), null from public.chat_sessions group by user_id having count(*) >= 100
+union all select 'connector_status', user_id, count(*), null from public.connector_status group by user_id having count(*) >= 20
+union all select 'email_drafts', user_id, count(*), null from public.email_drafts group by user_id having count(*) >= 100
+union all select 'planner_requests', user_id, count(*), null from public.planner_requests group by user_id having count(*) >= 200
+union all select 'week_plan_requests', user_id, count(*), null from public.week_plan_requests group by user_id having count(*) >= 300
+union all select 'weekly_plans', user_id, count(*), null from public.weekly_plans group by user_id having count(*) >= 52;
 
 -- 4. Rows longer than the new limits. The constraints are NOT VALID, so these rows stay and stay
 --    readable, but they cannot be changed without being shortened. Expect zeros on a demo.
@@ -45,3 +50,8 @@ select
 --  where table_schema = 'public' and table_name = 'ai_usage' order by 1, 2;
 -- select proacl from pg_proc where proname = 'ai_allowance';
 -- select indexname from pg_indexes where indexname in ('week_plan_requests_one_running', 'planner_requests_one_running');
+--    And the row limits in force (20261125120000): seven tables keep their newest rows
+--    (keep_newest_user_rows), two refuse at the limit (enforce_user_row_limit).
+-- select c.relname, p.proname, encode(t.tgargs, 'escape') from pg_trigger t
+--   join pg_class c on c.oid = t.tgrelid join pg_proc p on p.oid = t.tgfoid
+--  where t.tgname like '%_row_limit' order by 1;

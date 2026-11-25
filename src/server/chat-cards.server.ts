@@ -31,10 +31,12 @@ const UNIQUE_VIOLATION = "23505";
 const store = supabaseAdmin;
 
 /**
- * The sentence of the database's row-limit triggers (SQLSTATE 23514, migration 20261124110100):
- * "This demo account has reached its limit of 1000 stored chat messages. Clear the chat history
- * to continue." A CHECK constraint fails with 23514 too, with a message for developers; only the
- * triggers' own sentences start like this.
+ * The sentence of the database's row-limit triggers (SQLSTATE 23514, migrations 20261124110100 and
+ * 20261125120000), e.g. "This demo account has reached its limit of 100 chat sessions." A CHECK
+ * constraint fails with 23514 too, with a message for developers; only the triggers' own
+ * sentences start like this. Since 20261125120000 chat messages and card records no longer
+ * refuse (the database keeps each account's newest rows), and dbError itself passes every
+ * row-limit sentence on (rowLimitSentence in public-error.server.ts): this check is a second one.
  */
 const ROW_LIMIT_SENTENCE = /^This demo account has reached its (?:limit of \d+ [^\n]{1,120}|storage limit for this kind of item)\./;
 
@@ -52,15 +54,18 @@ export function storageError(action: string, cause: unknown): Error {
 }
 
 /**
- * The database's limit on card records per user (migration 20261124110100), with its sentence.
- * The database counts only writes made with the user's token; these writes use the service role.
+ * The server's own limit on card records per user, with its sentence. Since migration
+ * 20261125120000 the database keeps each account's newest 900 records for every role (the
+ * service role's writes here included) and never refuses, so this limit is only reached where
+ * that migration is not applied.
  */
 export const CARD_ACTIONS_LIMIT = 1000;
 export const CARD_ACTIONS_FULL = "This demo account has reached its limit of 1000 handled chat suggestions.";
 
 /**
  * Refuse a new card record when the user already has CARD_ACTIONS_LIMIT of them. The row-limit
- * trigger does not count the server's service-role writes, and the dismiss function takes any
+ * trigger of 20261124110100 did not count the server's service-role writes (the one of
+ * 20261125120000 does, and keeps 900), and the dismiss function takes any
  * well-formed card id, so without this check one visitor could add records without bound (review
  * of 24 Nov 2026). A card that already has a record needs no room: a repeated claim or dismissal
  * goes on as before. Two requests at the same moment can each pass the count, so the limit can be

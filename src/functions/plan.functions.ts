@@ -25,7 +25,7 @@ import {
 } from "@/server/connectors/calendar.mock";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { checkAiAllowance, enforceAiAllowance } from "@/server/limits.server";
-import { dbError, publicError } from "@/server/public-error.server";
+import { dbError, isRowLimitError, publicError } from "@/server/public-error.server";
 import { isHostedDeployment } from "@/server/deployment.server";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import type { Json } from "@/integrations/supabase/types";
@@ -1272,7 +1272,10 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
 
     const nowMs = Date.now();
     const targetKeys = new Set<string>();
+    // A row limit of the demo database refuses every further event too (see isRowLimitError).
+    let rowLimit: Error | null = null;
     for (const day of targetDays) {
+      if (rowLimit) break;
       for (const item of day.items) {
         try {
           // A plan made earlier (or before this fix) can hold items whose time has passed:
@@ -1307,6 +1310,10 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
           newIds.push(ev.id);
           created++;
         } catch (e) {
+          if (isRowLimitError(e)) {
+            rowLimit = e;
+            break;
+          }
           console.error("approveWeekPlan: insert failed", e);
           failed++;
         }
@@ -1370,6 +1377,14 @@ export const approveWeekPlan = createServerFn({ method: "POST" })
       } catch (e) {
         console.error("[plan] approveWeekPlan: could not check the saved event ids", e);
       }
+    }
+
+    // The visitor reads the database's sentence (what to do), not "N failed". The events added
+    // before it stay, and are recorded above.
+    if (rowLimit) {
+      throw created > 0
+        ? publicError(`Added ${created} event${created === 1 ? "" : "s"} of the plan. ${rowLimit.message}`)
+        : rowLimit;
     }
 
     return { created, skipped, past, conflicts, conflictTitles, failed, eventIds: newIds };

@@ -1,5 +1,6 @@
 // Database checks for the migrations of 2026-11-24 (AI allowance ledger, size and row limits, one
-// running request, rows only the server writes) and the hosted SQL files.
+// running request, rows only the server writes), of 2026-11-25 (row limits that keep an account's
+// newest rows instead of refusing: 20261125120000) and the hosted SQL files.
 //
 // Applies every migration in supabase/migrations, in order, to an in-process Postgres (PGlite)
 // with a stub of Supabase's auth schema and API roles, then runs each check as the role the app
@@ -142,7 +143,9 @@ if (defaultGrants) {
 // ---------------------------------------------------------------- migrations
 const files = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
 const before = files.filter((f) => f < "20261124110200");
-const after = files.filter((f) => f >= "20261124110200");
+// 20261125120000 replaces refusing row limits; the accounts it unlocks are set up before it.
+const after = files.filter((f) => f >= "20261124110200" && f < "20261125120000");
+const later = files.filter((f) => f >= "20261125120000");
 async function apply(list) {
   for (const f of list) {
     const sql = readFileSync(join(migrationsDir, f), "utf8");
@@ -189,6 +192,103 @@ await db.query(
   [U1, U2],
 );
 await apply(after);
+
+// ---------------------------------------------------------------- an account at the old limits
+// U4 used the demo for a long time: under 20261124110100 every one of these writes was refused for
+// good (nothing in the app deletes the rows). 20261125120000 must let them through, keeping the
+// newest rows.
+const U4 = "44444444-4444-4444-8444-444444444444";
+const S4 = "aaaaaaaa-0000-4000-8000-000000000004";
+await db.query(`insert into auth.users (id, email, is_anonymous) values ($1, 'd@example.com', false)`, [U4]);
+await db.query(`insert into public.chat_sessions (id, user_id) values ($1, $2)`, [S4, U4]);
+await db.query(
+  `insert into public.chat_messages (session_id, user_id, role, content, created_at)
+   select $1, $2, case when g % 2 = 0 then 'assistant' else 'user' end, 'old ' || g, now() - interval '2 days' + g * interval '1 second'
+     from generate_series(1, 1000) g`,
+  [S4, U4],
+);
+await db.query(
+  `insert into public.planner_requests (user_id, input, status, finished_at, created_at)
+   select $1, 'old ' || g, 'done', now(), now() - interval '2 days' + g * interval '1 second' from generate_series(1, 200) g`,
+  [U4],
+);
+await db.query(
+  `insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider, created_at)
+   select $1, 'm' || g, 'a@b.c', 's', 'b', 'demo', now() - interval '2 days' + g * interval '1 second' from generate_series(1, 100) g`,
+  [U4],
+);
+await db.query(
+  `insert into public.week_plan_requests (user_id, week_start, status, created_at)
+   select $1, date '2025-01-06' + 7 * (g % 60), 'done', now() - interval '2 days' + g * interval '1 second' from generate_series(1, 300) g`,
+  [U4],
+);
+await db.query(
+  `insert into public.weekly_plans (user_id, week_start, payload)
+   select $1, date '2025-06-02' + 7 * g, '{"days":[]}' from generate_series(0, 51) g`,
+  [U4],
+);
+// 1000 events that are all over (approved week plans, saved cards), the earliest 'past 1'.
+await db.query(
+  `insert into public.calendar_events (user_id, title, starts_at, ends_at, source)
+   select $1, 'past ' || g, now() - interval '200 days' + g * interval '3 hours',
+          now() - interval '200 days' + g * interval '3 hours' + interval '1 hour', 'plan'
+     from generate_series(1, 1000) g`,
+  [U4],
+);
+
+console.log("\n[before 20261125120000: an account at a limit is refused for good]");
+{
+  await asUser(U4);
+  await expectError("chat message refused at 1000", () => db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'hi')`, [S4, U4]), /23514/);
+  await expectError("Plan it refused at 200", () => db.query(`insert into public.planner_requests (user_id, input, status) values ($1, 'plan', 'running')`, [U4]), /23514/);
+  await expectError("draft refused at 100", () => db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ($1, 'm', 'a@b.c', 's', 'b', 'demo')`, [U4]), /23514/);
+  await expectError("week plan request refused at 300", () => db.query(`insert into public.week_plan_requests (user_id, week_start, kind) values ($1, '2026-11-30', 'create')`, [U4]), /23514/);
+  await expectError("an event refused at 1000 events, all of them over", () => db.query(`insert into public.calendar_events (user_id, title, starts_at, ends_at) values ($1, 'new', now() + interval '1 day', now() + interval '1 day 1 hour')`, [U4]), /23514/);
+  await asService();
+  await expectError("the server's plan for a 53rd week refused (after the AI call)", () => db.query(`insert into public.weekly_plans (user_id, week_start, payload) values ($1, '2026-11-30', '{"days":[]}')`, [U4]), /23514/);
+  await asOwner();
+}
+
+await apply(later);
+
+console.log("\n[20261125120000: the same account can go on; its oldest rows make room]");
+{
+  await asUser(U4);
+  await db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'hi')`, [S4, U4]);
+  await db.query(`insert into public.planner_requests (user_id, input, status) values ($1, 'plan', 'running')`, [U4]);
+  await db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ($1, 'm', 'a@b.c', 's', 'b', 'demo')`, [U4]);
+  await db.query(`insert into public.week_plan_requests (user_id, week_start, kind) values ($1, '2026-11-30', 'create')`, [U4]);
+  await db.query(`insert into public.calendar_events (user_id, title, starts_at, ends_at) values ($1, 'new', now() + interval '1 day', now() + interval '1 day 1 hour')`, [U4]);
+  await asService();
+  await db.query(
+    `insert into public.weekly_plans (user_id, week_start, payload) values ($1, '2026-11-30', '{"days":[]}')
+     on conflict (user_id, week_start) do update set payload = excluded.payload`,
+    [U4],
+  );
+  ok(true, "chat message, Plan it, draft, week plan request, calendar event and the server's new week plan all accepted");
+  await asOwner();
+  const counts = await one(
+    `select (select count(*)::int from public.chat_messages where user_id = $1) m,
+            (select count(*)::int from public.planner_requests where user_id = $1) p,
+            (select count(*)::int from public.email_drafts where user_id = $1) d,
+            (select count(*)::int from public.week_plan_requests where user_id = $1) w,
+            (select count(*)::int from public.weekly_plans where user_id = $1) wp,
+            (select count(*)::int from public.calendar_events where user_id = $1) e`,
+    [U4],
+  );
+  ok(counts.m === 1000 && counts.p === 200 && counts.d === 100 && counts.w === 300 && counts.wp === 52 && counts.e === 1000, "each table still holds exactly its limit", counts);
+  ok(
+    (await one(`select count(*)::int c from public.calendar_events where user_id = $1 and title in ('past 1', 'new')`, [U4])).c === 1 &&
+      (await one(`select count(*)::int c from public.calendar_events where user_id = $1 and title = 'new'`, [U4])).c === 1,
+    "the event that ended first made room for the new one",
+  );
+  ok((await one(`select count(*)::int c from public.chat_messages where user_id = $1 and content = 'old 1'`, [U4])).c === 0, "the oldest chat message made room");
+  ok((await one(`select count(*)::int c from public.chat_messages where user_id = $1 and content = 'old 2'`, [U4])).c === 1, "only one message removed for one new one");
+  ok((await one(`select count(*)::int c from public.planner_requests where user_id = $1 and input = 'old 1'`, [U4])).c === 0, "the oldest Plan it request made room");
+  ok((await one(`select count(*)::int c from public.email_drafts where user_id = $1 and message_id = 'm1'`, [U4])).c === 0, "the oldest draft made room");
+  ok((await one(`select count(*)::int c from public.weekly_plans where user_id = $1 and week_start = '2025-06-02'`, [U4])).c === 0, "the plan of the earliest week that is over made room");
+  ok((await one(`select count(*)::int c from public.weekly_plans where user_id = $1 and week_start = '2026-11-30'`, [U4])).c === 1, "the new week's plan is stored");
+}
 
 console.log("\n[one running request: migration closes stale and duplicate rows]");
 {
@@ -432,28 +532,39 @@ console.log("\n[rows only the server writes]");
 console.log("\n[rows per user]");
 {
   await asOwner();
+  // Seven tables keep each account's newest rows (20261125120000); two refuse at their limit.
   const expected = {
-    calendar_events: "1000",
-    chat_card_actions: "1000",
-    chat_messages: "1000",
-    chat_sessions: "100",
-    connector_status: "20",
-    email_drafts: "100",
-    planner_requests: "200",
-    week_plan_requests: "300",
-    weekly_plans: "52",
+    calendar_events: "keep_newest_user_rows 1000",
+    chat_card_actions: "keep_newest_user_rows 900",
+    chat_messages: "keep_newest_user_rows 1000",
+    chat_sessions: "enforce_user_row_limit 100",
+    connector_status: "enforce_user_row_limit 20",
+    email_drafts: "keep_newest_user_rows 100",
+    planner_requests: "keep_newest_user_rows 200",
+    week_plan_requests: "keep_newest_user_rows 300",
+    weekly_plans: "keep_newest_user_rows 52",
   };
   const triggers = (
     await db.query(
-      `select c.relname as table_name, encode(t.tgargs, 'escape') as args
-         from pg_trigger t join pg_class c on c.oid = t.tgrelid
+      `select c.relname as table_name, p.proname, encode(t.tgargs, 'escape') as args
+         from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_proc p on p.oid = t.tgfoid
         where t.tgname like '%row_limit' and not t.tgisinternal`,
     )
   ).rows;
-  const found = Object.fromEntries(triggers.map((r) => [r.table_name, r.args.split("\\000")[0]]));
+  const found = Object.fromEntries(triggers.map((r) => [r.table_name, `${r.proname} ${r.args.split("\\000")[0]}`]));
   const sorted = (o) => JSON.stringify(Object.entries(o).sort());
-  ok(sorted(found) === sorted(expected), "the row limit of every table", found);
+  ok(sorted(found) === sorted(expected), "the row limit and its kind on every table", found);
+  const sentences = triggers.map((r) => r.args.split("\\000")[1]).filter(Boolean);
+  ok(
+    sentences.length === 5 && sentences.every((s) => /^This demo account has /.test(s) && !/_|clear the chat/i.test(s)),
+    "every sentence is plain and names nothing the app does not offer",
+    sentences,
+  );
+  ok((await one(`select count(*)::int c from pg_proc where proname = 'enforce_weekly_plan_limit'`)).c === 0, "the refusing week plan limit is gone");
+  const fn = await one(`select prosecdef, proconfig from pg_proc where proname = 'keep_newest_user_rows'`);
+  ok(fn.prosecdef === true && JSON.stringify(fn.proconfig) === JSON.stringify(["search_path=\"\""]), "keep_newest_user_rows runs as its owner with an empty search_path", fn);
 
+  // Refusing limits: connector_status, chat_sessions, calendar_events.
   await asUser(U2);
   const rows = Array.from({ length: 20 }, (_, i) => `('${U2}', 'p${i}')`).join(",");
   await db.query(`insert into public.connector_status (user_id, provider) values ${rows}`);
@@ -465,14 +576,14 @@ console.log("\n[rows per user]");
     ok(
       e.code === "23514" &&
         e.message === "This demo account has reached its limit of 20 connected services." &&
-        /public\.connector_status/.test(e.detail ?? ""),
+        e.detail === "Row limit 20 per user on public.connector_status.",
       "the 21st connector row refused with a plain sentence; the table is named only in the detail",
       { code: e.code, message: e.message, detail: e.detail },
     );
   }
   await asService();
   await db.query(`insert into public.connector_status (user_id, provider) values ($1, 'gmail')`, [U2]);
-  ok(true, "the service role is not limited");
+  ok(true, "the service role is not limited on a refusing table");
   await asUser(U3);
   const batch = Array.from({ length: 25 }, (_, i) => `('${U3}', 'q${i}')`).join(",");
   await expectError("one statement with 25 rows refused at row 21", () => db.query(`insert into public.connector_status (user_id, provider) values ${batch}`), /23514/);
@@ -481,47 +592,287 @@ console.log("\n[rows per user]");
   await asUser(U2);
   const sess = Array.from({ length: 100 }, () => `('${U2}')`).join(",");
   await db.query(`insert into public.chat_sessions (user_id) values ${sess}`);
-  await expectError("chat sessions limited to 100", () => db.query(`insert into public.chat_sessions (user_id) values ($1)`, [U2]), /23514/);
+  await expectError("chat sessions limited to 100, without advice the app cannot follow", () => db.query(`insert into public.chat_sessions (user_id) values ($1)`, [U2]), /^23514 This demo account has reached its limit of 100 chat sessions\.$/);
+  // calendar_events: only events that are over make room, the one that ended first first; an
+  // event under way or still to come is never removed; the demo events go last.
+  await asOwner();
+  await db.query(`delete from public.calendar_events where user_id = $1`, [U2]);
+  await db.query(
+    `insert into public.calendar_events (user_id, title, starts_at, ends_at)
+     select $1, 'e' || g, now() + g * interval '1 hour', now() + g * interval '1 hour' + interval '30 minutes' from generate_series(1, 1000) g`,
+    [U2],
+  );
+  await asUser(U2);
+  try {
+    await db.query(`insert into public.calendar_events (user_id, title, starts_at, ends_at) values ($1, 'x', now(), now() + interval '1 hour')`, [U2]);
+    ok(false, "with 1000 events still to come, the 1001st is refused");
+  } catch (e) {
+    ok(
+      e.code === "23514" &&
+        e.message === "This demo account has reached its limit of 1000 calendar events that are not over yet. Ask the assistant to cancel upcoming events you no longer need, or wait until some are over, then try again." &&
+        e.detail === "Row limit 1000 per user on public.calendar_events.",
+      "with 1000 events still to come, the 1001st is refused with what the visitor can do",
+      { code: e.code, message: e.message, detail: e.detail },
+    );
+  }
+  await asOwner();
+  ok((await one(`select count(*)::int c from public.calendar_events where user_id = $1`, [U2])).c === 1000, "and no event still to come was removed");
+  // e1 is under way, e2 ended two days ago, e3 one day ago.
+  await db.query(`update public.calendar_events set starts_at = now() - interval '1 hour', ends_at = now() + interval '1 hour' where user_id = $1 and title = 'e1'`, [U2]);
+  await db.query(`update public.calendar_events set starts_at = now() - interval '49 hours', ends_at = now() - interval '48 hours' where user_id = $1 and title = 'e2'`, [U2]);
+  await db.query(`update public.calendar_events set starts_at = now() - interval '25 hours', ends_at = now() - interval '24 hours' where user_id = $1 and title = 'e3'`, [U2]);
+  await asUser(U2);
+  await db.query(`insert into public.calendar_events (user_id, title, starts_at, ends_at) values ($1, 'x', now() + interval '2000 hours', now() + interval '2001 hours')`, [U2]);
+  await asOwner();
+  const kept = (await db.query(`select title from public.calendar_events where user_id = $1 and title in ('e1', 'e2', 'e3', 'x') order by title`, [U2])).rows.map((r) => r.title);
+  ok(
+    JSON.stringify(kept) === JSON.stringify(["e1", "e3", "x"]) &&
+      (await one(`select count(*)::int c from public.calendar_events where user_id = $1`, [U2])).c === 1000,
+    "at 1000 events a new one is accepted: the event that ended first made room, the one under way stayed",
+    kept,
+  );
+  // An account whose 1000 events are all over, the demo events among the earliest.
+  const U6 = "66666666-6666-4666-8666-666666666666";
+  await db.query(`insert into auth.users (id, is_anonymous) values ($1, false)`, [U6]);
+  await db.query(
+    `insert into public.calendar_events (user_id, title, starts_at, ends_at, source, seed_key)
+     select $1, 'old ' || g, now() - interval '100 days' + g * interval '2 hours',
+            now() - interval '100 days' + g * interval '2 hours' + interval '1 hour',
+            case when g <= 4 then 'calendar' else 'plan' end,
+            case g when 1 then 'team-sync' when 2 then 'lecture' when 3 then 'dentist' when 4 then 'acme-interview' end
+       from generate_series(1, 1000) g`,
+    [U6],
+  );
+  await asUser(U6);
+  for (let i = 1; i <= 3; i++) {
+    await db.query(`insert into public.calendar_events (user_id, title, starts_at, ends_at, source) values ($1, $2, now() + $3::int * interval '1 day', now() + $3::int * interval '1 day' + interval '1 hour', 'plan')`, [U6, `next ${i}`, i]);
+  }
+  await asOwner();
+  const u6 = await one(
+    `select count(*)::int c, count(*) filter (where seed_key is not null)::int seeds,
+            count(*) filter (where title in ('old 5', 'old 6', 'old 7'))::int earliest_plan,
+            count(*) filter (where title like 'next %')::int added
+       from public.calendar_events where user_id = $1`,
+    [U6],
+  );
+  ok(
+    u6.c === 1000 && u6.seeds === 4 && u6.earliest_plan === 0 && u6.added === 3,
+    "an account with 1000 past events adds three more: its three earliest past events (not the demo ones) made room",
+    u6,
+  );
+  await db.query(`delete from auth.users where id = $1`, [U6]);
 
-  const drafts = Array.from({ length: 100 }, (_, i) => `('${U2}', 'm${i}', 'a@b.c', 's', 'b', 'demo')`).join(",");
-  await db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ${drafts}`);
-  await expectError("email drafts limited to 100", () => db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ($1, 'm', 'a@b.c', 's', 'b', 'demo')`, [U2]), /23514|limit of 100 saved email drafts/);
+  // email_drafts: the newest 100 stay, a new draft is never refused.
+  await asOwner();
+  await db.query(
+    `insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider, created_at)
+     select $1, 'm' || g, 'a@b.c', 's', 'b', 'demo', now() - interval '1 hour' + g * interval '1 second' from generate_series(0, 99) g`,
+    [U2],
+  );
+  await asUser(U2);
+  await db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ($1, 'new', 'a@b.c', 's', 'b', 'demo')`, [U2]);
+  ok((await one(`select count(*)::int c from public.email_drafts where user_id = $1`, [U2])).c === 100, "the 101st draft accepted, 100 stay");
+  ok((await one(`select count(*)::int c from public.email_drafts where user_id = $1 and message_id = 'm0'`, [U2])).c === 0, "the oldest draft made room");
+  // Another account's insert at U2's limit: refused by the policy, and nothing of U2's is removed.
+  await asUser(U1);
+  await expectError("a draft for another account refused", () => db.query(`insert into public.email_drafts (user_id, message_id, to_address, subject, body, provider) values ($1, 'x', 'a@b.c', 's', 'b', 'demo')`, [U2]), /42501|row-level security/);
+  await asOwner();
+  ok((await one(`select count(*)::int c from public.email_drafts where user_id = $1 and message_id = 'm1'`, [U2])).c === 1, "and none of that account's drafts removed");
 
-  // chat_messages: 1000 rows per user, the server's answers included; clearing the history frees them.
+  // chat_messages: 1000 rows per account, the server's answers included.
   const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
   await asOwner();
   await db.query(`insert into public.chat_sessions (id, user_id) values ($1, $2)`, [S3, U3]);
-  await asService();
   await db.query(
-    `insert into public.chat_messages (session_id, user_id, role, content)
-     select $1, $2, 'assistant', 'answer ' || g from generate_series(1, 999) g`,
+    `insert into public.chat_messages (session_id, user_id, role, content, created_at)
+     select $1, $2, 'assistant', 'answer ' || g, now() - interval '1 hour' + g * interval '1 second' from generate_series(1, 999) g`,
     [S3, U3],
   );
   await asUser(U3);
   await db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'message 1000')`, [S3, U3]);
-  ok(true, "the 1000th message accepted");
-  await expectError("the 1001st message refused, with the way out", () => db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'one more')`, [S3, U3]), /23514 This demo account has reached its limit of 1000 stored chat messages\. Clear the chat history to continue\./);
-  await db.query(`delete from public.chat_messages where user_id = $1`, [U3]);
-  await db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'after clearing')`, [S3, U3]);
-  ok(true, "after clearing the history the user can write again");
+  ok((await one(`select count(*)::int c from public.chat_messages where user_id = $1`, [U3])).c === 1000, "the 1000th message accepted, nothing removed");
+  await db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'user', 'one more')`, [S3, U3]);
+  await asService();
+  await db.query(`insert into public.chat_messages (session_id, user_id, role, content) values ($1, $2, 'assistant', 'its answer')`, [S3, U3]);
+  await asOwner();
+  const left = (await db.query(`select content from public.chat_messages where user_id = $1 order by created_at, id limit 1`, [U3])).rows[0].content;
+  ok((await one(`select count(*)::int c from public.chat_messages where user_id = $1`, [U3])).c === 1000 && left === "answer 3", "the 1001st and 1002nd messages accepted (user and server), the two oldest removed", left);
 
-  // weekly_plans: 52 weeks with a plan per user, for every role; a re-plan of a week still works.
+  // chat_card_actions: 900 records; a new card makes room, a repeated one removes nothing.
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status, result_id, created_at)
+     select $1, 'card-' || g, 'saved', 'ev-' || g, now() - interval '1 hour' + g * interval '1 second' from generate_series(1, 900) g`,
+    [U3],
+  );
+  await asService();
+  await db.query(`insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'card-new', 'saved')`, [U3]);
+  await asOwner();
+  ok((await one(`select count(*)::int c from public.chat_card_actions where user_id = $1`, [U3])).c === 900, "a new card claimed by the server at 900 records, 900 stay");
+  ok((await one(`select count(*)::int c from public.chat_card_actions where user_id = $1 and card_id = 'card-1'`, [U3])).c === 0, "the oldest record made room");
+  await asService();
+  await db.query(`insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'card-2', 'dismissed') on conflict (user_id, card_id) do nothing`, [U3]);
+  await expectError("a second claim of a card still refused by the primary key", () => db.query(`insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'card-3', 'saved')`, [U3]), /23505/);
+  await asOwner();
+  ok((await one(`select count(*)::int c from public.chat_card_actions where user_id = $1 and card_id in ('card-2', 'card-3')`, [U3])).c === 2, "a repeated card removes no other record");
+
+  // Which records make room: dismissed ones first, so made-up dismissals cannot push out the record
+  // of a saved card; saved and applied ones only when all are; a claim of the last hour last.
+  const U7 = "77777777-7777-4777-8777-777777777777";
+  await db.query(`insert into auth.users (id, is_anonymous) values ($1, false)`, [U7]);
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status, result_id, created_at)
+     select $1, 'saved-' || g, case when g % 2 = 0 then 'applied' else 'saved' end, 'ev-' || g, now() - interval '3 hours' + g * interval '1 second'
+       from generate_series(1, 450) g`,
+    [U7],
+  );
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status, created_at)
+     select $1, 'dismissed-' || g, 'dismissed', now() - interval '2 hours' + g * interval '1 second' from generate_series(1, 450) g`,
+    [U7],
+  );
+  await asService();
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'made-up-0', 'dismissed') on conflict (user_id, card_id) do nothing`,
+    [U7],
+  );
+  await asOwner();
+  ok(
+    (await one(`select count(*)::int c from public.chat_card_actions where user_id = $1 and card_id = 'dismissed-1'`, [U7])).c === 0 &&
+      (await one(`select count(*)::int c from public.chat_card_actions where user_id = $1 and card_id = 'saved-1'`, [U7])).c === 1,
+    "a new dismissal at 900 records removes the oldest dismissed record, not the older saved one",
+  );
+  await asService();
+  for (let start = 1; start <= 1000; start += 250) {
+    await db.query(
+      `insert into public.chat_card_actions (user_id, card_id, status)
+       select $1, 'made-up-' || g, 'dismissed' from generate_series($2::int, $2::int + 249) g
+       on conflict (user_id, card_id) do nothing`,
+      [U7, start],
+    );
+  }
+  await asOwner();
+  const u7 = await one(
+    `select count(*)::int c, count(*) filter (where status <> 'dismissed')::int kept_saved from public.chat_card_actions where user_id = $1`,
+    [U7],
+  );
+  ok(u7.c === 900 && u7.kept_saved === 450, "1000 made-up dismissals keep every record of a saved or applied card", u7);
+  // All 900 saved or applied, one of them a claim of the last hour (oldest by time), one stale.
+  await db.query(`delete from public.chat_card_actions where user_id = $1`, [U7]);
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status, result_id, created_at) values
+     ($1, 'running', 'saved', null, now() - interval '50 minutes'),
+     ($1, 'stale', 'saved', null, now() - interval '5 hours')`,
+    [U7],
+  );
+  await db.query(
+    `insert into public.chat_card_actions (user_id, card_id, status, result_id, created_at)
+     select $1, 'done-' || g, 'saved', 'ev-' || g, now() - interval '40 minutes' + g * interval '1 second' from generate_series(1, 898) g`,
+    [U7],
+  );
+  await asService();
+  await db.query(`insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'next-1', 'saved')`, [U7]);
+  await db.query(`insert into public.chat_card_actions (user_id, card_id, status) values ($1, 'next-2', 'saved')`, [U7]);
+  await asOwner();
+  const gone = (await db.query(
+    `select x from unnest(array['running', 'stale', 'done-1', 'done-2', 'next-1', 'next-2']) x
+      where not exists (select 1 from public.chat_card_actions where user_id = $1 and card_id = x)`,
+    [U7],
+  )).rows.map((r) => r.x).sort();
+  ok(
+    JSON.stringify(gone) === JSON.stringify(["done-1", "stale"]) &&
+      (await one(`select count(*)::int c from public.chat_card_actions where user_id = $1`, [U7])).c === 900,
+    "with only saved records the oldest go, a stale claim among them; a claim of the last hour stays",
+    gone,
+  );
+  await db.query(`delete from auth.users where id = $1`, [U7]);
+
+  // Requests: only finished ones are removed; all running, the new one is refused.
+  const U5 = "55555555-5555-4555-8555-555555555555";
+  await db.query(`insert into auth.users (id, is_anonymous) values ($1, true)`, [U5]);
+  await db.query(
+    `insert into public.week_plan_requests (user_id, week_start, status, created_at) values ($1, '2026-12-07', 'running', now() - interval '3 hours')`,
+    [U5],
+  );
+  await db.query(
+    `insert into public.week_plan_requests (user_id, week_start, status, created_at)
+     select $1, '2026-12-14', 'done', now() - interval '2 hours' + g * interval '1 second' from generate_series(1, 299) g`,
+    [U5],
+  );
+  await asUser(U5);
+  await db.query(`insert into public.week_plan_requests (user_id, week_start, kind) values ($1, '2026-12-21', 'create')`, [U5]);
+  await asOwner();
+  const w5 = await one(
+    `select count(*)::int c, count(*) filter (where week_start = '2026-12-07' and status = 'running')::int r from public.week_plan_requests where user_id = $1`,
+    [U5],
+  );
+  ok(w5.c === 300 && w5.r === 1, "a finished request made room; the oldest row, still running, stays", w5);
+  await db.query(`delete from public.week_plan_requests where user_id = $1`, [U5]);
+  await db.query(
+    `insert into public.week_plan_requests (user_id, week_start, status)
+     select $1, date '2027-01-04' + 7 * g, 'running' from generate_series(0, 299) g`,
+    [U5],
+  );
+  await asUser(U5);
+  try {
+    await db.query(`insert into public.week_plan_requests (user_id, week_start, kind) values ($1, '2026-12-21', 'create')`, [U5]);
+    ok(false, "with 300 running requests a new one is refused");
+  } catch (e) {
+    ok(
+      e.code === "23514" &&
+        e.message === "This demo account has too many week plans being drafted. Wait for them to finish, then try again." &&
+        e.detail === "Row limit 300 per user on public.week_plan_requests.",
+      "with 300 running requests a new one is refused, with a sentence and the table in the detail",
+      { code: e.code, message: e.message, detail: e.detail },
+    );
+  }
+  await asOwner();
+  await db.query(
+    `insert into public.planner_requests (user_id, input, status, finished_at, created_at)
+     select $1, 'p' || g, 'failed', now(), now() - interval '1 hour' + g * interval '1 second' from generate_series(1, 200) g`,
+    [U5],
+  );
+  await asUser(U5);
+  await db.query(`insert into public.planner_requests (user_id, input, status) values ($1, 'plan', 'running')`, [U5]);
+  await expectError("a second running Plan it still refused by the unique index", () => db.query(`insert into public.planner_requests (user_id, input, status) values ($1, 'plan', 'running')`, [U5]), /23505/);
+  await asOwner();
+  ok(
+    (await one(`select count(*)::int c from public.planner_requests where user_id = $1`, [U5])).c === 200 &&
+      (await one(`select count(*)::int c from public.planner_requests where user_id = $1 and input = 'p1'`, [U5])).c === 0,
+    "a new Plan it at 200 accepted; the oldest finished one made room",
+  );
+  await asUser(U5);
+  await expectError("the user's token still cannot delete its requests itself", () => db.query(`delete from public.planner_requests where user_id = $1`, [U5]), /42501|permission denied/);
+
+  // weekly_plans: weeks that are over go first; with none over, the plan changed longest ago.
   await asService();
   await db.query(
     `insert into public.weekly_plans (user_id, week_start, payload)
-     select $1, date '2026-01-05' + 7 * g, '{"days":[]}' from generate_series(0, 51) g`,
-    [U3],
+     select $1, (date_trunc('week', now())::date + 7) + 7 * g, '{"days":[]}' from generate_series(0, 51) g`,
+    [U5],
   );
-  ok((await one(`select count(*)::int c from public.weekly_plans where user_id = $1`, [U3])).c === 52, "52 weeks of plans stored by the server");
-  await expectError("a plan for a 53rd week refused, for the service role too", () => db.query(`insert into public.weekly_plans (user_id, week_start, payload) values ($1, '2027-06-07', '{"days":[]}')`, [U3]), /23514 This demo account has reached its limit of 52 saved week plans\./);
+  await asOwner();
+  // The update trigger sets updated_at itself; off for this one change.
+  await db.exec(`alter table public.weekly_plans disable trigger weekly_plans_set_updated`);
+  await db.query(`update public.weekly_plans set updated_at = now() - interval '1 day' where user_id = $1 and week_start = (date_trunc('week', now())::date + 7 * 20)`, [U5]);
+  await db.exec(`alter table public.weekly_plans enable trigger weekly_plans_set_updated`);
+  await asService();
   const replan = await db.query(
     `insert into public.weekly_plans (user_id, week_start, payload, approved_event_ids)
-     values ($1, '2026-01-05', '{"days":[1]}', '[]')
+     values ($1, date_trunc('week', now())::date + 7, '{"days":[1]}', '[]')
      on conflict (user_id, week_start) do update set payload = excluded.payload, approved_event_ids = excluded.approved_event_ids
      returning payload`,
-    [U3],
+    [U5],
   );
   ok(replan.rows[0]?.payload?.days?.length === 1, "re-planning a week that has a plan works at the limit (upsert)", replan.rows);
+  ok((await one(`select count(*)::int c from public.weekly_plans where user_id = $1`, [U5])).c === 52, "and removes no other plan");
+  await db.query(`insert into public.weekly_plans (user_id, week_start, payload) values ($1, date_trunc('week', now())::date, '{"days":[]}')`, [U5]);
+  await asOwner();
+  ok(
+    (await one(`select count(*)::int c from public.weekly_plans where user_id = $1`, [U5])).c === 52 &&
+      (await one(`select count(*)::int c from public.weekly_plans where user_id = $1 and week_start = (date_trunc('week', now())::date + 7 * 20)`, [U5])).c === 0,
+    "this week's plan stored at 52 future plans; the plan changed longest ago made room",
+  );
+  await db.query(`delete from auth.users where id = $1`, [U5]);
 }
 
 // ---------------------------------------------------------------- hosted: close cut-off requests
