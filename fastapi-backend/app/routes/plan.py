@@ -127,6 +127,7 @@ def create_lifeops_plan(
         )
 
     executed_safe_actions = 0
+    run_action_ids: list[int] = []  # the actions whose adapters ran, as the executor's log names them
     for item in plan.actions:
         approval_required = item.requires_approval or requires_human_approval(
             item.action_type,
@@ -150,6 +151,10 @@ def create_lifeops_plan(
 
         # The same rule as /api/actions/execute-safe: low risk AND no human decision needed.
         if effective_autonomous_mode and can_auto_execute(action) and not action.requires_approval:
+            # Give the action its id before the executor runs, so its log lines name the stored
+            # action (they said "action None"); the row is still committed below with the rest.
+            session.flush()
+            run_action_ids.append(action.id)
             apply_execution_result(action, execute_action(action))
             # Counted only when it ran: an action whose executor failed is stored as failed.
             if action.status == ActionStatus.executed:
@@ -190,12 +195,18 @@ def create_lifeops_plan(
         stored = _stored_answer(session, owner, payload)
         if stored is None:
             raise
-        # This request's model call (and, in autonomous mode, its adapter runs) did happen.
+        # This request's model call (and, in autonomous mode, its adapter runs) did happen. Its
+        # plan run and action ids were rolled back (the database may give them to later rows),
+        # so they are named here: earlier log lines about those actions belong to this plan.
         logger.warning(
             "Two plan requests with the same idempotency key ran at the same time; the second plan "
-            "(planner %s, %d safe actions run) was discarded and the first returned.",
+            "(plan run %s, planner %s, %d safe actions run, adapters run for discarded actions %s) "
+            "was discarded and the first (plan run %s) returned.",
+            response.plan_run_id,
             planner,
             executed_safe_actions,
+            run_action_ids or "none",
+            stored.plan_run_id,
         )
         return stored
     return response

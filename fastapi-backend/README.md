@@ -130,9 +130,15 @@ out-of-range priorities and estimates are clamped), and texts are cut to what th
 
 The keyword planner recognises exams, assignments and meetings as whole words and simple dates
 ("tomorrow", "Friday", "Friday next week", "2026-11-28", "28 Nov"; weeks start on Monday). It leaves
-a deadline empty when it cannot read one exactly ("next week", "Friday after next", or "next Friday",
-which can mean this coming Friday or the one after) and asks the user to confirm it, and its
-proposals always need approval, because their times are guesses.
+a deadline empty when it cannot read one exactly ("next week", "Friday after next", "next Friday",
+which can mean this coming Friday or the one after, or "Tuesday" said on a Tuesday, also when another
+day follows as an alternative, "Tuesday or Wednesday") and asks the user to confirm it. "May" counts
+as the month when it is written with a capital M, has an ordinal day ("5th May") or a year, or the
+words around it mark a date, so "exam 1 may be moved" gives no date; a "may 12" it leaves out is
+named in the request to confirm the date. A deadline that would already be over (an exam today,
+prepared for by 08:00) stays empty. Its proposals always need approval, because their times are
+guesses, and the reminder for a meeting whose date it could not read says that its time is only a
+placeholder.
 
 ## Users and the shared secret
 
