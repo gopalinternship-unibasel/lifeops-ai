@@ -94,7 +94,9 @@ vi.mock("@/server/chat-cards.server", () => ({
   recordCardResult: mocks.recordCardResult,
   releaseCard: mocks.releaseCard,
 }));
-vi.mock("@/server/connectors/calendar.mock", () => ({
+vi.mock("@/server/connectors/calendar.mock", async (importOriginal) => ({
+  // The demo inbox (gmail.mock) reads demoSeedEvents from this module, so keep the real exports.
+  ...(await importOriginal<typeof import("@/server/connectors/calendar.mock")>()),
   updateEvent: mocks.updateMockEvent,
   deleteEvent: mocks.deleteMockEvent,
 }));

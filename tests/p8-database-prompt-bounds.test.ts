@@ -11,7 +11,9 @@ vi.mock("@/integrations/supabase/client.server", () => ({
   supabaseAdmin: { from: () => ({ insert: async () => ({ error: null }) }) },
 }));
 vi.mock("@/server/workspace.server", () => ({ isGoogleConnected: async () => false }));
-vi.mock("@/server/connectors/calendar.mock", () => ({
+vi.mock("@/server/connectors/calendar.mock", async (importOriginal) => ({
+  // The demo inbox (gmail.mock) reads demoSeedEvents from this module, so keep the real exports.
+  ...(await importOriginal<typeof import("@/server/connectors/calendar.mock")>()),
   ensureSeedEvents: async () => undefined,
   listEventsForRange: vi.fn(),
 }));
