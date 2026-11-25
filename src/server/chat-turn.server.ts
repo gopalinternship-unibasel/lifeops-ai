@@ -37,6 +37,7 @@ import {
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
 import { getErrorMessage, isRecord } from "@/lib/errors";
+import { gateModelCards } from "@/lib/panel-state";
 import {
   addDaysISO,
   formatTimeInZone,
@@ -1002,8 +1003,12 @@ ${userContext.tasks}`;
     !calendarContextAvailable &&
     (attemptedProposedEvents.length > 0 ||
       (Array.isArray(attemptedEventChanges) && attemptedEventChanges.length > 0));
-  const insight = normalizeInsight(parsed.insight);
-  const alternatives = normalizeAlternatives(parsed.alternatives);
+  // The optional cards only where the request calls for them: a small model fills them on
+  // ordinary turns ("Friday Alternatives: No other events"). See gateModelCards.
+  const { insight, alternatives } = gateModelCards(data.message, {
+    insight: normalizeInsight(parsed.insight),
+    alternatives: normalizeAlternatives(parsed.alternatives),
+  });
   const rawEmailReply = parseJsonValue(parsed.email_reply);
 
   // 5b. Check the calendar answer against the request: a change must name an event in the
