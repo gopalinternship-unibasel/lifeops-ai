@@ -360,6 +360,19 @@ describe("the first-visit briefing with a connected Google account (6, 99, 102)"
     expect(result.reply).not.toContain("did not match");
   });
 
+  it("when only the unread fetch fails, the most recent unread emails are listed as such, not under 'could not be read' (99, round 2)", async () => {
+    mocks.listUnreadMessages.mockRejectedValue(new Error("Gmail could not be reached (HTTP 503)."));
+    mocks.listRecentMessages.mockResolvedValue([
+      ...gmail,
+      { id: "g2", threadId: "t2", from: "Bank", to: "me", subject: "Statement", snippet: "Ready.", date: "", bodyText: "", unread: false },
+    ]);
+    mocks.callAI.mockResolvedValue(answer({ reply: "Have a good day.", priorities: [{ rank: 1, title: "Team sync", reason: "Today" }] }));
+    const result = await brief();
+    expect(result.reply).toContain("**📬 Inbox**\nYour unread emails could not all be read right now; these are the most recent:\n- **Ana \\<ana@example.com\\>** — *Budget review*");
+    expect(result.reply).not.toContain("Your inbox could not be read right now.");
+    expect(lastSystemPrompt()).toContain("- Unread emails in inbox: unknown, the unread emails could not all be read right now; the emails below are only the most recent ones");
+  });
+
   it("a failed Gmail fetch is said, not 'inbox is clear', and the model is told the inbox is unknown (99)", async () => {
     mocks.listUnreadMessages.mockRejectedValue(new Error("Gmail could not be reached (HTTP 503)."));
     mocks.callAI.mockResolvedValue(answer({ reply: "Have a good day.", priorities: [{ rank: 1, title: "Team sync", reason: "Today" }] }));
@@ -487,6 +500,27 @@ describe("structured answers (53, 56)", () => {
     const result = await runChatTurn(context, { sessionId: SESSION, message: "Give me a push workout for today", timeZone: ZRH });
     expect(result.panel.insight?.bullets).toEqual(["exercise: Bench press, sets: 3", "Dips 3x10"]);
     expect(result.panel.alternatives).toBeUndefined();
+  });
+
+  it("the turn applies the card gate: placeholder cards are neither returned nor stored (56, round 2)", async () => {
+    const placeholders = {
+      insight: { kind: "summary", title: "Overview", bullets: ["One event: Dentist appointment (90 min)"] },
+      alternatives: { title: "Alternatives", bullets: ["No other events"] },
+    };
+    // A day question (also checked against the calendar) and a question that is not about one day.
+    for (const message of ["What's on Friday?", "When is my dentist appointment?"]) {
+      mocks.callAI.mockResolvedValue(answer({ reply: "Your dentist appointment is on Thursday at 2:00 PM.", ...placeholders }));
+      const result = await runChatTurn(context, { sessionId: SESSION, message, timeZone: ZRH });
+      expect(result.panel.insight, message).toBeUndefined();
+      expect(result.panel.alternatives, message).toBeUndefined();
+      const stored = storedAssistantMessages().at(-1)!.panel_payload as Record<string, unknown>;
+      expect(stored, message).not.toHaveProperty("insight");
+      expect(stored, message).not.toHaveProperty("alternatives");
+    }
+    // Where the request calls for them, the cards stay.
+    mocks.callAI.mockResolvedValue(answer({ reply: "Try these.", alternatives: { title: "Egg substitutes", bullets: ["Mashed banana", "Yoghurt"] } }));
+    const eggs = await runChatTurn(context, { sessionId: SESSION, message: "I don't have eggs for the pancakes", timeZone: ZRH });
+    expect(eggs.panel.alternatives?.title).toBe("Egg substitutes");
   });
 });
 
@@ -660,6 +694,26 @@ describe("reply drafts only when asked for (88, 111)", () => {
     "Write back to Ana",
   ])("a request for a reply: %s", (message) => {
     expect(asksForEmailReply(message)).toBe(true);
+  });
+
+  it.each(["Can you draft a polite decline for Sam's lunch invite?", "Decline Sam's lunch invitation politely", "Draft a thank-you to Prof. Marlow"])(
+    "a draft asked for in other words gets its card, not 'nothing was prepared' (88, round 2): %s",
+    async (message) => {
+      const body = "Thank you for the invitation. I am sorry, but I cannot make it this time.";
+      mocks.callAI.mockResolvedValue(answer({ reply: "Here is a draft.", email_reply: { message_id: message.includes("Marlow") ? "e1" : "e3", body } }));
+      const result = await runChatTurn(context, { sessionId: SESSION, message, timeZone: ZRH });
+      expect(result.panel.emailDraft?.body).toBe(body);
+      expect(result.reply).not.toMatch(/without a valid proposal|nothing was prepared|not in your inbox/i);
+    },
+  );
+
+  it("advice about replying gets no draft and no note (88, round 2)", async () => {
+    for (const email_reply of [{ message_id: "e1", body: "Dear Prof. Marlow, ..." }, { message_id: "e99", body: "Hi" }]) {
+      mocks.callAI.mockResolvedValue(answer({ reply: "Start with Prof. Marlow: the paper is due soonest.", email_reply }));
+      const result = await runChatTurn(context, { sessionId: SESSION, message: "Who should I reply to first?", timeZone: ZRH });
+      expect(result.panel.emailDraft).toBeUndefined();
+      expect(result.reply).toBe("Start with Prof. Marlow: the paper is due soonest.");
+    }
   });
 
   it("a long From header is cut to the recipient limit of the database (80)", () => {

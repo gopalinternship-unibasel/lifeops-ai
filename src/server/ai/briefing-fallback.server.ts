@@ -80,7 +80,20 @@ export function mentionedClockTimes(text: string): Set<string> {
     const hour = (Number(m[1]) % 12) + (m[3].toLowerCase() === "p" ? 12 : 0);
     times.add(`${pad(hour)}:${m[2] ?? "00"}`);
   }
+  // A range with am/pm only on its end ("6:00–7:00 PM", "9–11 am"): the start is on the same
+  // half of the day, or in the morning when its hour is later than the end's ("11:00–1:00 PM").
+  // The "6:00" of "6:00–7:00 PM" was read as 06:00, so a correct answer looked like it named a
+  // wrong time (review of the fix, 25 Nov 2026).
+  const rangeStarts = new Set<number>();
+  for (const m of (text ?? "").matchAll(/\b(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*(?:[–—-]|to|until|till)\s*(1[0-2]|0?[1-9])(?:[:.][0-5]\d)?\s*([ap])\.?\s?m\b/gi)) {
+    const endHalf = m[4].toLowerCase();
+    const sameHalf = Number(m[1]) % 12 <= Number(m[3]) % 12;
+    const half = sameHalf ? endHalf : endHalf === "p" ? "a" : "p";
+    times.add(`${pad((Number(m[1]) % 12) + (half === "p" ? 12 : 0))}:${m[2] ?? "00"}`);
+    rangeStarts.add(m.index ?? -1);
+  }
   for (const m of (text ?? "").matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*[ap]\.?\s?m\b)/gi)) {
+    if (rangeStarts.has(m.index ?? -1)) continue;
     times.add(`${pad(Number(m[1]))}:${m[2]}`);
   }
   return times;
@@ -146,8 +159,18 @@ export function buildRuleBasedBriefing(opts: {
     "",
     opts.inboxUnavailable ? "**📬 Inbox**" : `**📬 Inbox (${opts.unreadCount} unread)**`,
   ];
-  if (opts.inboxUnavailable) lines.push("Your inbox could not be read right now.");
-  else if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
+  // The unread emails could not be fetched, but the most recent ones were (some of them unread):
+  // the line says what the bullets below it are, instead of "could not be read" right above a
+  // list of unread emails (review of the fix, 25 Nov 2026).
+  if (opts.inboxUnavailable) {
+    lines.push(
+      unread.length > 0
+        ? "Your unread emails could not all be read right now; these are the most recent:"
+        : opts.emails.length > 0
+          ? "Your unread emails could not be read right now."
+          : "Your inbox could not be read right now.",
+    );
+  } else if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
   for (const email of unread) {
     lines.push(
       `- **${markdownText(oneLine(email.from, 60))}** — *${markdownText(oneLine(email.subject, 90))}* — ${markdownText(oneLine(email.snippet, 120))}`,
@@ -358,14 +381,27 @@ export function checkPriorityReasons(priorities: PriorityRow[], ctx: PriorityCon
 }
 
 /**
+ * Verbs of taking part: "Attend team sync at 7 PM", "Join the team sync", "Sit in on the team
+ * sync". They do not say WHICH commitment a priority is about, but as significant words they kept
+ * such a row next to the meeting it names (review of the fix, 25 Nov 2026). ("Go to" and "be at"
+ * are short words, which significantWords leaves out already.)
+ */
+const ATTENDANCE_WORDS = new Set([
+  "attend", "attends", "attending", "attendance", "join", "joins", "joining", "sit", "sitting",
+  "participate", "participating", "going",
+]);
+
+/**
  * Does a priority's title name this commitment, not just touch it? All identifying words of the
  * shorter of the two titles are in the longer one ("Team sync" and "Team sync — demo
  * walkthrough"), with at least two such words unless both are the same single word. Two shared
  * words were enough until the review of 24 Nov 2026, so a separate preparation task ("Prepare
- * demo walkthrough slides") was folded into the meeting and lost.
+ * demo walkthrough slides") was folded into the meeting and lost. Words that only say that the
+ * user takes part ("Attend team sync at 7 PM", "Join the team sync") are left out of the
+ * priority's title for this comparison (ATTENDANCE_WORDS).
  */
 function namesSameCommitment(title: string, reference: string): boolean {
-  const a = significantWords(title);
+  const a = new Set([...significantWords(title)].filter((word) => !ATTENDANCE_WORDS.has(word)));
   const b = significantWords(reference);
   const [shorter, longer] = a.size <= b.size ? [a, b] : [b, a];
   if (shorter.size === 0) return false;

@@ -218,10 +218,13 @@ describe("the card's closing sentence is its own paragraph (106)", () => {
 describe("times as the cards show them, and drafts not repeated (111)", () => {
   it("24-hour times become 12-hour ones; am/pm, ISO and quoted times stay", () => {
     expect(toTwelveHourClock("Your calendar for Friday:\n\n• Dentist appointment: 14:00–15:30")).toBe("Your calendar for Friday:\n\n• Dentist appointment: 2:00 PM – 3:30 PM");
-    // Only numbers that stand as a time ("at 12:00", "at 08:15"); "so 12:30" and "is 00:00" do not say so.
+    // Only numbers that stand as a time ("at 12:00", "at 08:15"); "so 12:30" does not say so. "00:00"
+    // can only be a 24-hour time, so in a sentence whose other time is converted it is converted too
+    // (round 2: one sentence never mixes the two clocks).
     expect(toTwelveHourClock("The lecture ends at 12:00, so 12:30 works. Breakfast at 08:15, midnight is 00:00.")).toBe(
-      "The lecture ends at 12:00 PM, so 12:30 works. Breakfast at 8:15 AM, midnight is 00:00.",
+      "The lecture ends at 12:00 PM, so 12:30 works. Breakfast at 8:15 AM, midnight is 12:00 AM.",
     );
+    expect(toTwelveHourClock("Midnight is 00:00.")).toBe("Midnight is 00:00.");
     // One clock per sentence: the ambiguous "11:00" next to "13:00" is converted as well.
     expect(toTwelveHourClock("From 11:00 to 13:00 and 11:00–13:00.")).toBe("From 11:00 AM to 1:00 PM and 11:00 AM – 1:00 PM.");
     expect(toTwelveHourClock("At 9:30 or 2:00 PM; 2026-11-24T14:00:00; Sam wrote \"see you at 14:00\".")).toBe("At 9:30 or 2:00 PM; 2026-11-24T14:00:00; Sam wrote \"see you at 14:00\".");

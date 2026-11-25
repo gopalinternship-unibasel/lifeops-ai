@@ -709,6 +709,9 @@ async function answerChatTurn(
       // The Google list stops at GOOGLE_EVENTS_CAP events. The days from the last listed event's
       // day on may then miss events, so a day question about them is not answered from the list
       // ("Nothing is scheduled on ..." would be stated about a day that was not read in full).
+      // Known limit: Google may also end a page before maxResults while more events exist (it
+      // then sends a nextPageToken). listCalendarEvents returns only the items, so the count is
+      // the only sign of a cut-off list here; a short page that is cut off is not detected.
       if (evs.length >= GOOGLE_EVENTS_CAP) {
         const lastStartMs = Math.max(...evs.map((e) => toMs(e.starts_at)).filter(Number.isFinite));
         if (Number.isFinite(lastStartMs)) calendarCompleteBefore = localDateTime(lastStartMs, timeZone).date;
@@ -867,7 +870,7 @@ CURRENT CONTEXT (all times local, 24-hour, time zone ${timeZone}):
 - Calendar dates (a day name means the next such date): ${upcomingDates(timeZone)}
 - Google account connected: ${googleConnected ? "YES (real Gmail + Calendar)" : "NO (using demo data)"}
 - Calendar context available: ${calendarContextAvailable ? "YES" : "NO — do not propose, edit, or delete calendar events"}
-- Unread emails in inbox: ${inboxUnavailable ? "unknown, the inbox could not be read right now (say so; never say that it is clear)" : googleConnected ? unreadCount : demoUnreadCount}
+- Unread emails in inbox: ${inboxUnavailable ? (realEmails.length > 0 ? "unknown, the unread emails could not all be read right now; the emails below are only the most recent ones (say so; never say that it is clear)" : "unknown, the inbox could not be read right now (say so; never say that it is clear)") : googleConnected ? unreadCount : demoUnreadCount}
 
 - Calendar, today and the next 7 days (id, start-end, title):
 ${calendarForPrompt}${laterForPrompt}
@@ -1371,12 +1374,19 @@ const DRAFT_TO_MAX = 320;
 
 /**
  * What may stand before a request verb: the start of the message or of a sentence, "please",
- * "can you", "help me", "I'd like you to", "and", "how do I" ...
+ * "can you", "help me", "I'd like you to", "and", "how do I" ... ("Should I" and "do I" ask for
+ * advice; see ADVICE_QUESTION.)
  */
 const REQUEST_LEAD =
-  "(?:^|[.!?;:,]\\s*|\\b(?:please|pls|kindly|can you|could you|would you|will you|help me|(?:i'd|i would|i)\\s+(?:like|want|need)\\s+(?:you\\s+)?to|i have to|let's|lets|and|then|also|just|now|should i|do i|can i)\\s+)(?:please\\s+)?";
+  "(?:^|[.!?;:,]\\s*|\\b(?:please|pls|kindly|can you|could you|would you|will you|help me|(?:i'd|i would|i)\\s+(?:like|want|need)\\s+(?:you\\s+)?to|i have to|let's|lets|and|then|also|just|now|(?:how|what)\\s+(?:do|should|can|could|would|shall)\\s+i|can i|(?:is|would)\\s+it\\s+(?:be\\s+)?possible\\s+(?:for\\s+you\\s+)?to)\\s+)(?:please\\s+)?";
 /** Up to four words between a verb and its object, not across "of", "about", "for" ... */
 const OBJECT_WORDS = "(?:\\s+(?!(?:of|about|on|in|from|for|with|to)\\b)[\\w'’-]+){0,4}?";
+/**
+ * Text for the chat, not a message to someone: "Draft a plan for my day", "Compose a summary of
+ * my emails", "Draft me a short LinkedIn post".
+ */
+const CHAT_TEXT_OBJECT =
+  "\\s+(?:me\\s+|us\\s+)?(?:(?:a|an|the|my|our|some|this|that|today's|tomorrow's)\\s+)?(?:[\\w'’-]+\\s+){0,2}?(?:summary|summaries|list|lists|overview|digest|recap|report|breakdown|outline|plan|plans|agenda|schedule|itinerary|checklist|to-?do|post|tweet|essay|article|paragraph|poem|story|bio|caption|speech|proposal|presentation|slides?|document|doc|resume|cv|abstract|blog|thesis|chapter|paper|assignment|homework|code|script)\\b";
 const REPLY_REQUESTS: RegExp[] = [
   // "Reply to Sam's email", "respond to the recruiter", "write back to Ana", "reply yes".
   new RegExp(`${REQUEST_LEAD}(?:reply|respond|write\\s+back|get\\s+back)\\b`),
@@ -1384,7 +1394,38 @@ const REPLY_REQUESTS: RegExp[] = [
   new RegExp(`${REQUEST_LEAD}(?:draft|write|compose|prepare)${OBJECT_WORDS}\\s+(?:repl(?:y|ies)|responses?|answers?|e-?mails?|mails?|messages?|notes?)\\b`),
   // "Answer Sam's email", "answer the email from Ana".
   new RegExp(`${REQUEST_LEAD}answer${OBJECT_WORDS}\\s+(?:e-?mails?|mails?|messages?|notes?)\\b`),
+  // "Draft" or "compose" as a request is about a message, whatever it is called: "Can you draft
+  // a polite decline for Sam's lunch invite?", "Draft a follow-up to the recruiter", "Draft
+  // something for Ana", "Could you draft a short yes to Sam?" (review of the fix, 25 Nov 2026:
+  // these lost the model's draft for a real inbox email). Not the noun ("the final draft",
+  // "Draft due Friday?") and not text for the chat (CHAT_TEXT_OBJECT).
+  new RegExp(`${REQUEST_LEAD}(?:draft|compose)\\b(?!\\s+(?:due|deadline|is|was|are|were|of|version|status|copy|ready)\\b)(?!${CHAT_TEXT_OBJECT})`),
+  // "Write to Sam ...", "Can you write to the recruiter?"; not "write to my calendar".
+  new RegExp(`${REQUEST_LEAD}write\\s+to\\s+(?!(?:me|myself|my\\s+(?:calendar|schedule|notes?|file|journal|diary|planner))\\b)`),
+  // "Write Sam that lunch on Saturday works", "write Prof. Marlow saying ...".
+  new RegExp(`${REQUEST_LEAD}write\\s+(?!(?:a|an|the|my|our|your|me|myself|us|up|down|out|off|it|this|that|these|those|some|something|anything|code|about|in|on|into|for|back)\\b)[\\w'’.-]+(?:\\s+[\\w'’.-]+)?\\s+(?:that|saying|to\\s+say|and\\s+(?:say|tell|ask))\\b`),
+  // "Decline Sam's lunch invitation politely", "Accept the invite from Ana", "Say yes to Sam".
+  new RegExp(`${REQUEST_LEAD}(?:decline|accept|turn\\s+down|say\\s+(?:yes|no)\\s+to)\\b`),
 ];
+
+/**
+ * A question that asks for advice about replying, not for a reply: "Who should I reply to
+ * first?", "Which emails do I need to answer?", "Should I reply to Sam?", "Do I need to respond
+ * to Prof. Marlow?" (review of the fix, 25 Nov 2026: these counted as requests, so a placeholder
+ * email_reply gave a draft or a note nobody asked for). "How do I reply to Sam?" and "What should
+ * I reply?" ask for the reply itself.
+ */
+const ADVICE_QUESTION = new RegExp(
+  "^(?:(?:so|ok|okay|and|but|well|hey|hi|hmm),?\\s+)*(?:" +
+    "(?:who|whom|which|when|why|whether)\\b[^.!?;]*?\\b(?:should|must|do|does|need|needs|have|has|ought)\\b" +
+    "|(?:should|must|shall|ought|do|does|did)\\s+(?:i|we)\\b" +
+    // "Is it worth replying?", "Is there anything I must answer?"; "Is it possible to ..." asks.
+    "|(?:is|are|was|were)\\s+(?:it|there)\\b(?!\\s+possible\\b)" +
+    "|does\\s+(?:it|this|that)\\b" +
+    ")",
+);
+/** "When you have a moment, ...", "If possible, ...": the sentence starts after the comma. */
+const LEADING_CONDITION = /^(?:when|if|once|whenever)\s+[^,]{1,40},\s*/;
 
 /**
  * Does the message ask for a reply to an email ("Draft a reply to the recruiter", "Reply to
@@ -1393,11 +1434,15 @@ const REPLY_REQUESTS: RegExp[] = [
  * "The AI model referred to an email that is not in your inbox" (review of 24 Nov 2026). The
  * request must be one, with the verb as a request ("reply to ...", "can you draft a reply"):
  * any "reply", "draft" or "response" was enough at first, so "When is the final draft due?",
- * "Did Sam reply?" and "What is the response time of the planner?" counted too.
+ * "Did Sam reply?" and "What is the response time of the planner?" counted too. A sentence that
+ * asks for advice about replying (ADVICE_QUESTION) is not a request.
  */
 export function asksForEmailReply(message: string, previousAssistant?: string | null): boolean {
   const text = normalizeRequest(message);
-  if (REPLY_REQUESTS.some((re) => re.test(text))) return true;
+  const requests = text
+    .split(/(?<=[.!?;])\s+/)
+    .filter((sentence) => !ADVICE_QUESTION.test(sentence.replace(LEADING_CONDITION, "")));
+  if (requests.some((sentence) => REPLY_REQUESTS.some((re) => re.test(sentence)))) return true;
   if (asksToSend(message)) return true;
   // A short answer to MONDAY's question about which email to answer.
   return Boolean(previousAssistant && /\bwhich email\b|\breply draft\b/i.test(previousAssistant) && text.split(" ").length <= 12);
@@ -1554,14 +1599,18 @@ export function checkDayAnswer(opts: {
   const dayKeys = new Set(dayEvents.map((event) => titleKey(event.title)));
   const dayTitles = dayEvents.map((event) => plainText(event.title));
   const coversDay = dayEvents.every((event) => text.includes(titleKey(event.title)));
+  // Whole words: "Gym" (another day) is not named by "Gymnastics class" (this day), and the
+  // other way round (review of the fix, 25 Nov 2026: a substring test kept an answer that put
+  // Wednesday's gym on Friday).
+  const hasWords = (haystack: string, words: string) => words.length > 0 && ` ${haystack} `.includes(` ${words} `);
   const namesOther = otherEvents.some((event) => {
     const title = plainText(event.title);
     // A title the day has too (a "Lecture" on two days) names the day's own event: it does not
     // put another day's event on this day.
-    if (dayTitles.some((dayTitle) => dayTitle.includes(title))) return false;
-    if (text.includes(title)) return true;
+    if (dayTitles.some((dayTitle) => hasWords(dayTitle, title))) return false;
+    if (hasWords(text, title)) return true;
     const key = titleKey(event.title);
-    return !dayKeys.has(key) && text.includes(key);
+    return !dayKeys.has(key) && hasWords(text, key);
   });
   // On a line about one of the day's events, every clock time is that event's start or end
   // ("2:00 PM" is read once, as 14:00; see mentionedClockTimes).
