@@ -19,6 +19,44 @@ interface IssueLike {
   type?: unknown;
 }
 
+/**
+ * Longest text the database accepts in each user-written field (CHECK constraints on the
+ * tables). Forms use these as maxLength so a user never meets the database error, and the AI
+ * prompts trim further. Keep them equal to the constraints in supabase/migrations.
+ */
+export const TEXT_LIMITS = {
+  profileName: 100,
+  profileRole: 100,
+  profileGoals: 2000,
+  taskTitle: 300,
+  taskReason: 1000,
+  eventTitle: 200,
+  eventNotes: 2000,
+  chatMessage: 12000,
+  draftSubject: 300,
+  draftBody: 12000,
+  draftRecipient: 320,
+} as const;
+
+/**
+ * A sentence for the first profile field that is over its limit, or null when all fit. The
+ * forms' maxLength stops new typing at the limit, but a profile saved before the limits
+ * existed can still hold a longer text, and the database would refuse to save it unchanged.
+ */
+export function profileLengthProblem(profile: { name?: string | null; role?: string | null; goals?: string | null }): string | null {
+  const fields = [
+    ["Your name", profile.name, TEXT_LIMITS.profileName],
+    ["Your role", profile.role, TEXT_LIMITS.profileRole],
+    ["Your goals text", profile.goals, TEXT_LIMITS.profileGoals],
+  ] as const;
+  for (const [label, value, max] of fields) {
+    if ((value ?? "").length > max) {
+      return `${label} is too long: the limit is ${formatCount(max)} characters. Please shorten it.`;
+    }
+  }
+  return null;
+}
+
 const FIELD_LABELS: Record<string, string> = {
   message: "Your message",
   input: "Your text",

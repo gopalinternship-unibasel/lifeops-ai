@@ -62,6 +62,9 @@ function LoginPage() {
         if (!data.session) {
           toast.success("Account created. Check your email to confirm your address.");
           setMode("signin");
+          // Nothing navigates now, so a session that arrives later (the address confirmed in
+          // another tab) must still take this page on to the app.
+          navigatingRef.current = false;
           return;
         }
         toast.success("Account created. Continuing to setup…");
@@ -90,6 +93,7 @@ function LoginPage() {
       toast.success("Welcome to the private MONDAY demo");
       navigate({ to: "/app" });
     } catch (err: unknown) {
+      navigatingRef.current = false;
       toast.error(getErrorMessage(err, "Could not start demo"));
     } finally {
       setBusy(false);
@@ -143,6 +147,8 @@ function LoginPage() {
           {hostedDemo && (
             <p className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
               Demo with demo data only. Your messages go to a hosted AI provider, so do not enter personal information.
+              Demo accounts and their data are deleted after 7 days without use, and a demo session cannot be reopened
+              after you sign out.
             </p>
           )}
 
@@ -176,9 +182,10 @@ function LoginPage() {
 
           <form onSubmit={handleSubmit} method="post" className="space-y-4" data-hydrated={hydrated ? "true" : "false"}>
             <div>
-              <label className="block text-xs font-medium mb-1.5">Email</label>
+              <label htmlFor="login-email" className="block text-xs font-medium mb-1.5">Email</label>
               <input
                 ref={emailRef}
+                id="login-email"
                 type="email"
                 required
                 autoComplete="email"
@@ -189,9 +196,10 @@ function LoginPage() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium mb-1.5">Password</label>
+              <label htmlFor="login-password" className="block text-xs font-medium mb-1.5">Password</label>
               <input
                 ref={passwordRef}
+                id="login-password"
                 type="password"
                 required
                 minLength={6}

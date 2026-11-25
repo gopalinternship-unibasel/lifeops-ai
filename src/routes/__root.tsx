@@ -71,11 +71,16 @@ function RootShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Toasts start below the signed-in pages' 56 px sticky header. With the default 24 px (16 px on
+// phones) offset they covered its right end, where the Sign out button is.
+const TOAST_OFFSET = { top: 72 };
+const TOAST_MOBILE_OFFSET = { top: 64 };
+
 function RootComponent() {
   return (
     <AuthProvider>
       <Outlet />
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position="top-right" offset={TOAST_OFFSET} mobileOffset={TOAST_MOBILE_OFFSET} />
     </AuthProvider>
   );
 }

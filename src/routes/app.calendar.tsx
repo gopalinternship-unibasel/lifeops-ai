@@ -1,11 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchCalendar } from "@/functions/chat.functions";
 import { ChevronLeft, ChevronRight, Calendar as CalIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getBrowserTimeZone } from "@/lib/date";
 import { getErrorMessage } from "@/lib/errors";
-import { END_HOUR, firstHour, minutesOnDay, positionOnDay } from "@/lib/calendar-grid";
+import {
+  canWrapEventTime,
+  END_HOUR,
+  firstHour,
+  hourLabel,
+  isCompactEvent,
+  minutesOnDay,
+  positionOnDay,
+  settleUnlessCancelled,
+  startOfWeekMonday,
+} from "@/lib/calendar-grid";
 
 export const Route = createFileRoute("/app/calendar")({
   component: CalendarPage,
@@ -21,14 +31,13 @@ interface Ev {
 }
 
 const HOUR_PX = 48; // height of one hour row
+const HOUR_COLUMN_PX = 56;
 
-function startOfWeek(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  const dow = x.getDay(); // 0=Sun
-  x.setDate(x.getDate() - dow);
-  return x;
-}
+// The day headers and the time grid are two grids, so they must use exactly the same tracks.
+// minmax(0,1fr) keeps the seven day tracks equal whatever they hold: with plain 1fr the header
+// cells (date circle plus padding) grew wider than the body columns at phone width, the headers
+// drifted off their columns and the last header was cut off.
+const WEEK_COLUMNS = "grid-cols-[56px_repeat(7,minmax(0,1fr))]";
 
 function addDays(d: Date, n: number) {
   const x = new Date(d);
@@ -44,32 +53,41 @@ function CalendarPage() {
   const [events, setEvents] = useState<Ev[]>([]);
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<"google" | "mock">("mock");
-  const [weekStart, setWeekStart] = useState<Date>(() => startOfWeek(new Date()));
+  const [weekStart, setWeekStart] = useState<Date>(() => startOfWeekMonday(new Date()));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
+    // The previous week's error does not belong to the week that is loading now.
+    setError(null);
     const from = new Date(weekStart); from.setHours(0, 0, 0, 0);
     const to = addDays(weekStart, 7); to.setHours(0, 0, 0, 0);
-    fetchCalendar(
-      { data: { from: from.toISOString(), to: to.toISOString(), timeZone: getBrowserTimeZone() } } as Parameters<
-        typeof fetchCalendar
-      >[0],
-    ).then((result: Awaited<ReturnType<typeof fetchCalendar>>) => {
-      setEvents((result.events ?? []) as Ev[]);
-      setSource(result.source ?? "mock");
-      setError("error" in result && result.error ? String(result.error) : null);
-    }).catch((e: unknown) => {
-      setEvents([]);
-      setError(getErrorMessage(e, "Could not load the calendar"));
-    }).finally(() => setLoading(false));
+    // The cleanup cancels this load when another week is picked first, so a slow answer for
+    // this week cannot replace the newer week on screen.
+    return settleUnlessCancelled(
+      fetchCalendar(
+        { data: { from: from.toISOString(), to: to.toISOString(), timeZone: getBrowserTimeZone() } } as Parameters<
+          typeof fetchCalendar
+        >[0],
+      ),
+      {
+        onResult: (result: Awaited<ReturnType<typeof fetchCalendar>>) => {
+          setEvents((result.events ?? []) as Ev[]);
+          setSource(result.source ?? "mock");
+          setError("error" in result && result.error ? String(result.error) : null);
+        },
+        onError: (e: unknown) => {
+          setEvents([]);
+          setError(getErrorMessage(e, "Could not load the calendar"));
+        },
+        onSettled: () => setLoading(false),
+      },
+    );
   }, [weekStart]);
 
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
   // 06:00 to midnight, starting earlier when an event of this week does (an early event is never hidden).
   const startHour = useMemo(() => firstHour(events, days), [events, days]);
-  const hours = useMemo(() => Array.from({ length: END_HOUR - startHour + 1 }, (_, i) => i + startHour), [startHour]);
-  const today = new Date();
 
   const monthLabel = useMemo(() => {
     const end = addDays(weekStart, 6);
@@ -84,14 +102,14 @@ function CalendarPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <div className="flex items-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => setWeekStart(startOfWeek(new Date()))}>
+          <Button variant="outline" size="sm" onClick={() => setWeekStart(startOfWeekMonday(new Date()))}>
             Today
           </Button>
           <div className="flex items-center">
-            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setWeekStart(addDays(weekStart, -7))}>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Previous week" onClick={() => setWeekStart(addDays(weekStart, -7))}>
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setWeekStart(addDays(weekStart, 7))}>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next week" onClick={() => setWeekStart(addDays(weekStart, 7))}>
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
@@ -109,14 +127,50 @@ function CalendarPage() {
       {loading ? (
         <div className="text-sm text-muted-foreground py-24 text-center">Loading…</div>
       ) : (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <WeekGrid days={days} events={events} startHour={startHour} today={new Date()} />
+      )}
+    </div>
+  );
+}
+
+/** The week's day headers, hour rows and event boxes (exported for the layout tests). */
+export function WeekGrid({ days, events, startHour, today }: { days: Date[]; events: Ev[]; startHour: number; today: Date }) {
+  const hours = Array.from({ length: END_HOUR - startHour + 1 }, (_, i) => i + startHour);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const todayIndex = days.findIndex((d) => sameDay(d, today));
+
+  // On a phone the week scrolls sideways (see below); bring today's column into view, since
+  // with Monday-first weeks it is often off to the right. The grid mounts afresh for every
+  // week (the page shows "Loading…" in between), so this runs once per week shown.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || todayIndex < 0 || scroller.scrollWidth <= scroller.clientWidth) return;
+    const cell = scroller.querySelector<HTMLElement>(`[data-day-index="${todayIndex}"]`);
+    if (!cell) return;
+    const offset = cell.getBoundingClientRect().left - scroller.getBoundingClientRect().left + scroller.scrollLeft;
+    if (offset + cell.offsetWidth <= scroller.clientWidth) return; // already in view
+    // Today's column goes right after the hour column, which stays pinned at the left.
+    scroller.scrollLeft = Math.max(0, offset - HOUR_COLUMN_PX);
+  }, [todayIndex]);
+
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      {/* Below the sm breakpoint seven readable days do not fit the screen, so the week scrolls
+          sideways inside the card (the header and time grid together, the hour column stays in
+          view) instead of squeezing each day to a few pixels. overflow-y-hidden keeps the clipping
+          the card gave before: overflow-x-auto alone turns overflow-y to auto, and an event in the
+          last minutes of the day (its box is at least 20 px tall) then gave the card a scrollbar. */}
+      <div ref={scrollerRef} className="overflow-x-auto overflow-y-hidden" data-testid="calendar-scroller">
+        <div className="min-w-[640px] sm:min-w-0">
           {/* Day headers */}
-          <div className="grid grid-cols-[56px_repeat(7,1fr)] border-b border-border bg-muted/30">
-            <div />
-            {days.map((d) => {
-              const isToday = sameDay(d, today);
+          <div className={`grid ${WEEK_COLUMNS} border-b border-border bg-muted/30`} data-testid="calendar-header-grid">
+            <div className="max-sm:sticky max-sm:left-0 max-sm:z-20 bg-card">
+              <div className="h-full bg-muted/30" />
+            </div>
+            {days.map((d, i) => {
+              const isToday = i === todayIndex;
               return (
-                <div key={d.toISOString()} className="px-2 py-2 text-center border-l border-border">
+                <div key={d.toISOString()} data-day-index={i} className="px-2 py-2 text-center border-l border-border">
                   <div className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
                     {d.toLocaleDateString(undefined, { weekday: "short" })}
                   </div>
@@ -133,23 +187,23 @@ function CalendarPage() {
           </div>
 
           {/* Time grid */}
-          <div className="relative grid grid-cols-[56px_repeat(7,1fr)]">
+          <div className={`relative grid ${WEEK_COLUMNS}`} data-testid="calendar-body-grid">
             {/* Hour column */}
-            <div>
+            <div className="max-sm:sticky max-sm:left-0 max-sm:z-20 bg-card">
               {hours.map((h) => (
                 <div key={h} style={{ height: HOUR_PX }} className="border-b border-border relative">
-                  <span className="absolute -top-2 right-2 text-[10px] font-mono text-muted-foreground bg-card px-1">
-                    {h === 12 ? "12 PM" : h > 12 ? `${h - 12} PM` : `${h} AM`}
+                  <span className="absolute -top-2 right-2 text-[10px] font-mono text-muted-foreground bg-card px-1 whitespace-nowrap">
+                    {hourLabel(h)}
                   </span>
                 </div>
               ))}
             </div>
 
             {/* Day columns */}
-            {days.map((d) => {
+            {days.map((d, i) => {
               // Every event that overlaps this day (one that runs past midnight shows on both days).
               const dayEvents = events.filter((e) => minutesOnDay(e, d) !== null);
-              const isToday = sameDay(d, today);
+              const isToday = i === todayIndex;
               return (
                 <div key={d.toISOString()} className="relative border-l border-border">
                   {hours.map((h) => (
@@ -161,11 +215,15 @@ function CalendarPage() {
                   {dayEvents.map((e) => {
                     const pos = positionOnDay(e, d, startHour, HOUR_PX);
                     if (!pos) return null;
+                    const start = fmt(e.starts_at);
+                    // A short event has no room for a second line: title and start time share one.
+                    const compact = isCompactEvent(pos.height);
                     return (
                       <div
                         key={e.id}
                         data-testid="calendar-event"
-                        className="absolute left-1 right-1 rounded-md px-2 py-1 overflow-hidden text-[11px] leading-tight cursor-pointer hover:shadow-md transition-shadow"
+                        data-compact={compact ? "true" : "false"}
+                        className={`absolute left-1 right-1 rounded-md px-2 ${compact ? "py-0.5" : "py-1"} overflow-hidden text-[11px] leading-tight cursor-pointer hover:shadow-md transition-shadow`}
                         style={{
                           top: pos.top,
                           height: pos.height,
@@ -173,12 +231,25 @@ function CalendarPage() {
                           border: "1px solid color-mix(in oklab, var(--primary) 35%, transparent)",
                           color: "var(--foreground)",
                         }}
-                        title={`${e.title}\n${fmt(e.starts_at)} – ${fmt(e.ends_at)}${e.notes ? `\n\n${e.notes}` : ""}`}
+                        title={`${e.title}\n${start} – ${fmt(e.ends_at)}${e.notes ? `\n\n${e.notes}` : ""}`}
                       >
-                        <div className="font-medium truncate">{e.title}</div>
-                        <div className="opacity-70 font-mono">
-                          {fmt(e.starts_at)} – {fmt(e.ends_at)}
-                        </div>
+                        {compact ? (
+                          <div className="truncate">
+                            <span className="font-medium">{e.title}</span>
+                            <span className="opacity-70 font-mono"> · {start}</span>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="font-medium truncate">{e.title}</div>
+                            <div className={`opacity-70 font-mono ${canWrapEventTime(pos.height) ? "" : "truncate"}`}>
+                              {/* Phones: the start time alone fits the column; the range would be cut. */}
+                              <span className="whitespace-nowrap sm:hidden">{start}</span>
+                              <span className="hidden sm:inline">
+                                {start} – {fmt(e.ends_at)}
+                              </span>
+                            </div>
+                          </>
+                        )}
                       </div>
                     );
                   })}
@@ -186,13 +257,13 @@ function CalendarPage() {
               );
             })}
           </div>
+        </div>
+      </div>
 
-          {events.length === 0 && (
-            <div className="text-center py-12 border-t border-border text-sm text-muted-foreground">
-              <CalIcon className="h-8 w-8 mx-auto mb-2 opacity-50" />
-              No events this week.
-            </div>
-          )}
+      {events.length === 0 && (
+        <div className="text-center py-12 border-t border-border text-sm text-muted-foreground">
+          <CalIcon className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          No events this week.
         </div>
       )}
     </div>
