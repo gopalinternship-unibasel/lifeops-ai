@@ -35,7 +35,7 @@ import type { CardState } from "@/types/panel";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
 import { getBrowserTimeZone } from "@/lib/date";
-import { getErrorMessage, isAuthFailure } from "@/lib/errors";
+import { SESSION_EXPIRED_MESSAGE, getVisitorErrorMessage, isAuthFailure } from "@/lib/errors";
 
 export const Route = createFileRoute("/app/")({
   component: Workspace,
@@ -150,7 +150,7 @@ function Workspace() {
       onFatal: () => {
         done();
         setMessages((m) => [...m, { id: `signed-out-${Date.now()}`, role: "assistant", content: SIGNED_OUT_NOTE }]);
-        toast.error("Your sign-in has expired. Reload the page to try again.");
+        toast.error(SESSION_EXPIRED_MESSAGE);
       },
     });
   }
@@ -173,7 +173,7 @@ function Workspace() {
       // Google Calendar failures come back as `error` (not thrown) with an empty list.
       setScheduleError("error" in cal && cal.error ? GOOGLE_CALENDAR_ERROR : null);
     } catch (e: unknown) {
-      setScheduleError(getErrorMessage(e, "Could not load today's calendar."));
+      setScheduleError(getVisitorErrorMessage(e, "Could not load today's calendar."));
     } finally {
       setCalendarLoaded(true);
     }
@@ -214,8 +214,9 @@ function Workspace() {
     } catch (err: unknown) {
       if (!mounted.current) return;
       // Stay on the page with the reason and a way to try again (the load used to fail silently,
-      // leaving "initializing…" on screen for good).
-      setBootError(getErrorMessage(err, "Please try again."));
+      // leaving "initializing…" on screen for good). An expired sign-in gets a sentence, not the
+      // sign-in check's "Unauthorized: Invalid token".
+      setBootError(getVisitorErrorMessage(err, "Please try again."));
       toast.error("Could not load your workspace.");
     }
   }
@@ -271,7 +272,7 @@ function Workspace() {
   /** Remember a dismissal on the server; the card is already gone from the panel. */
   function rememberDismissal(cardId: string) {
     dismissChatCard({ data: { cardId } }).catch((err: unknown) =>
-      toast.error(getErrorMessage(err, "Could not remember the dismissal")),
+      toast.error(getVisitorErrorMessage(err, "Could not remember the dismissal")),
     );
   }
 
@@ -291,7 +292,7 @@ function Workspace() {
       setMessages((m) => [...m, { id: `a-${Date.now()}`, role: "assistant", content }]);
       applyPanel(panel, text);
     } catch (err: unknown) {
-      const message = chatErrorText(getErrorMessage(err, CHAT_ERROR_MESSAGE), HOSTED_DEMO);
+      const message = chatErrorText(getVisitorErrorMessage(err, CHAT_ERROR_MESSAGE), HOSTED_DEMO);
       toast.error(message);
       setMessages((m) => [
         ...m,

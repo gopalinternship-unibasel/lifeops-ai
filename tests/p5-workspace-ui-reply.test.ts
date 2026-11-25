@@ -129,7 +129,7 @@ describe("bullet lines in assistant replies", () => {
     expect(normalizeBullets("**📬 Inbox (2 unread)**\n\n• **A** — *x*\n• **B** — *y*")).toBe(
       "**📬 Inbox (2 unread)**\n\n- **A** — *x*\n- **B** — *y*",
     );
-    expect(normalizeBullets("  ● nested\n▪item")).toBe("  - nested\n- item");
+    expect(normalizeBullets("  ● nested\n▪ item")).toBe("  - nested\n- item");
   });
 
   it("leaves '- ' lists, ordinary text and code blocks alone", () => {
@@ -247,7 +247,7 @@ describe("chat errors on the hosted demo", () => {
 
 describe("the note after the sign-in was refused while waiting", () => {
   it("tells the visitor what happened and what to do, without internals", () => {
-    expect(SIGNED_OUT_NOTE).toMatch(/sign-in has expired/);
+    expect(SIGNED_OUT_NOTE).toMatch(/session has expired/);
     expect(SIGNED_OUT_NOTE).toMatch(/Reload the page/);
     expect(SIGNED_OUT_NOTE).not.toMatch(/401|Unauthori[sz]ed|token/i);
   });

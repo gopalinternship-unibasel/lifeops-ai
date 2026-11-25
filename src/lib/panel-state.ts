@@ -112,7 +112,20 @@ export function normalizeAlternatives(value: unknown): Alternatives | undefined 
  * what can I make?" counts through its question.
  */
 const ASKS_FOR_ALTERNATIVES =
-  /\b(?:(?:have|has|had|got|there's|there is|there are)\s+no|no\s+[\w-]+(?:\s+[\w-]+)?\s+(?:left|at home|in the (?:fridge|house|kitchen|pantry|cupboard))|don't have|do not have|doesn't have|does not have|didn't have|did not have|haven't got|out of(?!\s+(?:the\s+)?office)|ran out|run out|running out|without|missing|lack|lacks|lacking|instead of|substitut\w*|replacement|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find|what (?:else )?(?:can|could|should) I (?:use|make|cook|bake))\b/i;
+  /\b(?:(?:have|has|had|got|there's|there is|there are)\s+no|no\s+[\w-]+(?:\s+[\w-]+)?\s+(?:left|at home|in the (?:fridge|house|kitchen|pantry|cupboard))|don't have|do not have|doesn't have|does not have|didn't have|did not have|haven't got|out of(?!\s+(?:the\s+)?office)|ran out|run out|running out|missing|lack|lacks|lacking|substitut\w*|replacement|alternatives?|other options?|unavailable|not available|can't get|cannot get|couldn't find|what (?:else )?(?:can|could|should) I (?:use|make|cook|bake))\b/i;
+
+/**
+ * "without" and "instead of" also describe a calendar entry ("Add lunch without onions", "Move
+ * the sync to Friday instead of Thursday"): they count only when the message is not just a
+ * calendar command, as in "How do I bake a cake without eggs?". A command may follow a short
+ * word ("Hey, add...", "Okay add...", "Please, add..."), and a command that goes on to ask for
+ * something ("Cancel the gym, what else can I do without weights?", "Book a table, something
+ * without meat") still counts.
+ */
+const MAY_ASK_FOR_ALTERNATIVES = /\b(?:without|instead of)\b/i;
+const CALENDAR_COMMAND =
+  /^\W*(?:(?:hey|hi|hello|ok|okay|alright|all right|yes|yeah|sure|great|perfect|thanks|thank you|also|and|then|now|so)\b[\s,!.]*){0,2}(?:(?:please|pls|can you|could you|would you|will you)\b[\s,]*)?(?:please\b[\s,]*)?(?:add|schedule|book|block|move|reschedule|shift|push|postpone|cancel|delete|remove|set up)\b/i;
+const ASKS_FOR_SOMETHING = /\b(?:what|how|which|where|anything|something|suggest\w*|recommend\w*|ideas?)\b/i;
 
 /** The user asks for a summary, an overview, preparation or a plan. */
 const ASKS_FOR_SUMMARY =
@@ -121,11 +134,19 @@ const ASKS_FOR_SUMMARY =
 /**
  * The user asks for something to read or use other than a calendar entry: ideas, a list, steps,
  * tips, suggestions, a post or other text ("Make a packing list for Zurich", "List restaurants
- * in Basel", "Write a LinkedIn post"). "List my events" and "list the meetings" ask about the
- * calendar, and "a post office trip" is an event, not a post.
+ * in Basel", "List the best restaurants in Basel", "Write a LinkedIn post"). "List my events",
+ * "list today's meetings", "list the meetings" and "list all unread emails" ask about the
+ * calendar or the inbox: after "list" (and "the"), only up to two of the words in
+ * LIST_QUALIFIER may come before such a noun, so "List questions for meetings" and "List 5 tasks
+ * to do this weekend" still ask for content. "A post office trip" is an event, not a post.
  */
-const ASKS_FOR_CONTENT =
-  /\b(?:ideas?|brainstorm\w*|suggest\w*|recommend\w*|tips?|advice|steps|checklist|list of|(?:a|an|my)\s+(?:[\w-]+\s+){0,2}list|list(?!\s+(?:all\s+)?(?:my|the|today's|tomorrow's|this|next|events?|meetings?|appointments?|tasks?|emails?|messages?)\b)|template|examples?|pack(?:ing)?|how (?:do|can|could|should) I|write|draft|compose)\b|\b(?:a|the|my)\s+(?:[\w-]+\s+)?post(?![\w-])(?!\s+office)/i;
+const LIST_QUALIFIER = String.raw`(?:all|unread|new|upcoming|recent|latest|important|urgent|pending|open|remaining|starred|flagged|next|today's|tomorrow's|tonight's|(?:mon|tues|wednes|thurs|fri|satur|sun)day(?:'s)?|morning|afternoon|evening|week's|weekend(?:'s)?|work|personal|team)`;
+const LIST_CALENDAR_ITEMS = String.raw`(?:events?|meetings?|appointments?|tasks?|to-?dos?|reminders?|deadlines?|calls?|e-?mails?|mails?|messages?|inbox|calendar|schedule|free\s+(?:time|slots?)|slots?|priorities|conflicts?)`;
+const LIST_OTHER_THAN_CALENDAR = String.raw`list(?!\s+(?:all\s+)?(?:my|today's|tomorrow's|this|next|(?:the\s+)?(?:${LIST_QUALIFIER}\s+){0,2}${LIST_CALENDAR_ITEMS})\b)`;
+const ASKS_FOR_CONTENT = new RegExp(
+  String.raw`\b(?:ideas?|brainstorm\w*|suggest\w*|recommend\w*|tips?|advice|steps|checklist|list of|(?:a|an|my)\s+(?:[\w-]+\s+){0,2}list|${LIST_OTHER_THAN_CALENDAR}|template|examples?|pack(?:ing)?|how (?:do|can|could|should) I|write|draft|compose)\b|\b(?:a|the|my)\s+(?:[\w-]+\s+)?post(?![\w-])(?!\s+office)`,
+  "i",
+);
 
 /** A reply to an email: the reply draft card is the content then, not a summary card. */
 const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ying)|respond|response)\b/i;
@@ -134,7 +155,8 @@ const ABOUT_A_REPLY = /\b(?:repl(?:y|ies|ying)|respond|response)\b/i;
  * Keep the model's optional cards only where the request calls for them. A small model fills
  * these optional fields on ordinary turns ("Friday Alternatives: No other events" for "What's on
  * Friday?"), which cluttered the panel and pulled it to the Insights tab.
- * - alternatives only when the user says something is missing or asks for a substitute;
+ * - alternatives only when the user says something is missing or asks for a substitute
+ *   ("without" and "instead of" not in a message that is only a calendar command);
  * - a "summary" insight only when the user asks for a summary, an overview, prep or a plan, or
  *   for other content such as ideas, a list or a post (not when it is about an email reply).
  *   "summary" is also the kind any unknown kind becomes (see normalizeInsightCard), so this
@@ -156,8 +178,11 @@ export function gateModelCards(
     (cards.insight.kind !== "summary" || asksForCard)
       ? cards.insight
       : undefined;
+  const onlyACalendarCommand = CALENDAR_COMMAND.test(text) && !ASKS_FOR_SOMETHING.test(text);
+  const asksForAlternatives =
+    ASKS_FOR_ALTERNATIVES.test(text) || (MAY_ASK_FOR_ALTERNATIVES.test(text) && !onlyACalendarCommand);
   const alternatives =
-    cards.alternatives && cards.alternatives.bullets.length > 0 && ASKS_FOR_ALTERNATIVES.test(text)
+    cards.alternatives && cards.alternatives.bullets.length > 0 && asksForAlternatives
       ? cards.alternatives
       : undefined;
   return { insight, alternatives };

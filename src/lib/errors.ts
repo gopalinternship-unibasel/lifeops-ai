@@ -49,3 +49,15 @@ export function getErrorMessage(error: unknown, fallback = "Unexpected error"): 
 
   return fallback;
 }
+
+/**
+ * Shown in place of the sign-in check's own text ("Unauthorized: Invalid token") when a request
+ * was refused because the visitor is no longer signed in (see isAuthFailure). "Session", not
+ * "sign-in": a demo visitor never signed in.
+ */
+export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Reload the page to continue.";
+
+/** getErrorMessage for text the visitor reads, with a sentence for a refused sign-in. */
+export function getVisitorErrorMessage(error: unknown, fallback?: string): string {
+  return isAuthFailure(error) ? SESSION_EXPIRED_MESSAGE : getErrorMessage(error, fallback);
+}

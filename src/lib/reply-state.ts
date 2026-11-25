@@ -35,14 +35,18 @@ export function replyStateOf(
  * either refreshes the sign-in and shows the answer, or leads to the sign-in page.
  */
 export const SIGNED_OUT_NOTE =
-  "⚠️ The answer to your last message could not be loaded because your sign-in has expired. Reload the page to try again.";
+  "⚠️ The answer to your last message could not be loaded because your session has expired. Reload the page to try again.";
 
 /** The note the workspace shows under a message whose request was cut off. */
 export const INTERRUPTED_NOTE =
   "⚠️ No answer was stored for this message because the request stopped before it finished. Please send it again.";
 
-/** Bullet characters a model writes at the start of a line (CommonMark only knows -, * and +). */
-const BULLET_CHARACTER = /^([ \t]*)[•●▪◦‣▸·][ \t]*(?=\S)/;
+/**
+ * Bullet characters a model writes at the start of a line (CommonMark only knows -, * and +),
+ * followed by a space or tab and then text: "▸Details" is not a list item, and neither is a
+ * separator line such as "· · ·" or "• • •", where another bullet character follows.
+ */
+const BULLET_CHARACTER = /^([ \t]*)[•●▪◦‣▸·][ \t]+(?=[^\s•●▪◦‣▸·])/;
 
 /**
  * An assistant reply as Markdown the chat can render. Models often write lists as "• item"
