@@ -1086,9 +1086,11 @@ ${userContext.tasks}`;
     const { error: insertTasksError } = await store.from("tasks").insert(
       priorities.map((priority) => ({
         user_id: userId,
-        title: priority.title,
+        // The database keeps a task's title to 300 and its reason to 1000 characters
+        // (20261124110100): a longer model answer is cut here instead of failing the turn.
+        title: priority.title.slice(0, 300),
         priority_rank: priority.rank,
-        reason: priority.reason,
+        reason: priority.reason.slice(0, 1000),
         source: rulePriorities ? "rules" : "chat",
       })),
     );
@@ -1258,7 +1260,9 @@ ${userContext.tasks}`;
     session_id: sessionId,
     user_id: userId,
     role: "assistant",
-    content: replyText,
+    // A message is at most 12000 characters in the database (20261124110100); a reply is far
+    // shorter, but an unusually long one is cut instead of failing the turn.
+    content: replyText.slice(0, 12000),
     panel_payload: JSON.parse(JSON.stringify(panel)) as Json,
   });
   if (assistantMessageError) throw dbError("save the answer", assistantMessageError);

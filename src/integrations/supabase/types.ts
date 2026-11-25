@@ -14,6 +14,27 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_usage: {
+        Row: {
+          created_at: string
+          id: number
+          kind: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: never
+          kind: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: never
+          kind?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       calendar_events: {
         Row: {
           created_at: string
@@ -387,7 +408,18 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      ai_allowance: {
+        Args: {
+          p_consume: boolean
+          p_global_limit: number | null
+          p_kind: string
+          p_user: string
+          p_user_kinds: string[]
+          p_user_limit: number | null
+          p_user_window_seconds: number
+        }
+        Returns: Json
+      }
     }
     Enums: {
       [_ in never]: never
