@@ -5,6 +5,8 @@
  * the request is done and then shows the plan (QA round 4: after a reload the page read "No plan
  * for this week yet" while the model was still drafting, and one real-model plan was lost).
  */
+import { isStaleOutcome } from "@/lib/dashboard-view";
+
 export interface WeekPlanRequestView {
   id: string;
   kind: "create" | "refine";
@@ -50,18 +52,20 @@ export function weekPlanRequestView(row: WeekPlanRequestRow, nowMs: number, maxR
 export type PlanRequestBanner = "running" | "interrupted" | "failed" | null;
 
 /**
- * Which banner to show. A failed or cut-off request shows until the visitor closes it (`hidden`)
- * or a later request replaces it as the newest one (a later success shows no banner). While the
- * page waits for its own draft, the older outcome is not shown, so it does not read as this
- * attempt's.
+ * Which banner to show. A failed or cut-off request shows until the visitor closes it (`hidden`),
+ * a later request replaces it as the newest one (a later success shows no banner), or it is more
+ * than a day old, as on the dashboard (isStaleOutcome): without that, a failure stayed on the
+ * page for good, also after its cause was fixed, and read as a current error. While the page
+ * waits for its own draft, the older outcome is not shown, so it does not read as this attempt's.
  */
 export function planRequestBanner(
   request: WeekPlanRequestView | null,
-  opts: { loading: boolean; waitingHere: boolean; hidden: ReadonlySet<string> },
+  opts: { loading: boolean; waitingHere: boolean; hidden: ReadonlySet<string>; nowMs?: number },
 ): PlanRequestBanner {
   if (opts.loading || !request) return null;
   if (request.status === "running") return "running";
   if (opts.waitingHere || opts.hidden.has(request.id)) return null;
+  if (isStaleOutcome(request, opts.nowMs ?? Date.now())) return null;
   return request.status === "failed" || request.status === "interrupted" ? request.status : null;
 }
 

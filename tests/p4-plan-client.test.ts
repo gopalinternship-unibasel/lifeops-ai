@@ -168,7 +168,8 @@ describe("the request banners of the plan page (findings 61, 52)", () => {
     reply: null,
     error: status === "failed" ? "Drafting the plan failed. Please try again." : null,
   });
-  const shown = { loading: false, waitingHere: false, hidden: new Set<string>() };
+  // The page's clock: half an hour after the requests above started.
+  const shown = { loading: false, waitingHere: false, hidden: new Set<string>(), nowMs: new Date(2026, 10, 23, 14, 23).getTime() };
 
   it("a failed or cut-off request shows until it is dismissed", () => {
     expect(planRequestBanner(request("r1", "failed"), shown)).toBe("failed");
@@ -189,6 +190,25 @@ describe("the request banners of the plan page (findings 61, 52)", () => {
     expect(
       planRequestBanner(request("r3", "running"), { ...shown, hidden: new Set(["r3"]) }),
     ).toBe("running");
+  });
+
+  it("an outcome from more than a day ago is not shown, as on the dashboard", () => {
+    // The request failed on Tue Nov 24 at 1:53 PM; the page is opened the next evening.
+    const failed: WeekPlanRequestView = {
+      ...request("r1", "failed"),
+      startedAt: new Date(2026, 10, 24, 13, 53).toISOString(),
+      finishedAt: new Date(2026, 10, 24, 13, 54).toISOString(),
+    };
+    const nextEvening = { ...shown, nowMs: new Date(2026, 10, 25, 21, 0).getTime() };
+    expect(planRequestBanner(failed, nextEvening)).toBeNull();
+    // Within the day it still shows (with its date, see formatRequestTime).
+    expect(planRequestBanner(failed, { ...shown, nowMs: new Date(2026, 10, 25, 13, 0).getTime() })).toBe("failed");
+    // A cut-off request ages the same way, from its start.
+    const cutOff: WeekPlanRequestView = { ...request("r2", "interrupted"), startedAt: failed.startedAt };
+    expect(planRequestBanner(cutOff, nextEvening)).toBeNull();
+    expect(planRequestBanner(cutOff, { ...shown, nowMs: new Date(2026, 10, 24, 14, 30).getTime() })).toBe("interrupted");
+    // A draft still running on the server is always shown, whatever its age.
+    expect(planRequestBanner({ ...request("r3", "running"), startedAt: failed.startedAt }, nextEvening)).toBe("running");
   });
 
   it("a refusal that stored no request is told apart from a failure of a new request", () => {
