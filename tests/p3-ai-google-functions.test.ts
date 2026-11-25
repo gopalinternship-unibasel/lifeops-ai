@@ -576,6 +576,29 @@ describe("reply suggestions use the shared AI allowance (finding 45)", () => {
     expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
   });
 
+  it("on a hosted site whose provider is the Hugging Face router without a key: the same, no use recorded", async () => {
+    vi.stubEnv("LIFEOPS_HOSTED", "1");
+    vi.stubEnv("LLM_BASE_URL", "https://router.huggingface.co/v1");
+    vi.stubEnv("LLM_API_KEY", "");
+    vi.stubEnv("HUGGINGFACE_API_KEY", "");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await draftReplySuggestion({ data: { messageId: "e1" } })).toEqual({
+      ok: false,
+      error: "The AI assistant is not set up on this site yet, so this request could not be answered.",
+      suggestion: null,
+      draft: null,
+    });
+    expect(mocks.enforceAiAllowance).not.toHaveBeenCalled();
+    expect(mocks.callAI).not.toHaveBeenCalled();
+    expect(mocks.isGoogleConnected).not.toHaveBeenCalled();
+
+    // With a key the same site counts the use as before.
+    vi.stubEnv("HUGGINGFACE_API_KEY", "hf_test");
+    mocks.callAI.mockResolvedValueOnce(answer("Thanks!"));
+    expect(await draftReplySuggestion({ data: { messageId: "e1" } })).toMatchObject({ ok: true });
+    expect(mocks.enforceAiAllowance).toHaveBeenCalledTimes(1);
+  });
+
   it("does not count a request that ends before the AI call (unknown email)", async () => {
     const result = await draftReplySuggestion({ data: { messageId: "no-such-email" } });
     expect(result.ok).toBe(false);

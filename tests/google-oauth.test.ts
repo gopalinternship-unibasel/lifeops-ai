@@ -539,9 +539,40 @@ describe("finishing a Google sign-in (completeGoogleConnection)", () => {
     expect(String(logged.mock.calls[0]?.[0])).toContain("invalid_grant");
     expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
   });
+
+  // The pending sign-in is used up before Google is asked, so a failed exchange cannot be finished
+  // again: the sentence asks for a new sign-in instead of "try again" (finding 98, round-2 review).
+  for (const [name, route] of [
+    ["Google cannot be reached", () => Promise.reject(new TypeError("fetch failed"))],
+    ["Google answers HTTP 503", () => json({ error: "backendError" }, 503)],
+  ] as const) {
+    it(`when ${name} during the exchange, it asks for Connect Google again`, async () => {
+      mockGoogle({ "https://oauth2.googleapis.com/token": route });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      const failure = completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN });
+      await expect(failure).rejects.toThrow(/^Google (could not be reached|is not answering right now)\. Please click Connect Google again in a moment\.$/);
+      expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
+    });
+  }
 });
 
 describe("token refresh", () => {
+  it("asks to try again in a moment when Google is down while renewing (no new sign-in needed)", async () => {
+    db.tables.set("google_oauth_tokens", [
+      { user_id: USER, access_token: "old", refresh_token: "rt", expires_at: new Date(Date.now() + 10_000).toISOString(), google_email: null },
+    ]);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGoogle({ "https://oauth2.googleapis.com/token": () => json({ error: "backendError" }, 503) });
+    await expect(getValidAccessToken(USER)).rejects.toThrow(
+      /^Google is not answering right now\. Please try again in a moment\.$/,
+    );
+    mockGoogle({ "https://oauth2.googleapis.com/token": () => Promise.reject(new TypeError("fetch failed")) });
+    await expect(getValidAccessToken(USER)).rejects.toThrow(
+      /^Google could not be reached\. Please try again in a moment\.$/,
+    );
+  });
+
   it("returns a still-valid access token without calling Google", async () => {
     db.tables.set("google_oauth_tokens", [
       { user_id: USER, access_token: "fresh", refresh_token: "rt", expires_at: new Date(Date.now() + 30 * 60_000).toISOString(), google_email: "t@example.com" },

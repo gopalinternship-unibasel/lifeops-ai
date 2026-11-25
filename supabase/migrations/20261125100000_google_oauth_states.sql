@@ -8,8 +8,9 @@
 -- Now the server records each sign-in it starts here (the state's nonce, the account, the expiry)
 -- and deletes the row when the sign-in is finished, in one DELETE ... RETURNING. A state without a
 -- row (finished before, replaced by a newer sign-in of the same account, expired, or never issued
--- by this server) is refused. Starting a sign-in also removes expired rows, so the table only holds
--- sign-ins of the last ten minutes, at most one per account.
+-- by this server) is refused. Starting a sign-in also removes expired rows and the account's older
+-- rows, so the table only holds sign-ins of the last ten minutes, normally one per account (two
+-- starts at the same moment can both stay; each is still finished at most once).
 --
 -- Only the server reads and writes this table: row level security is on with no policy, the API
 -- roles anon and authenticated get no privileges, and the service role gets the three it uses.

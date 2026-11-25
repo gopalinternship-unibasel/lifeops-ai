@@ -61,7 +61,8 @@ export interface LLMConfig {
   /**
    * False when this is the hosted demo and no AI provider is set (no LLM_BASE_URL and no legacy
    * HUGGINGFACE_API_KEY): the localhost Ollama default is only meant for a local run, so callAI
-   * refuses at once instead of trying it.
+   * refuses at once instead of trying it. Also false on the hosted demo when LLM_BASE_URL is the
+   * Hugging Face router and neither LLM_API_KEY nor HUGGINGFACE_API_KEY is set.
    */
   configured: boolean;
   provider: string;
@@ -159,12 +160,15 @@ function findErrorText(value: unknown, depth = 0): string | undefined {
   return undefined;
 }
 
+/** The length providerErrorDetail cuts a provider's error text to (the last character is "…"). */
+const PROVIDER_DETAIL_MAX = 160;
+
 /**
  * The provider's error text from an error response body, as one short readable line: the
  * message inside a JSON error object, or plain text. JSON without a message, HTML error pages
  * and anything that still looks like JSON give "" so users never see a raw provider body.
  */
-export function providerErrorDetail(body: string, max = 160): string {
+export function providerErrorDetail(body: string, max = PROVIDER_DETAIL_MAX): string {
   const text = (body ?? "").trim();
   if (!text) return "";
   let detail: string | undefined;
@@ -188,9 +192,10 @@ const END = String.raw`[^\s,;()[\]"'<>]`;
  * request path, which carries the account id. Returns "" when nothing readable is left.
  */
 export function visitorDetail(detail: string): string {
-  const shown = detail
-    // A word cut off by providerErrorDetail's length limit may be the start of an id.
-    .replace(/\S*…$/u, "…")
+  // A word cut off by providerErrorDetail's length limit may be the start of an id. A shorter
+  // text was not cut, so a "…" the provider wrote itself keeps its word.
+  const cut = detail.length >= PROVIDER_DETAIL_MAX && detail.endsWith("…");
+  const shown = (cut ? detail.replace(/\S*…$/u, "…") : detail)
     .replace(new RegExp(String.raw`\b[a-z][a-z0-9+.-]*://${END}*`, "gi"), "…")
     .replace(new RegExp(String.raw`(^|[\s(["'=:])/${END}+`, "g"), "$1…")
     .replace(new RegExp(String.raw`${END}*accounts?/${END}*`, "gi"), "…")
@@ -307,13 +312,18 @@ export function resolveLLMConfig(
 
   const structured = envValue(env, "LLM_STRUCTURED_OUTPUT");
   const temperature = Number.parseFloat(envValue(env, "LLM_TEMPERATURE") ?? "");
-  const configured = !!explicitBaseUrl || useLegacyHf || !hosted;
+  const provider = providerName(baseUrl);
+  // The Hugging Face router answers nothing without a key, so callAI refuses before sending; on a
+  // hosted site that is "not set up" too, and callers that check `configured` first record no use.
+  const configured =
+    (!!explicitBaseUrl || useLegacyHf || !hosted) &&
+    !(hosted && provider === "Hugging Face" && !apiKey);
 
   return {
     configured,
     // A hosted site without a provider has no model server at all: it is not "Ollama" (the
     // localhost default is for a local run), and no address is kept that a call could reach.
-    provider: configured ? providerName(baseUrl) : "the AI provider",
+    provider: configured ? provider : "the AI provider",
     baseUrl: configured ? baseUrl : "",
     apiKey,
     model,
@@ -603,7 +613,7 @@ export async function callAI(opts: {
   const config = resolveLLMConfig(opts.role ?? "chat");
   if (!config.configured) {
     console.warn(
-      "[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty); the request was not sent.",
+      "[llm] No AI provider is set on this hosted deployment (LLM_BASE_URL is empty, or it is the Hugging Face router without HUGGINGFACE_API_KEY or LLM_API_KEY); the request was not sent.",
     );
     throw new AiNotConfiguredError();
   }

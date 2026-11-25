@@ -8,6 +8,9 @@
  *
  * Finding 6: HTTP 402 ("credits exhausted for this token") is operator wording; visitors get a
  * plain sentence, the detail goes to the server log.
+ *
+ * Finding 45 (round-2 review): a hosted site whose LLM_BASE_URL is the Hugging Face router without
+ * a key is "not configured", so callers that check that first record no use for it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,6 +18,7 @@ import {
   friendly,
   providerErrorDetail,
   providerName,
+  resolveLLMConfig,
   visitorDetail,
 } from "@/server/ai/llm.server";
 
@@ -215,6 +219,70 @@ describe("HTTP 402 in plain words (finding 6)", () => {
   it("a local run against a model on this machine keeps the token wording", () => {
     expect(friendly(Object.assign(new Error("x"), { status: 402 }), ollama, false).message).toBe(
       "Ollama credits exhausted for this token.",
+    );
+  });
+});
+
+describe("a provider's own trailing '…' (finding 34, round-2 review)", () => {
+  it("a short text the provider ended with '…' keeps its last word", () => {
+    expect(visitorDetail("Model is loading…")).toBe("Model is loading…");
+    expect(visitorDetail("Request queued, retrying…")).toBe("Request queued, retrying…");
+  });
+
+  it("a text cut at the length limit still loses the cut word", () => {
+    const detail = providerErrorDetail(`${"word ".repeat(31)}abcdefghij more`);
+    expect(detail).toHaveLength(160);
+    expect(detail.endsWith("…")).toBe(true);
+    expect(visitorDetail(detail).endsWith("word …")).toBe(true);
+  });
+});
+
+describe("the Hugging Face router without a key on a hosted site (finding 45, round-2 review)", () => {
+  // Callers check `configured` before they record a use (enforceAiAllowance), so a provider that
+  // callAI would refuse without sending must not count as configured.
+  it("is not configured, so no caller records a use for a request that is never sent", () => {
+    const hf = { LLM_BASE_URL: "https://router.huggingface.co/v1" };
+    expect(resolveLLMConfig("draft", hf, true)).toMatchObject({
+      configured: false,
+      provider: "the AI provider",
+      baseUrl: "",
+    });
+    expect(resolveLLMConfig("chat", hf, true).configured).toBe(false);
+    expect(resolveLLMConfig("plan", hf, true).configured).toBe(false);
+    expect(
+      resolveLLMConfig("chat", { LLM_BASE_URL: "https://api-inference.huggingface.co/v1" }, true)
+        .configured,
+    ).toBe(false);
+  });
+
+  it("is configured with a key, or on a local run (which still names the missing setting)", () => {
+    const hf = { LLM_BASE_URL: "https://router.huggingface.co/v1" };
+    expect(resolveLLMConfig("chat", { ...hf, LLM_API_KEY: "k" }, true).configured).toBe(true);
+    expect(resolveLLMConfig("chat", { ...hf, HUGGINGFACE_API_KEY: "hf_x" }, true).configured).toBe(
+      true,
+    );
+    expect(resolveLLMConfig("chat", { HUGGINGFACE_API_KEY: "hf_x" }, true).configured).toBe(true);
+    expect(resolveLLMConfig("chat", hf, false)).toMatchObject({
+      configured: true,
+      provider: "Hugging Face",
+    });
+    // Other hosted providers without a key are left to the provider's own answer, as before.
+    expect(
+      resolveLLMConfig("chat", { LLM_BASE_URL: "https://api.example.test/v1" }, true).configured,
+    ).toBe(true);
+  });
+
+  it("callAI on such a hosted site refuses with the visitor sentence and sends nothing", async () => {
+    setEnv({ LIFEOPS_HOSTED: "1", LLM_BASE_URL: "https://router.huggingface.co/v1" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(callAI({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      "The AI assistant is not set up on this site yet, so this request could not be answered.",
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((call) => call.join(" ")).join("\n")).toMatch(
+      /Hugging Face router without HUGGINGFACE_API_KEY or LLM_API_KEY/,
     );
   });
 });

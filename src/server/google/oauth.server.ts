@@ -154,7 +154,9 @@ export async function stateMatchesBrowser(
 
 /**
  * Start a sign-in: sign its state and record it as pending (see consumePendingSignIn), so it can be
- * finished once. Each account has one pending sign-in: a new one replaces the older one.
+ * finished once. Starting one removes the account's older pending sign-ins, so normally only the
+ * newest can be finished. (Two starts at the same moment can both stay pending; each still needs
+ * its own browser key and can be finished only once.)
  */
 export async function createSignedOAuthState(params: {
   userId: string;
@@ -183,7 +185,7 @@ export async function createSignedOAuthState(params: {
  */
 const PENDING_SIGN_INS = "google_oauth_states";
 
-/** Record a started sign-in; expired rows of every account and this account's older one go. */
+/** Record a started sign-in; expired rows of every account and this account's older ones go. */
 async function recordPendingSignIn(payload: OAuthStatePayload) {
   const { error: expiredError } = await supabaseAdmin
     .from(PENDING_SIGN_INS)
@@ -288,7 +290,13 @@ export function buildAuthUrl(params: { origin: string; state: string }) {
  * POST to Google's token endpoint. Users get `failure` as the message; the status and Google's
  * answer go to the server log only.
  */
-async function postToGoogleToken(body: URLSearchParams, what: string, failure: string): Promise<Response> {
+async function postToGoogleToken(
+  body: URLSearchParams,
+  what: string,
+  failure: string,
+  /** What to do when Google could not be reached or failed itself (a network error or a 5xx). */
+  retry = "Please try again in a moment.",
+): Promise<Response> {
   let res: Response;
   try {
     res = await fetch("https://oauth2.googleapis.com/token", {
@@ -299,13 +307,13 @@ async function postToGoogleToken(body: URLSearchParams, what: string, failure: s
     });
   } catch (error) {
     console.error(`[google] ${what}: request failed:`, error);
-    throw new Error("Google could not be reached. Please try again in a moment.");
+    throw new Error(`Google could not be reached. ${retry}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     console.error(`[google] ${what} failed (${res.status}): ${text.slice(0, 300)}`);
-    // A 5xx is Google's own trouble, not a refused sign-in: asking to reconnect would mislead.
-    if (res.status >= 500) throw new Error("Google is not answering right now. Please try again in a moment.");
+    // A 5xx is Google's own trouble, not a refused sign-in: saying it was refused would mislead.
+    if (res.status >= 500) throw new Error(`Google is not answering right now. ${retry}`);
     throw new Error(failure);
   }
   return res;
@@ -322,6 +330,9 @@ export async function exchangeCodeForTokens(code: string, origin: string) {
     }),
     "Token exchange",
     "Google did not accept this sign-in (it may have expired or been used already). Please click Connect Google again.",
+    // The pending sign-in is used up before this call (completeGoogleConnection) and the page has
+    // dropped the code, so the same sign-in cannot be finished again: a new one is needed.
+    "Please click Connect Google again in a moment.",
   );
   return res.json() as Promise<{
     access_token: string;
