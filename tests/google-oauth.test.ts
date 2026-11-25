@@ -10,35 +10,63 @@ type Row = Record<string, unknown>;
 const db = vi.hoisted(() => {
   const tables = new Map<string, Row[]>();
   const writes: { table: string; op: string; payload: unknown }[] = [];
+  /** A forced error for every query on a table (a database that does not answer). */
+  const errors = new Map<string, unknown>();
 
   function from(table: string) {
     const filters: [string, unknown][] = [];
+    const tests: ((row: Row) => boolean)[] = [];
     let op: "select" | "update" | "delete" = "select";
+    let returning = false;
     let updatePayload: Row = {};
     const rows = () => tables.get(table) ?? [];
-    const matches = (row: Row) => filters.every(([col, val]) => row[col] === val);
+    const matches = (row: Row) => tests.every((test) => test(row));
 
     const run = async () => {
+      if (errors.has(table)) return { data: null, error: errors.get(table) };
       if (op === "update") {
         writes.push({ table, op, payload: updatePayload });
         for (const row of rows()) if (matches(row)) Object.assign(row, updatePayload);
         return { data: null, error: null };
       }
       if (op === "delete") {
+        // One synchronous step, like Postgres's DELETE ... RETURNING: a row goes to one caller only.
         writes.push({ table, op, payload: Object.fromEntries(filters) });
+        const deleted = rows().filter(matches);
         tables.set(table, rows().filter((row) => !matches(row)));
-        return { data: null, error: null };
+        return { data: returning ? deleted : null, error: null };
       }
       return { data: rows().filter(matches), error: null };
     };
 
     const builder = {
-      select: () => builder,
+      select: () => {
+        if (op === "delete") returning = true;
+        return builder;
+      },
       eq: (col: string, val: unknown) => {
         filters.push([col, val]);
+        tests.push((row) => row[col] === val);
+        return builder;
+      },
+      // Timestamps are compared as ISO strings, the form the code writes and filters with.
+      lt: (col: string, val: string) => {
+        filters.push([`${col}<`, val]);
+        tests.push((row) => String(row[col]) < val);
+        return builder;
+      },
+      gt: (col: string, val: string) => {
+        filters.push([`${col}>`, val]);
+        tests.push((row) => String(row[col]) > val);
         return builder;
       },
       in: () => builder,
+      insert: async (payload: Row | Row[]) => {
+        if (errors.has(table)) return { error: errors.get(table) };
+        writes.push({ table, op: "insert", payload });
+        tables.set(table, [...rows(), ...(Array.isArray(payload) ? payload : [payload]).map((row) => ({ ...row }))]);
+        return { error: null };
+      },
       update: (payload: Row) => {
         op = "update";
         updatePayload = payload;
@@ -49,8 +77,8 @@ const db = vi.hoisted(() => {
         return builder;
       },
       maybeSingle: async () => {
-        const { data } = await run();
-        return { data: Array.isArray(data) ? (data[0] ?? null) : null, error: null };
+        const { data, error } = await run();
+        return { data: Array.isArray(data) ? (data[0] ?? null) : null, error };
       },
       upsert: async (payload: Row | Row[], opts?: { onConflict?: string }) => {
         writes.push({ table, op: "upsert", payload });
@@ -67,7 +95,7 @@ const db = vi.hoisted(() => {
     return builder;
   }
 
-  return { tables, writes, client: { from } };
+  return { tables, writes, errors, client: { from } };
 });
 
 vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: db.client }));
@@ -132,6 +160,7 @@ beforeEach(() => {
   vi.stubEnv("GOOGLE_OAUTH_REDIRECT_URI", "");
   db.tables.clear();
   db.writes.length = 0;
+  db.errors.clear();
 });
 
 afterEach(() => {
@@ -368,6 +397,136 @@ describe("finishing a Google sign-in (completeGoogleConnection)", () => {
       completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN }),
     ).rejects.toThrow(/expired or is not valid/);
     expect(calls).toHaveLength(0);
+  });
+
+  describe("each sign-in can be finished once (finding 98)", () => {
+    const USED = /already used, or a newer one was started/;
+    const pending = () => db.tables.get("google_oauth_states") ?? [];
+    const tokenCalls = () => calls.filter((call) => call.url === "https://oauth2.googleapis.com/token");
+
+    it("starting a sign-in records it as pending, for its account and until its expiry", async () => {
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      const payload = await verifySignedOAuthState(state);
+      expect(pending()).toEqual([
+        { nonce: payload?.nonce, user_id: USER, expires_at: new Date(Number(payload?.exp)).toISOString() },
+      ]);
+    });
+
+    it("finishing the same state again is refused before Google is asked", async () => {
+      mockGoogle(tokenRoutes());
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      const finish = () =>
+        completeGoogleConnection({ userId: USER, code: "auth-code-1", state, browserKey: KEY, origin: ORIGIN });
+
+      await expect(finish()).resolves.toEqual({ email: "tester@example.com" });
+      expect(pending()).toEqual([]);
+      db.tables.delete("google_oauth_tokens");
+      db.tables.delete("connector_status");
+
+      await expect(finish()).rejects.toThrow(USED);
+      expect(tokenCalls()).toHaveLength(1);
+      expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
+      expect(db.tables.get("connector_status")).toBeUndefined();
+      expect(logged.mock.calls.map((call) => call.join(" ")).join("\n")).toMatch(/already used/);
+    });
+
+    it("two requests with the same state at the same moment: one connects, the other is refused", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      const results = await Promise.allSettled(
+        [1, 2].map(() =>
+          completeGoogleConnection({ userId: USER, code: "auth-code-1", state, browserKey: KEY, origin: ORIGIN }),
+        ),
+      );
+      expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+      expect(String((results.find((result) => result.status === "rejected") as PromiseRejectedResult).reason)).toMatch(USED);
+      expect(tokenCalls()).toHaveLength(1);
+    });
+
+    it("a newer sign-in of the same account replaces the older one", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const older = await createSignedOAuthState({ userId: USER, browserKey: "older-key" });
+      const newer = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      expect(pending()).toHaveLength(1);
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state: older, browserKey: "older-key", origin: ORIGIN }),
+      ).rejects.toThrow(USED);
+      expect(tokenCalls()).toHaveLength(0);
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state: newer, browserKey: KEY, origin: ORIGIN }),
+      ).resolves.toEqual({ email: "tester@example.com" });
+    });
+
+    it("a signed state this server holds no record of is refused (started before this check, or the record is gone)", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      db.tables.set("google_oauth_states", []);
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN }),
+      ).rejects.toThrow(USED);
+      expect(calls).toHaveLength(0);
+      expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
+    });
+
+    it("a record past its expiry is not accepted", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      // The state itself is still within its ten minutes; only the server's record says it is over.
+      for (const row of pending()) row.expires_at = new Date(Date.now() - 1000).toISOString();
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN }),
+      ).rejects.toThrow(USED);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("attempts refused for another account or another browser do not use up the sign-in", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      await expect(
+        completeGoogleConnection({ userId: ATTACKER, code: "c", state, browserKey: KEY, origin: ORIGIN }),
+      ).rejects.toThrow(/different MONDAY account/);
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state, browserKey: "other", origin: ORIGIN }),
+      ).rejects.toThrow(/different browser or tab/);
+      expect(pending()).toHaveLength(1);
+      await expect(
+        completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN }),
+      ).resolves.toEqual({ email: "tester@example.com" });
+    });
+
+    it("starting a sign-in removes expired records of every account and keeps other accounts' live ones", async () => {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      const later = new Date(Date.now() + 60_000).toISOString();
+      db.tables.set("google_oauth_states", [
+        { nonce: "old-1", user_id: ATTACKER, expires_at: past },
+        { nonce: "old-2", user_id: "77777777-7777-7777-7777-777777777777", expires_at: past },
+        { nonce: "live", user_id: ATTACKER, expires_at: later },
+      ]);
+      await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      expect(pending().map((row) => row.nonce)).toEqual(["live", expect.any(String)]);
+      expect(pending()[1]?.user_id).toBe(USER);
+    });
+
+    it("a database that does not answer: a sentence, and nothing is stored or exchanged", async () => {
+      mockGoogle(tokenRoutes());
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const state = await createSignedOAuthState({ userId: USER, browserKey: KEY });
+      db.errors.set("google_oauth_states", { code: "57P01", message: "terminating connection", details: "", hint: "" });
+      const failure = completeGoogleConnection({ userId: USER, code: "c", state, browserKey: KEY, origin: ORIGIN });
+      await expect(failure).rejects.toThrow("Could not finish the Google sign-in. Please try again in a moment.");
+      await expect(failure).rejects.not.toThrow(/terminating|57P01/);
+      await expect(createSignedOAuthState({ userId: USER, browserKey: KEY })).rejects.toThrow(
+        "Could not start the Google sign-in. Please try again in a moment.",
+      );
+      expect(calls).toHaveLength(0);
+      expect(db.tables.get("google_oauth_tokens")).toBeUndefined();
+    });
   });
 
   it("reports a refused code (expired or used before) in plain words, without storing anything", async () => {

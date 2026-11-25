@@ -152,6 +152,10 @@ export async function stateMatchesBrowser(
   return sameText(await browserKeyHash(browserKey), state.nonce);
 }
 
+/**
+ * Start a sign-in: sign its state and record it as pending (see consumePendingSignIn), so it can be
+ * finished once. Each account has one pending sign-in: a new one replaces the older one.
+ */
 export async function createSignedOAuthState(params: {
   userId: string;
   /** The key the starting browser keeps (newBrowserKey); required to finish the sign-in. */
@@ -169,7 +173,54 @@ export async function createSignedOAuthState(params: {
     key,
     new TextEncoder().encode(encodedPayload),
   );
+  await recordPendingSignIn(payload);
   return `${encodedPayload}.${toBase64Url(new Uint8Array(signature))}`;
+}
+
+/**
+ * Pending sign-ins, one row per started sign-in that is not finished yet; only the server can
+ * read or write them (supabase/migrations/20261125100000_google_oauth_states.sql).
+ */
+const PENDING_SIGN_INS = "google_oauth_states";
+
+/** Record a started sign-in; expired rows of every account and this account's older one go. */
+async function recordPendingSignIn(payload: OAuthStatePayload) {
+  const { error: expiredError } = await supabaseAdmin
+    .from(PENDING_SIGN_INS)
+    .delete()
+    .lt("expires_at", new Date().toISOString());
+  if (expiredError) throw dbError("start the Google sign-in", expiredError);
+  const { error: olderError } = await supabaseAdmin
+    .from(PENDING_SIGN_INS)
+    .delete()
+    .eq("user_id", payload.uid);
+  if (olderError) throw dbError("start the Google sign-in", olderError);
+  const { error } = await supabaseAdmin.from(PENDING_SIGN_INS).insert({
+    nonce: payload.nonce,
+    user_id: payload.uid,
+    expires_at: new Date(payload.exp).toISOString(),
+  });
+  if (error) throw dbError("start the Google sign-in", error);
+}
+
+/**
+ * Use up the pending sign-in of a state for this account: true the first time, false when it was
+ * finished before, replaced by a newer sign-in, has expired, or was never started here. It is one
+ * DELETE ... RETURNING, so two requests with the same state cannot both get true.
+ */
+export async function consumePendingSignIn(
+  state: Pick<OAuthStatePayload, "nonce">,
+  userId: string,
+): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from(PENDING_SIGN_INS)
+    .delete()
+    .eq("nonce", state.nonce)
+    .eq("user_id", userId)
+    .gt("expires_at", new Date().toISOString())
+    .select("nonce");
+  if (error) throw dbError("finish the Google sign-in", error);
+  return Array.isArray(data) && data.length > 0;
 }
 
 export async function verifySignedOAuthState(state: string): Promise<OAuthStatePayload | null> {

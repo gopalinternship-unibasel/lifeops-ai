@@ -7,11 +7,13 @@
 // MONDAY account, send the Google consent link to a victim, and get the victim's Gmail and Calendar
 // attached to the attacker's account (OAuth CSRF). So the callback only hands the code and state
 // on to the app page, and the signed-in page finishes the sign-in through an authenticated server
-// function (completeGoogleConnection), which accepts the state only for the same MONDAY account
-// and only from the browser that started it (the browser key, see oauth.server.ts).
+// function (completeGoogleConnection), which accepts the state only for the same MONDAY account,
+// only from the browser that started it (the browser key, see oauth.server.ts), and only once (the
+// server's record of the pending sign-in, see consumePendingSignIn).
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { dbError, publicError } from "@/server/public-error.server";
 import {
+  consumePendingSignIn,
   exchangeCodeForTokens,
   fetchGoogleUserEmail,
   stateMatchesBrowser,
@@ -72,11 +74,13 @@ const OTHER_ACCOUNT =
   "This Google sign-in was started from a different MONDAY account, so it was not connected. Please click Connect Google again while signed in to the account you want to connect.";
 const OTHER_BROWSER =
   "This Google sign-in was started in a different browser or tab, so it was not connected. Please click Connect Google again here.";
+const SIGN_IN_USED =
+  "This Google sign-in was already used, or a newer one was started. If Google is not connected yet, please click Connect Google again.";
 
 /**
  * Finish a Google sign-in for the signed-in user: check the state (signature, expiry, same MONDAY
- * account, same browser), exchange the code and store the tokens. Throws errors whose message is
- * meant for the user.
+ * account, same browser, not used before), exchange the code and store the tokens. Throws errors
+ * whose message is meant for the user.
  */
 export async function completeGoogleConnection(opts: {
   /** The signed-in user finishing the sign-in (from the authenticated request, never the state). */
@@ -95,6 +99,16 @@ export async function completeGoogleConnection(opts: {
   }
   if (!(await stateMatchesBrowser(state, opts.browserKey))) {
     throw publicError(OTHER_BROWSER, "browser key does not match", "google oauth: refused a sign-in");
+  }
+  // Single use: the pending sign-in is deleted here, before Google is asked, so the same state
+  // cannot be finished twice (a replayed or resent request). The checks above come first, so a
+  // refused attempt from another account or browser does not use it up.
+  if (!(await consumePendingSignIn(state, opts.userId))) {
+    throw publicError(
+      SIGN_IN_USED,
+      "state already used, replaced by a newer sign-in, expired or unknown",
+      "google oauth: refused a sign-in",
+    );
   }
 
   // Throws a sentence for the user when Google refuses the code (expired or already used).
