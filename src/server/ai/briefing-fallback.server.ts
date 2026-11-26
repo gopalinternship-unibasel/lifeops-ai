@@ -126,6 +126,9 @@ export function isSameCommitment(event: BriefingEvent, email: BriefingEmail, tim
 /** The message the demo's briefing suggests for the assistant's own ranking (also a chip in the chat box). */
 export const AI_RANKING_PROMPT = "Look into my calendar and tell me priorities";
 
+/** The most emails a briefing lists one by one; the rest are counted ("…and 40 more unread."). */
+export const INBOX_LIST_LIMIT = 10;
+
 export function buildRuleBasedBriefing(opts: {
   emails: BriefingEmail[];
   unreadCount: number;
@@ -180,11 +183,16 @@ export function buildRuleBasedBriefing(opts: {
           : "Your inbox could not be read right now.",
     );
   } else if (unread.length === 0) lines.push("No unread emails — inbox is clear.");
-  for (const email of unread) {
+  // A real inbox can hold 50 unread emails: the briefing lists the newest ones and counts the rest,
+  // instead of a wall of 50 bullets (live Gmail test of 26 Nov 2026).
+  const shown = unread.slice(0, INBOX_LIST_LIMIT);
+  for (const email of shown) {
     lines.push(
       `- **${markdownText(oneLine(email.from, 60))}** — *${markdownText(oneLine(email.subject, 90))}* — ${markdownText(oneLine(email.snippet, 120))}`,
     );
   }
+  const notShown = Math.max(opts.unreadCount, unread.length) - shown.length;
+  if (!opts.inboxUnavailable && shown.length > 0 && notShown > 0) lines.push(`- …and ${notShown} more unread.`);
   lines.push("", "**📅 Today**");
   if (events.length === 0) lines.push("Nothing scheduled today.");
   for (const event of events) lines.push(`- ${time(event.starts_at)} – ${time(event.ends_at)} ${markdownText(oneLine(event.title, 90))}`);

@@ -22,6 +22,7 @@ import { isHostedDeployment } from "@/server/deployment.server";
 import { storageError } from "@/server/chat-cards.server";
 import {
   buildRuleBasedBriefing,
+  INBOX_LIST_LIMIT,
   checkPriorityReasons,
   foldSameCommitments,
   isSameCommitment,
@@ -821,9 +822,15 @@ async function answerChatTurn(
   // Each email, with a note when it is about one of today's events (the demo's "Team sync moved
   // to 7 PM today" and the 7 PM team sync): a live briefing said the sync overlapped itself.
   const todayKnownEvents = knownEvents.filter((event) => localDateTime(event.starts_at, timeZone).date === todayDate);
+  // A real inbox can hold 50 unread emails. Asked to list every one, the model wrote past its
+  // output limit and the cut-off tool call came back as HTTP 400 "Invalid JSON: EOF while
+  // parsing" from Cloudflare (live Gmail test, 26 Nov 2026). The prompt gets the newest emails
+  // (unread first) and the true unread count; the reply lists at most INBOX_LIST_LIMIT of them.
   const emailsForPrompt = buildEmailsForPrompt(
     googleConnected
-      ? realEmails.map((mail) => ({ id: mail.id, from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
+      ? realEmails
+          .slice(0, PROMPT_EMAIL_LIMIT)
+          .map((mail) => ({ id: mail.id, from: mail.from, subject: mail.subject, snippet: mail.snippet, unread: mail.unread }))
       : mockEmails,
     todayKnownEvents,
     timeZone,
@@ -844,10 +851,10 @@ INSTRUCTIONS:
 - All times in this prompt are the user's LOCAL wall-clock times on a 24-hour clock. Write the times you return in starts_at and ends_at the same way, without an offset, e.g. "2026-05-02T15:00:00". In the "reply" text write times as h:mm AM/PM, e.g. 2:00 PM.
 - When the user asks about events/tasks for a SPECIFIC DAY (e.g. "what's on Saturday", "tasks on Friday", "my schedule tomorrow"), find that date in "Calendar dates", then list ALL events under that date in the calendar below, with title and time range. If none, say so explicitly.
 - When the user asks to "check emails", "check messages", "what's in my inbox", "show unread", "list unread emails", or for a daily briefing — write the "reply" as a clear summary IN THE CHAT, with these sections:
-    **📬 Inbox (N unread)** with N = the unread count. Then one bullet per email marked (UNREAD) below: the sender in bold, the subject in italics, then a few words of the snippet. Do NOT skip any unread email. If the unread count is 0, write "No unread emails — inbox is clear."
+    **📬 Inbox (N unread)** with N = the unread count. Then one bullet per email marked (UNREAD) below: the sender in bold, the subject in italics, then a few words of the snippet. List the unread emails newest first, at most ${INBOX_LIST_LIMIT} bullets; when the unread count is higher than the bullets you wrote, end the block with "…and K more unread." (K = the unread count minus your bullets). If the unread count is 0, write "No unread emails — inbox is clear."
     **📅 Today** — the events under today's date in the calendar below, as bullets with times. If none, say "Nothing scheduled today."
     Then a short closing line.
-- If the user specifically asks ONLY for unread emails, still use the **📬 Inbox (N unread)** block and list every UNREAD email — skip the calendar block.
+- If the user specifically asks ONLY for unread emails, still use the **📬 Inbox (N unread)** block and list the UNREAD emails (at most ${INBOX_LIST_LIMIT}, then "…and K more unread.") — skip the calendar block.
 - First time the user asks about inbox/day/priorities, ALSO return "priorities": a ranked list built from the emails' tasks and today's remaining events.
 - An email marked "same meeting as calendar event ..." announces an event that is already in the calendar at that time: it is that same event, not a conflict or an overlap, and one priority, not two.
 - PRIORITIES MUST REFLECT EVENT DURATION: when ranking from calendar events, longer events outrank shorter ones (a 2-hour block is higher priority than a 30-minute one). Tie-break by earlier start time. In the "reason" field give the item's own day and its length from the calendar below; only events under today's date are "today". When the user asks priorities again, RECOMPUTE — do not return the same ranking if durations differ.
@@ -1926,6 +1933,8 @@ export function endOfToday(timeZone = "UTC") {
  * picked the reminder for it instead), and a move beyond a week was not checked for conflicts.
  */
 const CALENDAR_DAYS = 21;
+/** The most real emails (unread first, newest first) that go into the chat prompt. */
+const PROMPT_EMAIL_LIMIT = 15;
 /** The most events one Google Calendar list returns (listCalendarEvents asks for maxResults=50, one page). */
 const GOOGLE_EVENTS_CAP = 50;
 
