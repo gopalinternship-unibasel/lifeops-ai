@@ -10,11 +10,13 @@ export const Route = createFileRoute("/")({
 });
 
 /**
- * The hosted sites (Vercel, GitHub Pages) have no Google sign-in: every visitor works with the
- * sample inbox and the app's own demo calendar, so the page says so instead of claiming to read
- * the visitor's email. A local install with Google set up keeps the wording for real accounts.
+ * The hosted sites start every visitor on the sample inbox and the app's own demo calendar; where the
+ * site has a Google OAuth client (VITE_ENABLE_GOOGLE_CONNECT) accounts can connect Gmail and Calendar,
+ * so the page says which one applies. A local install keeps the wording for real accounts.
  */
 const HOSTED_DEMO = import.meta.env.VITE_HOSTED_DEMO === "true";
+/** The hosted site has a Google OAuth client (VITE_ENABLE_GOOGLE_CONNECT=true): accounts can connect Google. */
+const GOOGLE_CONNECT = import.meta.env.VITE_ENABLE_GOOGLE_CONNECT === "true";
 
 function Landing() {
   const { user, loading } = useAuth();
@@ -50,7 +52,9 @@ function Landing() {
             <br />actively running your day.
           </h1>
           <p className="mt-6 text-lg text-muted-foreground max-w-2xl leading-relaxed">
-            {HOSTED_DEMO
+            {HOSTED_DEMO && GOOGLE_CONNECT
+              ? "MONDAY reads an inbox and a calendar, prioritizes what matters, and rewires your schedule through conversation. The public demo works with a sample inbox and a demo calendar of its own; with an account, Google users the owner has added as testers can connect their real Gmail and Google Calendar instead."
+              : HOSTED_DEMO
               ? "MONDAY reads an inbox and a calendar, prioritizes what matters, and rewires your schedule through conversation. In this public demo it works with a sample inbox and a demo calendar of its own, so nothing connects to your real email or calendar."
               : "MONDAY connects to your inbox and calendar, prioritizes what matters, and rewires your schedule through conversation."}{" "}
             Not a chatbot. Not a to-do list. A decision and execution layer.
@@ -73,7 +77,9 @@ function Landing() {
             icon={<Brain className="h-5 w-5" />}
             title="Reasons over your context"
             body={
-              HOSTED_DEMO
+              HOSTED_DEMO && GOOGLE_CONNECT
+                ? "Reads the inbox and calendar (the samples, or your own Gmail and Google Calendar once connected) and the goals in your profile. Generates ranked priorities with explicit reasoning."
+                : HOSTED_DEMO
                 ? "Reads the sample inbox, the demo calendar and the goals in your profile. Generates ranked priorities with explicit reasoning."
                 : "Reads emails, calendar, and goals. Generates ranked priorities with explicit reasoning."
             }
@@ -89,6 +95,12 @@ function Landing() {
             body="Block time for the gym, dinner, or meeting prep. MONDAY proposes it and puts it on the calendar once you approve."
           />
         </div>
+
+        <footer className="mt-16 text-xs text-muted-foreground">
+          <Link to="/privacy" className="hover:text-foreground hover:underline">
+            Privacy
+          </Link>
+        </footer>
       </main>
     </div>
   );

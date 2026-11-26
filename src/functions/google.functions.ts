@@ -16,13 +16,17 @@ import { listRecentMessages, getMessage } from "@/server/google/gmail.server";
 import { AiNotConfiguredError, callAI, resolveLLMConfig } from "@/server/ai/llm.server";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
+  ANONYMOUS_GOOGLE_MESSAGE,
   assertGoogleOAuthConfigured,
   buildAuthUrl,
   createSignedOAuthState,
   googleOAuthConfigStatus,
+  googleOAuthTesting,
+  isAnonymousClaims,
   newBrowserKey,
   revokeGoogleToken,
 } from "@/server/google/oauth.server";
+import { decryptToken } from "@/server/google/token-crypto.server";
 import { completeGoogleConnection } from "@/server/google/callback.server";
 import { getErrorMessage } from "@/lib/errors";
 import { dbError, describeCause } from "@/server/public-error.server";
@@ -213,6 +217,9 @@ export const getGoogleOAuthUrl = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     // Fail with a clear message (not a broken Google page) when no OAuth client is configured.
     assertGoogleOAuthConfigured();
+    // Real Gmail and Calendar access belongs to a real account: a demo session is deleted after
+    // 7 days and cannot be reopened, so its owner could not disconnect Google later.
+    if (isAnonymousClaims(context.claims)) throw new Error(ANONYMOUS_GOOGLE_MESSAGE);
     const request = getRequest();
     if (!request) throw new Error("Google connection could not be started. Please try again.");
     const origin = new URL(request.url).origin;
@@ -237,6 +244,7 @@ export const completeGoogleOAuth = createServerFn({ method: "POST" })
   }), d))
   .handler(async ({ context, data }) => {
     assertGoogleOAuthConfigured();
+    if (isAnonymousClaims(context.claims)) throw new Error(ANONYMOUS_GOOGLE_MESSAGE);
     const request = getRequest();
     if (!request) throw new Error("Google connection could not be finished. Please try again.");
     return completeGoogleConnection({
@@ -274,6 +282,8 @@ export const getGoogleConnectionStatus = createServerFn({ method: "GET" })
       demoMode: !data && !!demoRow,
       /** Whether "Connect Google" can work here. Which settings are missing stays on the server. */
       oauthConfigured: oauth.configured,
+      /** Google's "Testing" status: only listed test users can connect, for 7 days at a time. */
+      oauthTesting: oauth.configured && googleOAuthTesting(),
     };
   });
 
@@ -301,10 +311,10 @@ export const disconnectGoogle = createServerFn({ method: "POST" })
       .maybeSingle();
     if (tokenReadError) throw dbError("disconnect Google", tokenReadError);
 
-    const tokenToRevoke = tokenRow?.refresh_token ?? tokenRow?.access_token;
-    if (tokenToRevoke) {
+    const storedToken = tokenRow?.refresh_token ?? tokenRow?.access_token;
+    if (storedToken) {
       try {
-        await revokeGoogleToken(tokenToRevoke);
+        await revokeGoogleToken(await decryptToken(storedToken));
       } catch (error) {
         // Always remove local credentials even if Google's revocation endpoint is temporarily unavailable.
         console.warn("Google token revocation failed during disconnect", error);

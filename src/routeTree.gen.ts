@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppCalendarRouteImport } from './routes/app.calendar'
 import { Route as AppDashboardRouteImport } from './routes/app.dashboard'
@@ -35,6 +36,11 @@ const AppRoute = AppRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppIndexRoute = AppIndexRouteImport.update({
@@ -87,6 +93,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
+  '/privacy': typeof PrivacyRoute
   '/app/calendar': typeof AppCalendarRoute
   '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
@@ -100,6 +107,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/privacy': typeof PrivacyRoute
   '/app/calendar': typeof AppCalendarRoute
   '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
@@ -115,6 +123,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
+  '/privacy': typeof PrivacyRoute
   '/app/calendar': typeof AppCalendarRoute
   '/app/dashboard': typeof AppDashboardRoute
   '/app/plan': typeof AppPlanRoute
@@ -131,6 +140,7 @@ export interface FileRouteTypes {
     | '/'
     | '/app'
     | '/login'
+    | '/privacy'
     | '/app/calendar'
     | '/app/dashboard'
     | '/app/plan'
@@ -144,6 +154,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
+    | '/privacy'
     | '/app/calendar'
     | '/app/dashboard'
     | '/app/plan'
@@ -158,6 +169,7 @@ export interface FileRouteTypes {
     | '/'
     | '/app'
     | '/login'
+    | '/privacy'
     | '/app/calendar'
     | '/app/dashboard'
     | '/app/plan'
@@ -173,6 +185,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
+  PrivacyRoute: typeof PrivacyRoute
   OnboardingConnectorsRoute: typeof OnboardingConnectorsRoute
   OnboardingProfileRoute: typeof OnboardingProfileRoute
   ApiPublicGoogleCallbackRoute: typeof ApiPublicGoogleCallbackRoute
@@ -200,6 +213,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/app/': {
@@ -290,6 +310,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
+  PrivacyRoute: PrivacyRoute,
   OnboardingConnectorsRoute: OnboardingConnectorsRoute,
   OnboardingProfileRoute: OnboardingProfileRoute,
   ApiPublicGoogleCallbackRoute: ApiPublicGoogleCallbackRoute,

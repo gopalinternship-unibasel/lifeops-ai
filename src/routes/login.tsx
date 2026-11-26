@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent, useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth-context";
@@ -24,6 +24,8 @@ function LoginPage() {
   const googleSignInEnabled = import.meta.env.VITE_ENABLE_GOOGLE_SIGNIN === "true";
   // The public hosted demo: tell visitors where their messages go (VITE_HOSTED_DEMO=true).
   const hostedDemo = import.meta.env.VITE_HOSTED_DEMO === "true";
+  // The hosted site has a Google OAuth client: accounts can connect Gmail and Google Calendar.
+  const googleConnect = import.meta.env.VITE_ENABLE_GOOGLE_CONNECT === "true";
   // While this page drives navigation itself (sign-up → onboarding), do not also redirect
   // to /app when the new session appears; that race used to skip profile onboarding.
   const navigatingRef = useRef(false);
@@ -144,11 +146,21 @@ function LoginPage() {
             {mode === "signin" ? "Welcome back. Pick up where you left off." : "Start running your day in under a minute."}
           </p>
 
-          {hostedDemo && (
+          {hostedDemo && !googleConnect && (
             <p className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
               Demo with demo data only. Your messages go to a hosted AI provider, so do not enter personal information.
               Demo accounts and their data are deleted after 7 days without use, and a demo session cannot be reopened
               after you sign out.
+            </p>
+          )}
+          {hostedDemo && googleConnect && (
+            <p className="mt-4 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+              The live demo uses a sample inbox and calendar, and your messages go to a hosted AI provider, so do not
+              enter personal information there. Demo sessions are deleted after 7 days without use and cannot be
+              reopened after you sign out. With an account, Google users the owner has added as testers can connect
+              their own Gmail and Google Calendar; the{" "}
+              <Link to="/privacy" className="underline hover:text-foreground">privacy page</Link> says how that data
+              is used.
             </p>
           )}
 

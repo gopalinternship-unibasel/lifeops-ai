@@ -62,6 +62,7 @@ function ConnectorsOnboarding() {
   const [email, setEmail] = useState<string | null>(null);
   const [demoMode, setDemoMode] = useState(false);
   const [oauthConfigured, setOauthConfigured] = useState(true);
+  const [oauthTesting, setOauthTesting] = useState(false);
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -73,6 +74,7 @@ function ConnectorsOnboarding() {
       setEmail(r.email);
       setDemoMode(r.demoMode);
       setOauthConfigured(r.oauthConfigured);
+      setOauthTesting(r.oauthTesting);
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, "Could not check Google connection"));
     } finally {
@@ -156,6 +158,7 @@ function ConnectorsOnboarding() {
       email={email}
       demoMode={demoMode}
       oauthConfigured={oauthConfigured}
+      oauthTesting={oauthTesting}
       oauthError={oauthError}
       busy={busy}
       isAnonymous={!!user?.is_anonymous}
@@ -176,6 +179,7 @@ export function ConnectorsView({
   email,
   demoMode,
   oauthConfigured,
+  oauthTesting = false,
   oauthError,
   busy,
   isAnonymous,
@@ -188,6 +192,8 @@ export function ConnectorsView({
   email: string | null;
   demoMode: boolean;
   oauthConfigured: boolean;
+  /** Google's "Testing" status: only listed test users can connect, for 7 days at a time. */
+  oauthTesting?: boolean;
   oauthError: string | null;
   busy: boolean;
   isAnonymous: boolean;
@@ -248,8 +254,27 @@ export function ConnectorsView({
                   </span>
                 </div>
               )}
+              {oauthConfigured && !oauthError && isAnonymous && (
+                <div role="note" data-testid="google-needs-account"
+                  className="mb-4 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700" />
+                  <span>
+                    A demo session cannot connect a Google account, because it is deleted after 7 days and cannot be
+                    reopened. Sign out, create an account with your email on the sign-in page, and connect Google from
+                    there. You can keep using the demo inbox and calendar below.
+                  </span>
+                </div>
+              )}
+              {oauthConfigured && !oauthError && oauthTesting && !isAnonymous && (
+                <div role="note" data-testid="google-testing-mode"
+                  className="mb-4 rounded-md border border-border bg-muted p-3 text-xs text-muted-foreground">
+                  Google sign-in for this app is in Google&apos;s testing phase: only Google accounts the owner has added
+                  as testers can connect. Google shows a warning screen first, and asks you to connect again after
+                  7 days.
+                </div>
+              )}
               {/* Without an OAuth client the button could only fail; the notice above says why. */}
-              <button onClick={onConnect} disabled={busy || !oauthConfigured}
+              <button onClick={onConnect} disabled={busy || !oauthConfigured || isAnonymous}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-gradient-brand px-4 py-3 text-sm font-medium text-primary-foreground shadow-elev hover:opacity-95 transition disabled:opacity-60">
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <GoogleLogo />}
                 Connect Google

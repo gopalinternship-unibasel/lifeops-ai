@@ -1,6 +1,7 @@
 // Server-only Google OAuth helpers. Never import this file from browser code.
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { dbError } from "@/server/public-error.server";
+import { decryptToken, encryptToken } from "@/server/google/token-crypto.server";
 
 export const GOOGLE_SCOPES = [
   "openid",
@@ -73,6 +74,24 @@ function notConfigured(missing: string[], message?: string): GoogleOAuthNotConfi
   // The setting names are for the person who runs the server (RUNNING.md explains them).
   console.warn(`[google] Google OAuth is not configured (missing ${missing.join(", ")}; see RUNNING.md).`);
   return new GoogleOAuthNotConfiguredError(missing, message);
+}
+
+/**
+ * Whether the Google OAuth client is in Google's "Testing" publishing status
+ * (GOOGLE_OAUTH_TESTING=true): only Google accounts listed as test users can connect, Google shows
+ * a warning screen first, and the connection lapses after 7 days. The page says so.
+ */
+export function googleOAuthTesting(env: Record<string, string | undefined> = process.env): boolean {
+  return env.GOOGLE_OAUTH_TESTING?.trim().toLowerCase() === "true";
+}
+
+/** Shown to a demo (anonymous) account that tries to connect Google. */
+export const ANONYMOUS_GOOGLE_MESSAGE =
+  "A demo session cannot connect a Google account, because it is deleted after 7 days and cannot be reopened. Sign out, create an account with your email on the sign-in page, and connect Google from there.";
+
+/** Whether the signed-in Supabase user is an anonymous (demo) user, from the token's claims. */
+export function isAnonymousClaims(claims: unknown): boolean {
+  return typeof claims === "object" && claims !== null && (claims as { is_anonymous?: unknown }).is_anonymous === true;
 }
 
 export function assertGoogleOAuthConfigured() {
@@ -394,16 +413,16 @@ export async function getValidAccessToken(
 
   const expiresAt = new Date(row.expires_at).getTime();
   if (expiresAt - Date.now() > 60_000) {
-    return { accessToken: row.access_token, email: row.google_email };
+    return { accessToken: await decryptToken(row.access_token), email: row.google_email };
   }
   if (!row.refresh_token) throw new Error("GOOGLE_NOT_CONNECTED");
 
-  const refreshed = await refreshAccessToken(row.refresh_token);
+  const refreshed = await refreshAccessToken(await decryptToken(row.refresh_token));
   const newExpiry = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
   const { error: updateError } = await supabaseAdmin
     .from("google_oauth_tokens")
     .update({
-      access_token: refreshed.access_token,
+      access_token: await encryptToken(refreshed.access_token),
       expires_at: newExpiry,
       updated_at: new Date().toISOString(),
     })
@@ -423,15 +442,16 @@ export async function storeTokens(params: {
   email: string | null;
 }) {
   const expiresAt = new Date(Date.now() + params.expiresIn * 1000).toISOString();
+  // Both tokens are stored encrypted when GOOGLE_TOKEN_ENCRYPTION_KEY is set (token-crypto.server.ts).
   const update = {
     user_id: params.userId,
     google_email: params.email,
-    access_token: params.accessToken,
+    access_token: await encryptToken(params.accessToken),
     scope: params.scope,
     token_type: params.tokenType,
     expires_at: expiresAt,
     updated_at: new Date().toISOString(),
-    ...(params.refreshToken ? { refresh_token: params.refreshToken } : {}),
+    ...(params.refreshToken ? { refresh_token: await encryptToken(params.refreshToken) } : {}),
   };
 
   const { error } = await supabaseAdmin

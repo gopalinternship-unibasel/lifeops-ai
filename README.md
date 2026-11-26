@@ -12,9 +12,12 @@ MONDAY is a TanStack Start full-stack application (the July 2026 rework of the B
 project) combining:
 
 - Supabase authentication, row-level security, and application storage
-- A Google OAuth connector for Gmail and Google Calendar (with a built-in demo inbox and calendar). The
-  connector was tested against mocked Google APIs, and the hosted demo has no Google OAuth client, so it
-  uses the sample inbox and calendar. MONDAY has no send path: replies are saved as drafts only.
+- A Google OAuth connector for Gmail and Google Calendar (with a built-in demo inbox and calendar). On
+  the Vercel site the Google OAuth client is in Google's testing phase: an account (not a demo session)
+  whose Google address the owner has added as a tester can connect real Gmail and Google Calendar;
+  everyone else uses the sample inbox and calendar. Google tokens are stored encrypted (AES-GCM,
+  `GOOGLE_TOKEN_ENCRYPTION_KEY`), and the site has a privacy page at `/privacy`. MONDAY has no send
+  path: replies are saved as drafts only.
 - An OpenAI-compatible LLM for planning and prioritisation: local Ollama by default on a local run, or
   the original Hugging Face router (`meta-llama/Llama-3.1-8B-Instruct`), OpenAI or Gemini; the hosted
   demo uses Cloudflare Workers AI, and a hosted site without an AI provider says the assistant is not

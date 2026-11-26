@@ -484,6 +484,7 @@ describe("Google connection status (finding 36)", () => {
       scopes: null,
       demoMode: false,
       oauthConfigured: false,
+      oauthTesting: false,
     });
     expect(JSON.stringify(status)).not.toMatch(/GOOGLE_OAUTH_/);
   });
