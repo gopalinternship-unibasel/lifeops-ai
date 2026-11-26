@@ -10,9 +10,10 @@ planner note says so. Without this the proposals could only fail when the user r
 All times are naive local wall-clock times in the user's zone, as in the rest of the planner.
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 
-from app.schemas import BusyInterval, PlannerOutput
+from app.schemas import BusyInterval, PlannerOutput, PlannerTask
 
 DAY_START_HOUR = 8
 DAY_END_HOUR = 20
@@ -49,9 +50,11 @@ def next_free_slot(
     length: timedelta,
     earliest: datetime,
     taken: list[tuple[datetime, datetime]],
+    deadline: datetime | None = None,
 ) -> tuple[datetime, datetime] | None:
     """The first slot of `length` from `earliest` on, between 08:00 and 20:00, that overlaps nothing
-    in `taken`; None when the next SEARCH_DAYS days have none."""
+    in `taken`; None when the next SEARCH_DAYS days have none. With a `deadline` the slot must also
+    end by it."""
     candidate = _round_up(earliest)
     limit = earliest + timedelta(days=SEARCH_DAYS)
     while candidate < limit:
@@ -64,10 +67,62 @@ def next_free_slot(
             candidate = (candidate + timedelta(days=1)).replace(hour=DAY_START_HOUR, minute=0)
             continue
         end = candidate + length
+        if deadline is not None and end > deadline:
+            return None
         if not _overlaps(candidate, end, taken):
             return candidate, end
         candidate += STEP
     return None
+
+
+def latest_free_slot_before(
+    length: timedelta,
+    earliest: datetime,
+    latest_start: datetime,
+    taken: list[tuple[datetime, datetime]],
+    deadline: datetime | None = None,
+) -> tuple[datetime, datetime] | None:
+    """The free slot of `length` that starts closest before `latest_start` (and not before
+    `earliest`), between 08:00 and 20:00 and ending by `deadline`; None when there is none."""
+    best = None
+    candidate = _round_up(earliest)
+    while candidate < latest_start:
+        end = candidate + length
+        in_day = candidate.hour >= DAY_START_HOUR and end <= candidate.replace(hour=DAY_END_HOUR, minute=0)
+        if in_day and (deadline is None or end <= deadline) and not _overlaps(candidate, end, taken):
+            best = (candidate, end)
+        candidate += STEP
+    return best
+
+
+_FILLER_WORDS = {
+    "the", "and", "for", "with", "work", "block", "time", "session", "complete", "finish", "prepare",
+    "your", "task", "tasks", "this", "that", "from", "into", "draft", "email", "reminder", "call",
+}
+
+
+def _stems(text: str) -> set[str]:
+    """Words of a title as their first five letters, so "assignment" and "assignments" match."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return {word[:5] for word in words if len(word) >= 3 and word not in _FILLER_WORDS}
+
+
+def related_deadline(title: str, tasks: list[PlannerTask]) -> datetime | None:
+    """The deadline of the task a block or reminder is about: the task whose title shares the most
+    words with the block's title (the earliest deadline on a tie). None when no task with a
+    deadline shares a word, and then nothing limits the block's new time."""
+    words = _stems(title)
+    best: tuple[int, datetime] | None = None
+    for task in tasks:
+        if task.deadline is None:
+            continue
+        shared = len(words & _stems(task.title))
+        if shared == 0:
+            continue
+        deadline = _naive(task.deadline)
+        if best is None or shared > best[0] or (shared == best[0] and deadline < best[1]):
+            best = (shared, deadline)
+    return best[1] if best else None
 
 
 def keep_clear_of_busy(
@@ -105,9 +160,22 @@ def keep_clear_of_busy(
 
     moved: list[str] = []
     stuck: list[str] = []
+    # Blocks of a task with a deadline stay before it: moves are searched between the start of the
+    # block's own day (or now, if later) and the deadline, earlier slots included.
+    too_late: list[str] = []
     for action, start, end in to_move:
         earliest = max(start, earliest_allowed) if earliest_allowed else start
-        slot = next_free_slot(end - start, earliest, taken)
+        deadline = related_deadline(action.title, plan.tasks)
+        slot = next_free_slot(end - start, earliest, taken, deadline)
+        if slot is None and deadline is not None:
+            window_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            if earliest_allowed:
+                window_start = max(window_start, earliest_allowed)
+            slot = latest_free_slot_before(end - start, window_start, start, taken, deadline)
+            if slot is None:
+                too_late.append(f"'{action.title}'")
+                taken.append((start, end))
+                continue
         if slot is None:
             stuck.append(f"'{action.title}'")
             taken.append((start, end))
@@ -127,4 +195,8 @@ def keep_clear_of_busy(
         notes.append(f"Moved {', '.join(moved)}, because the planned time overlapped your calendar.")
     if stuck:
         notes.append(f"Found no free time in the next week for {', '.join(stuck)}; it overlaps your calendar.")
+    if too_late:
+        notes.append(
+            f"Found no free time before the deadline for {', '.join(too_late)}; it stays where it was and overlaps your calendar."
+        )
     return plan, " ".join(notes) or None

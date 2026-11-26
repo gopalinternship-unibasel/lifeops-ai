@@ -37,7 +37,8 @@ import {
 import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
 import { getErrorMessage, isRecord } from "@/lib/errors";
-import { gateModelCards } from "@/lib/panel-state";
+import { dropEventsAside, mergeWithExisting } from "@/server/ai/priority-merge.server";
+import { gateModelCards, PAST_PROPOSAL_NOTE, startsBeforeNow } from "@/lib/panel-state";
 import {
   addDaysISO,
   formatTimeInZone,
@@ -907,8 +908,8 @@ ${userContext.tasks}`;
       }))
     : mockEmails;
   const unreadTotal = googleConnected ? unreadCount : demoUnreadCount;
-  const briefingByRules = (header?: string) =>
-    buildRuleBasedBriefing({ emails: briefingEmails, unreadCount: unreadTotal, todayEvents, timeZone, reason: "", header, inboxUnavailable });
+  const briefingByRules = (header?: string, inviteAiRanking?: boolean) =>
+    buildRuleBasedBriefing({ emails: briefingEmails, unreadCount: unreadTotal, todayEvents, timeZone, reason: "", header, inboxUnavailable, inviteAiRanking });
 
   if (firstBriefing && !googleConnected) {
     // The demo's automatic first-visit briefing is put together by rules from the demo inbox and
@@ -918,7 +919,7 @@ ${userContext.tasks}`;
     // the user asks for by typing goes to the model as usual.
     ruleBased = true;
     rulePriorities = true;
-    parsed = briefingByRules(DEMO_BRIEFING_HEADER);
+    parsed = briefingByRules(DEMO_BRIEFING_HEADER, true);
   } else if (firstBriefing && limitMessage) {
     // Over the limit: the model is not asked, and the header says why (it used to say that the
     // AI model "did not answer").
@@ -1088,9 +1089,18 @@ ${userContext.tasks}`;
   // 6. Sync tasks if priorities returned
   let priorities: PriorityRow[] | undefined;
   if (normalizedPriorities.length > 0) {
-    priorities = normalizedPriorities;
     // The new list goes in before the old one is deleted (see removeOldTasks).
-    const oldTaskIds = await currentTaskIds(userId);
+    const oldTasks = await currentTasks(userId);
+    const oldTaskIds = oldTasks.map((task) => task.id);
+    // A list typed in chat does not replace the inbox and calendar priorities: they stay below it.
+    const merged = rulePriorities
+      ? { priorities: normalizedPriorities, kept: [] }
+      : mergeWithExisting(
+          normalizedPriorities,
+          oldTasks.map((task) => ({ rank: task.priority_rank, title: task.title, reason: task.reason ?? "", source: task.source })),
+        );
+    priorities = merged.priorities;
+    const keptSource = new Map(merged.kept.map((task) => [task.title, task.source]));
 
     const { error: insertTasksError } = await store.from("tasks").insert(
       priorities.map((priority) => ({
@@ -1100,7 +1110,7 @@ ${userContext.tasks}`;
         title: priority.title.slice(0, 300),
         priority_rank: priority.rank,
         reason: priority.reason.slice(0, 1000),
-        source: rulePriorities ? "rules" : "chat",
+        source: keptSource.get(priority.title) ?? (rulePriorities ? "rules" : "chat"),
       })),
     );
     if (insertTasksError) throw dbError("save your priorities", insertTasksError);
@@ -1153,13 +1163,19 @@ ${userContext.tasks}`;
   for (const event of pendingEvents) {
     const notes: string[] = [];
     const conflicts = findConflicts(event, busyEvents);
-    if (conflicts.length > 0)
-      notes.push(
-        `overlaps ${conflicts
-          .map((c) => `"${c.title}"`)
-          .slice(0, 2)
-          .join(", ")}: Save will be refused`,
-      );
+    if (conflicts.length > 0) {
+      const names = conflicts
+        .map((c) => `"${c.title}"`)
+        .slice(0, 2)
+        .join(", ");
+      notes.push(`overlaps ${names}: Save will be refused`);
+      event.refusal = `This time overlaps ${names}.`;
+    }
+    // A start that is already over cannot be saved (Save refuses it), so no Save is offered.
+    if (startsBeforeNow(event.starts_at)) {
+      notes.push(PAST_PROPOSAL_NOTE);
+      event.refusal = "This time is already over.";
+    }
     // A new event with the title of one already in the calendar adds a second one; it does not
     // move the existing one (the reply says so, so the card cannot be mistaken for a move).
     // (Not when the same turn offers to cancel that one: "Cancel the dentist appointment and
@@ -1241,7 +1257,12 @@ ${userContext.tasks}`;
       "Here is your briefing.";
   } else {
     replyText = composeReply({
-      modelReply: dayAnswer?.reply ?? String(parsed.reply ?? ""),
+      modelReply: dropEventsAside(
+        dayAnswer?.reply ?? String(parsed.reply ?? ""),
+        // The model's own list: the earlier items kept below it are not what the reply describes.
+        normalizedPriorities,
+        [...todayEvents, ...upcomingEvents].map((e) => e.title),
+      ),
       timeZone,
       pendingEvents,
       pendingEventChanges,
@@ -1780,10 +1801,18 @@ export function checkDayAnswer(opts: {
 }
 
 /** The ids of the user's tasks before a new list is stored. */
-async function currentTaskIds(userId: string): Promise<string[]> {
-  const { data, error } = await store.from("tasks").select("id").eq("user_id", userId);
+async function currentTasks(
+  userId: string,
+): Promise<{ id: string; title: string; priority_rank: number; reason: string | null; source: string | null }[]> {
+  const { data, error } = await store.from("tasks").select("id, title, priority_rank, reason, source").eq("user_id", userId);
   if (error) throw dbError("save your priorities", error);
-  return (data ?? []).map((row) => row.id);
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    title: String(row.title ?? ""),
+    priority_rank: Number(row.priority_rank ?? 0),
+    reason: row.reason ?? null,
+    source: row.source ?? null,
+  }));
 }
 
 /**

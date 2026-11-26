@@ -281,6 +281,10 @@ describe("the demo's first-visit briefing (47, 99)", () => {
     expect(result.reply).toContain("**📬 Inbox (4 unread)**");
     expect(result.reply).toContain("7:00 PM – 8:00 PM Team sync — demo walkthrough");
     expect(result.reply).not.toMatch(/did not answer|did not match/);
+    // A quick summary that invites the assistant's own ranking (L4).
+    expect(result.reply).toContain("This is a quick summary");
+    expect(result.reply).toContain("for the assistant's own ranking");
+    expect(result.reply).not.toContain("ranked by rule");
     // The team sync and Alicia's email about it are one priority.
     expect(result.panel.priorities?.filter((p) => /team sync/i.test(p.title))).toHaveLength(1);
     expect(db.rows("tasks").every((task) => task.source === "rules")).toBe(true);
@@ -543,7 +547,8 @@ describe("priorities replace the task list safely (89)", () => {
     expect(db.rows("tasks").map((task) => task.title)).toEqual(["A", "B"]);
 
     await runChatTurn(context, { sessionId: SESSION, message: "Rank my tasks", timeZone: ZRH });
-    expect(db.rows("tasks").map((task) => task.title)).toEqual(["X"]);
+    // X names none of the earlier items, so A and B stay below it instead of being replaced.
+    expect(db.rows("tasks").map((task) => task.title)).toEqual(["X", "A", "B"]);
   });
 });
 
@@ -841,5 +846,82 @@ describe("the first chat session (89)", () => {
     const result = await ensureChatSessionFor(racing as unknown as SupabaseClient<Database>, USER);
     expect(result.sessionId).toBe("s-other");
     expect(db.rows("chat_sessions").map((row) => row.id)).toEqual(["s-other"]);
+  });
+});
+
+describe("a proposal for a time that is already over (L1, L6)", () => {
+  it("is marked as over and carries a refusal, so no Save is offered; a later time is not", async () => {
+    // 09:00 UTC is 10:00 in Zurich: 08:00-09:00 local is over, 15:00-16:00 is ahead.
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Reading is blocked.",
+      proposed_events: [
+        { title: "Reading", starts_at: "2026-11-24T08:00:00", ends_at: "2026-11-24T09:00:00" },
+        { title: "Writing", starts_at: "2026-11-24T15:00:00", ends_at: "2026-11-24T16:00:00" },
+      ],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Block 8 to 9 am today for reading and 3 to 4 pm for writing", timeZone: ZRH });
+    const cards = result.panel.pendingEvents ?? [];
+    const reading = cards.find((card) => card.title === "Reading");
+    const writing = cards.find((card) => card.title === "Writing");
+    expect(reading?.refusal).toBe("This time is already over.");
+    expect(result.reply).toMatch(/already over/);
+    expect(writing?.refusal).toBeUndefined();
+  });
+
+  it("a card that overlaps an event says so on the card, as well as in the reply", async () => {
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Done.",
+      proposed_events: [{ title: "Gym", starts_at: "2026-11-24T19:00:00", ends_at: "2026-11-24T20:00:00" }],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Block 7 to 8 pm today for the gym", timeZone: ZRH });
+    expect(result.panel.pendingEvents?.[0]?.refusal).toMatch(/overlaps .*Team sync/);
+  });
+});
+
+describe("ranking a list typed in chat keeps the inbox and calendar priorities (L5)", () => {
+  it("puts the typed items first and keeps the earlier ones below, once each", async () => {
+    db.rows("tasks").push(
+      { id: "old-1", user_id: USER, title: "Prepare for Acme onsite interview", priority_rank: 1, reason: "High importance", source: "rules" },
+      { id: "old-2", user_id: USER, title: "Team sync — demo walkthrough", priority_rank: 2, reason: "Tonight", source: "rules" },
+    );
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Here's your ranked list (today's events first, then tasks by importance): renew passport first.",
+      priorities: [
+        { rank: 1, title: "Renew passport", reason: "Takes weeks" },
+        { rank: 2, title: "Buy groceries", reason: "Low" },
+      ],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Rank these: renew passport, buy groceries", timeZone: ZRH });
+    expect(result.panel.priorities?.map((p) => [p.rank, p.title])).toEqual([
+      [1, "Renew passport"],
+      [2, "Buy groceries"],
+      [3, "Prepare for Acme onsite interview"],
+      [4, "Team sync — demo walkthrough"],
+    ]);
+    expect(db.rows("tasks").map((task) => task.title).sort()).toEqual([
+      "Buy groceries",
+      "Prepare for Acme onsite interview",
+      "Renew passport",
+      "Team sync — demo walkthrough",
+    ]);
+    // The reply lists no event, so it no longer says that events come first.
+    expect(result.reply).not.toMatch(/events first/);
+  });
+
+  it("a re-rank that names the earlier items replaces the list, as before", async () => {
+    db.rows("tasks").push(
+      { id: "old-1", user_id: USER, title: "Prepare for Acme onsite interview", priority_rank: 1, reason: "", source: "rules" },
+      { id: "old-2", user_id: USER, title: "Write research paper final draft", priority_rank: 2, reason: "", source: "rules" },
+    );
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Swapped.",
+      priorities: [
+        { rank: 1, title: "Write research paper final draft", reason: "Due soon" },
+        { rank: 2, title: "Prepare for Acme onsite interview", reason: "Monday" },
+      ],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Make the paper priority over the interview", timeZone: ZRH });
+    expect(result.panel.priorities?.map((p) => p.title)).toEqual(["Write research paper final draft", "Prepare for Acme onsite interview"]);
+    expect(db.rows("tasks")).toHaveLength(2);
   });
 });

@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ArrowUp } from "lucide-react";
 
 const DEFAULT_SUGGESTIONS = [
@@ -7,6 +7,24 @@ const DEFAULT_SUGGESTIONS = [
   "Block 3–5 pm gym push workout",
   "What about my evening?",
 ];
+
+/** The box's hint below the sm breakpoint (640 px), where the full one is cut off on its second line. */
+export const SHORT_PLACEHOLDER = "Ask MONDAY anything…";
+export const LONG_PLACEHOLDER = "Ask MONDAY anything — schedule a block, reorder priorities, plan a meal…";
+
+/** True from the sm breakpoint up; true before the first look at the screen (the server's render). */
+function useWideScreen(): boolean {
+  const [wide, setWide] = useState(true);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 640px)");
+    const update = () => setWide(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
+  return wide;
+}
 
 /** The workspace chat accepts 4,000 characters per message (processChat). */
 export const CHAT_MESSAGE_MAX = 4000;
@@ -30,6 +48,7 @@ export function ChatComposer({
   const [value, setValue] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
   const limitId = useId();
+  const wide = useWideScreen();
 
   const tooLong = value.length > maxLength;
   const nearLimit = value.length >= maxLength * 0.9;
@@ -93,7 +112,7 @@ export function ChatComposer({
             aria-describedby={nearLimit ? limitId : undefined}
             rows={1}
             className="w-full resize-none bg-transparent px-4 py-3 pr-14 text-sm focus:outline-none max-h-40"
-            placeholder={placeholder ?? "Ask MONDAY anything — schedule a block, reorder priorities, plan a meal…"}
+            placeholder={placeholder ?? (wide ? LONG_PLACEHOLDER : SHORT_PLACEHOLDER)}
           />
           <button
             type="submit"

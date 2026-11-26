@@ -3,6 +3,7 @@ import { getRequest } from "@tanstack/react-start/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { parseInput } from "@/lib/validation";
+import { PAST_START_MESSAGE, startsBeforeNow } from "@/lib/panel-state";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import {
   deleteCalendarEvent,
@@ -352,6 +353,11 @@ export const saveCalendarEvent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => parseInput(CalendarEventSchema, d))
   .handler(async ({ context, data }) => {
+    // A start that is already over is refused before the card is claimed, so the card stays
+    // as it was (the same sentence as the plan page's).
+    if (startsBeforeNow(data.starts_at)) {
+      return { ok: false, event: null, alreadyHandled: false, error: PAST_START_MESSAGE };
+    }
     // A card is saved once: a second click, a second tab or a reloaded page gets a clear
     // answer instead of a second event (or a conflict with the first one).
     if (data.cardId) {

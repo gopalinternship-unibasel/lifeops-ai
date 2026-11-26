@@ -12,7 +12,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Loader2, LogOut } from "lucide-react";
+import { Loader2, LogOut, User } from "lucide-react";
 
 export const Route = createFileRoute("/app")({
   component: AppLayout,
@@ -108,6 +108,16 @@ function AppLayout() {
               keeps it where it was. The extra 8 px on the left stays inside the header's gap-2,
               which is never narrower than 8 px, and on the right inside its 12 px px-3, so the
               tap area never covers the nav. */}
+          {/* Profile is the last link in the scrolling nav and is out of view on a phone: from
+              sm up the nav shows it, below sm this icon is the way to it. */}
+          <Link
+            to="/app/profile"
+            aria-label="Profile"
+            title="Profile"
+            className="-m-2 p-2 sm:hidden inline-flex items-center text-muted-foreground hover:text-foreground transition"
+          >
+            <User className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
           <button
             type="button"
             onClick={() => {

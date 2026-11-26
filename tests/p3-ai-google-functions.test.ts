@@ -161,6 +161,7 @@ import {
   getGoogleOAuthUrl,
   listMyCalendar,
   removeCalendarEvent,
+  saveCalendarEvent,
   saveGmailDraft,
   updateCalendarEvent,
 } from "@/functions/google.functions";
@@ -676,5 +677,28 @@ describe("reply suggestions use the shared AI allowance (finding 45)", () => {
     mocks.callAI.mockResolvedValueOnce(answer([{ type: "text", text: "x" }]));
     const result = await draftReplySuggestion({ data: { messageId: "e1" } });
     expect(result).toMatchObject({ ok: false, error: "Empty AI response" });
+  });
+});
+
+describe("Save refuses an event that starts before now (L1)", () => {
+  const ago = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+  it("answers with a plain sentence, leaves the card unclaimed and writes nothing", async () => {
+    const result = await saveCalendarEvent({
+      data: { cardId: "pending-past", title: "Reading", starts_at: ago(-3 * 3_600_000), ends_at: ago(-2 * 3_600_000) },
+    });
+    expect(result).toMatchObject({ ok: false, event: null, alreadyHandled: false });
+    expect(result.error).toBe("That start time is already over. Pick a start later than now.");
+    expect(mocks.claimCard).not.toHaveBeenCalled();
+    expect(mocks.createCalendarBlock).not.toHaveBeenCalled();
+  });
+
+  it("still saves a start later than now", async () => {
+    mocks.createCalendarBlock.mockResolvedValue({ id: "ev-new", provider: "demo_calendar" });
+    const result = await saveCalendarEvent({
+      data: { cardId: "pending-ahead", title: "Reading", starts_at: ago(3_600_000), ends_at: ago(2 * 3_600_000) },
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(mocks.createCalendarBlock).toHaveBeenCalledTimes(1);
   });
 });

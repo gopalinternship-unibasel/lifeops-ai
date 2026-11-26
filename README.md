@@ -12,11 +12,13 @@ MONDAY is a TanStack Start full-stack application (the July 2026 rework of the B
 project) combining:
 
 - Supabase authentication, row-level security, and application storage
-- A Google OAuth connector for Gmail and Google Calendar (with a built-in demo inbox and calendar)
+- A Google OAuth connector for Gmail and Google Calendar (with a built-in demo inbox and calendar). The
+  connector was tested against mocked Google APIs, and the hosted demo has no Google OAuth client, so it
+  uses the sample inbox and calendar. MONDAY has no send path: replies are saved as drafts only.
 - An OpenAI-compatible LLM for planning and prioritisation: local Ollama by default on a local run, or
-  the original Hugging Face router (`meta-llama/Llama-3.1-8B-Instruct`), OpenAI, Gemini or the Lovable
-  gateway; the hosted demo uses Cloudflare Workers AI, and a hosted site without an AI provider says the
-  assistant is not set up instead of trying a local model
+  the original Hugging Face router (`meta-llama/Llama-3.1-8B-Instruct`), OpenAI or Gemini; the hosted
+  demo uses Cloudflare Workers AI, and a hosted site without an AI provider says the assistant is not
+  set up instead of trying a local model
 - A FastAPI planner service (`fastapi-backend/`) behind the productivity dashboard
 - A React/Tailwind workspace for inbox, calendar, weekly planning, dashboard and profile management
 

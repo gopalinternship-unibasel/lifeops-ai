@@ -2,7 +2,7 @@
  * Pure helpers for the workspace's context panel (shared by the route, the chat turn on the
  * server and the unit tests).
  */
-import type { CardState, InsightCard, PanelPayload, PendingEventChange, ScheduleBlock } from "@/types/panel";
+import type { CardState, InsightCard, PanelPayload, PendingEvent, PendingEventChange, ScheduleBlock } from "@/types/panel";
 
 export type PanelTab = "priorities" | "schedule" | "insights";
 export type Alternatives = { title: string; bullets: string[] };
@@ -16,6 +16,41 @@ export function isToday(block: { starts_at: string; ends_at: string }, now: Date
   const s = Date.parse(block.starts_at);
   const e = Date.parse(block.ends_at);
   return Number.isFinite(s) && Number.isFinite(e) && s < end.getTime() && e > start.getTime();
+}
+
+/** What a refused save of an event whose start is before now says (the same words as the plan page). */
+export const PAST_START_MESSAGE = "That start time is already over. Pick a start later than now.";
+/** The short note on a proposal whose start is before now. */
+export const PAST_PROPOSAL_NOTE = "this time is already over, so it cannot be saved";
+
+/** Whether an event starts before `nowMs` (an unreadable time is not treated as over). */
+export function startsBeforeNow(startsAt: string, nowMs: number = Date.now()): boolean {
+  const start = Date.parse(startsAt);
+  return Number.isFinite(start) && start < nowMs;
+}
+
+/**
+ * Why a proposed event cannot be saved: the server's own reason (a known overlap), or a start
+ * that is over by now (the page checks again at every render, because time passes after the
+ * proposal was made). Null when Save is offered.
+ */
+export function proposalRefusal(event: Pick<PendingEvent, "starts_at" | "refusal">, nowMs: number = Date.now()): string | null {
+  if (startsBeforeNow(event.starts_at, nowMs)) return "This time is already over.";
+  return event.refusal ?? null;
+}
+
+/** The "Today" tab's count: today's events plus the proposals and changes that are for today. */
+export function todayTabCount(
+  schedule: ScheduleBlock[],
+  pendingEvents: Pick<PendingEvent, "starts_at" | "ends_at">[],
+  pendingEventChanges: PendingEventChange[],
+  now: Date = new Date(),
+): number {
+  return (
+    schedule.length +
+    pendingEvents.filter((event) => isToday(event, now)).length +
+    pendingEventChanges.filter((change) => isToday(change.original, now)).length
+  );
 }
 
 /**

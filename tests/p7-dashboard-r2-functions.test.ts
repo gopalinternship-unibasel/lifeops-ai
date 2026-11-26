@@ -203,6 +203,23 @@ describe("the dashboard's calendar reads (39)", () => {
   });
 });
 
+describe("'Next 7 days' starts at now (L7)", () => {
+  it("does not list or count an event that is over, and keeps one that is running", async () => {
+    // Wednesday 25 Nov 2026, 10:00 in Zurich.
+    vi.setSystemTime(Date.parse("2026-11-25T09:00:00Z"));
+    mocks.isGoogleConnected.mockResolvedValue(false);
+    const event = (title: string, startIso: string, endIso: string) => ({ id: title, title, starts_at: startIso, ends_at: endIso });
+    mocks.listBusyEvents.mockImplementation(async () => [
+      event("Over", "2026-11-25T07:00:00.000Z", "2026-11-25T08:00:00.000Z"),
+      event("Running", "2026-11-25T08:30:00.000Z", "2026-11-25T09:30:00.000Z"),
+      event("Later", "2026-11-25T15:00:00.000Z", "2026-11-25T16:00:00.000Z"),
+    ]);
+    const answer = await fetchDashboard({ data: { timeZone: ZRH } });
+    expect(answer.workspace.upcoming.map((e) => e.title)).toEqual(["Running", "Later"]);
+    expect(answer.workspace.eventsNext7Days).toBe(2);
+  });
+});
+
 describe("the AI badge's 'local model' mark (12)", () => {
   it("uses the server's isLocalBaseUrl, so a model in Docker on this machine counts as local", async () => {
     vi.setSystemTime(Date.parse("2026-11-25T09:00:00Z"));

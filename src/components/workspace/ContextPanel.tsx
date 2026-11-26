@@ -6,7 +6,7 @@ import { saveCalendarEvent, saveGmailDraft, updateCalendarEvent, removeCalendarE
 import { toast } from "sonner";
 import { getVisitorErrorMessage } from "@/lib/errors";
 import { getBrowserTimeZone } from "@/lib/date";
-import { uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
+import { proposalRefusal, todayTabCount, uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
 
 type Tab = PanelTab;
 
@@ -85,7 +85,7 @@ export function ContextPanel({
 
       <div role="tablist" aria-label="Context panel" onKeyDown={onTabKey} className="px-2 pt-2 border-b border-border flex gap-1">
         <TabBtn {...tabProps("priorities")} icon={<ListChecks className="h-3.5 w-3.5" aria-hidden="true" />} count={priorities.length}>Priorities</TabBtn>
-        <TabBtn {...tabProps("schedule")} icon={<Calendar className="h-3.5 w-3.5" aria-hidden="true" />} count={schedule.length + pendingEvents.length + pendingEventChanges.length}>Today</TabBtn>
+        <TabBtn {...tabProps("schedule")} icon={<Calendar className="h-3.5 w-3.5" aria-hidden="true" />} count={todayTabCount(schedule, pendingEvents, pendingEventChanges)}>Today</TabBtn>
         <TabBtn {...tabProps("insights")} icon={<Sparkles className="h-3.5 w-3.5" aria-hidden="true" />} count={insightsCount}>Insights</TabBtn>
       </div>
 
@@ -318,7 +318,10 @@ function PendingChangeCard({ change, onApplied, onDismiss }: { change: PendingEv
 
 export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent; onSaved: (id: string, ev: ScheduleBlock) => void; onDismiss: DismissHandler }) {
   const [busy, setBusy] = useState(false);
+  // A card that already says Save will be refused (a known overlap, or a time that is over) offers no Save.
+  const refusal = proposalRefusal(ev);
   async function save() {
+    if (refusal) return;
     setBusy(true);
     try {
       const r = await saveCalendarEvent({ data: { cardId: ev.id, title: ev.title, starts_at: ev.starts_at, ends_at: ev.ends_at, notes: ev.notes ?? undefined, timeZone: getBrowserTimeZone() } });
@@ -339,8 +342,9 @@ export function PendingEventCard({ ev, onSaved, onDismiss }: { ev: PendingEvent;
         <div className="font-mono text-[11px] text-amber-800 whitespace-nowrap">{fmtDayPrefix(ev.starts_at)}{fmtTime(ev.starts_at)}–{fmtTime(ev.ends_at)}</div>
       </div>
       {ev.notes && <div className="text-[11px] text-amber-900/80 mt-1">{ev.notes}</div>}
+      {refusal && <div role="note" className="text-[11px] font-medium text-red-800 mt-1">{refusal} Save is off for this proposal.</div>}
       <div className="mt-2.5 flex gap-2">
-        <button onClick={save} disabled={busy}
+        <button onClick={save} disabled={busy || Boolean(refusal)} title={refusal ?? undefined}
           className="inline-flex items-center gap-1.5 rounded-md bg-gradient-brand px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-95 disabled:opacity-60">
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />} Save to Calendar
         </button>

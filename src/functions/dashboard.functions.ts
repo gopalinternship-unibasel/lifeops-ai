@@ -171,7 +171,10 @@ export const fetchDashboard = createServerFn({ method: "POST" })
     const timeZone = normalizeTimeZone(data?.timeZone);
     const today = todayInTimeZone(timeZone);
     const monday = mondayOfISODate(today);
-    // "Next 7 days" runs from today; the plan's week from Monday.
+    // The calendar is read for "next 7 days" from the start of today and for the plan's week from
+    // Monday; the list and the count start at now (below), so an event that is over is neither
+    // listed nor counted, and one that is running now stays.
+    const nowIso = new Date().toISOString();
     const from = zonedDateTimeToISO(today, { hour: 0 }, timeZone);
     const to = zonedDateTimeToISO(addDaysISO(today, 7), { hour: 0 }, timeZone);
     const weekStart = zonedDateTimeToISO(monday, { hour: 0 }, timeZone);
@@ -192,7 +195,7 @@ export const fetchDashboard = createServerFn({ method: "POST" })
       console.error("[lifeops] dashboard: calendar read failed", error);
       calendarError = "Your calendar could not be loaded right now. Please try again in a moment.";
     }
-    const upcoming = overlapping(nextDays, from, to).map((event) => ({
+    const upcoming = overlapping(nextDays, nowIso, to).map((event) => ({
       title: event.title,
       starts_at: event.starts_at,
       ends_at: event.ends_at,

@@ -123,6 +123,9 @@ export function isSameCommitment(event: BriefingEvent, email: BriefingEmail, tim
   return times.size === 0 || times.has(localClock(event.starts_at, timeZone));
 }
 
+/** The message the demo's briefing suggests for the assistant's own ranking (also a chip in the chat box). */
+export const AI_RANKING_PROMPT = "Look into my calendar and tell me priorities";
+
 export function buildRuleBasedBriefing(opts: {
   emails: BriefingEmail[];
   unreadCount: number;
@@ -135,6 +138,12 @@ export function buildRuleBasedBriefing(opts: {
   header?: string;
   /** Say that the priorities on the right are ranked by rule (default true). */
   prioritiesNote?: boolean;
+  /**
+   * Word the priorities line as a quick summary and invite the assistant's own ranking (the demo's
+   * first briefing, where the model is available but is not asked, to save the shared allowance).
+   * Not for a briefing written because the model could not be used.
+   */
+  inviteAiRanking?: boolean;
   /**
    * The unread emails could not be fetched (a Gmail error). The briefing says so instead of
    * "No unread emails — inbox is clear.", which it stated as a fact after a failed fetch.
@@ -182,7 +191,9 @@ export function buildRuleBasedBriefing(opts: {
   if (opts.prioritiesNote !== false) {
     lines.push(
       "",
-      "Priorities are on the right, ranked by rule: today's remaining events by length, then the tasks in your emails by importance.",
+      opts.inviteAiRanking
+        ? `This is a quick summary: the priorities on the right are a first order by simple rules (today's remaining events by length, then the tasks in your emails by importance). Ask "${AI_RANKING_PROMPT}" for the assistant's own ranking.`
+        : "Priorities are on the right, ranked by rule: today's remaining events by length, then the tasks in your emails by importance.",
     );
   }
 

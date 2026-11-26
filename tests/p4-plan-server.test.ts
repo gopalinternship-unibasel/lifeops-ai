@@ -224,7 +224,9 @@ vi.mock("@/server/google/calendar.server", () => ({
     throw new Error("Google is not connected in these tests");
   }),
 }));
-vi.mock("@/server/connectors/calendar.mock", () => ({
+vi.mock("@/server/connectors/calendar.mock", async (importOriginal) => ({
+  // The demo inbox (gmail.mock) reads demoSeedEvents from this module, so keep the real exports.
+  ...(await importOriginal<typeof import("@/server/connectors/calendar.mock")>()),
   ensureSeedEvents: vi.fn(async () => undefined),
   listEventsForRange: vi.fn(
     async (_client: unknown, _userId: string, fromIso: string, toIso: string) => {
@@ -1565,5 +1567,43 @@ describe("two approvals at the same time (findings 58, 39)", () => {
     expect(h.tables.get("weekly_plans")?.[0]?.approved_event_ids).toEqual(
       h.calendar.events.map((event) => event.id),
     );
+  });
+});
+
+describe("the inbox's tasks and the limit of items per day (L3)", () => {
+  it("puts the inbox tasks, their importance and deadlines into the prompt, with the rule", async () => {
+    mockedCallAI.mockResolvedValue(
+      answerDays(week({ [WED]: [{ emoji: "🎯", title: "Focus", start: "10:00", end: "11:00" }] })),
+    );
+    await generate({ weekStart: MONDAY });
+    const system = String(mockedCallAI.mock.calls[0][0].messages[0].content);
+    expect(system).toContain("INBOX TASKS (read from the user's inbox");
+    expect(system).toMatch(/- \[high\] Write research paper final draft \(due \d{4}-\d{2}-\d{2} 17:00\)/);
+    expect(system).toMatch(/- \[high\] Prepare for Acme onsite interview \(due /);
+    expect(system).toContain("schedule a work item for every [high] task in a free slot BEFORE its deadline");
+  });
+
+  it("keeps each day of a fresh draft to its limit and drops the filler first", async () => {
+    mockedCallAI.mockResolvedValue(
+      answerDays(
+        week({
+          [WED]: [
+            { emoji: "☕", title: "Afternoon snack", start: "15:00", end: "15:30" },
+            { emoji: "🎯", title: "Deep work", start: "09:00", end: "11:00" },
+            { emoji: "🎬", title: "Movie or show", start: "20:00", end: "21:30" },
+            { emoji: "📚", title: "Study block", start: "13:00", end: "14:30" },
+            { emoji: "🚶", title: "Evening walk", start: "18:00", end: "18:30" },
+            { emoji: "☕", title: "Evening break", start: "19:00", end: "19:20" },
+          ],
+        }),
+      ),
+    );
+    const result = await generate({ weekStart: MONDAY });
+    const titles = storedPlan().days[2].items.map((item) => item.title);
+    expect(titles).toHaveLength(4);
+    expect(titles).toEqual(expect.arrayContaining(["Deep work", "Study block"]));
+    expect(titles).not.toContain("Afternoon snack");
+    expect(titles).not.toContain("Evening break");
+    expect(result.reply).toMatch(/2 extra items were left out/);
   });
 });

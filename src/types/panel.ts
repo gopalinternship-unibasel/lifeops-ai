@@ -1,7 +1,11 @@
 // Shared panel types between server and client
 export interface PriorityRow { rank: number; title: string; reason: string; }
 export interface ScheduleBlock { title: string; starts_at: string; ends_at: string; notes?: string | null; }
-export interface PendingEvent extends ScheduleBlock { id: string; }
+export interface PendingEvent extends ScheduleBlock {
+  id: string;
+  /** Why Save would be refused (a known overlap, or a time that is over); the card then offers no Save. */
+  refusal?: string;
+}
 export interface PendingEventChange {
   id: string;
   kind: "update" | "delete";

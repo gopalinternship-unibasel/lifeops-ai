@@ -90,7 +90,7 @@ function LoginPage() {
         options: { data: { name: "Demo User" } },
       });
       if (error) throw error;
-      toast.success("Welcome to the private MONDAY demo");
+      toast.success("Welcome to your own copy of the MONDAY demo");
       navigate({ to: "/app" });
     } catch (err: unknown) {
       navigatingRef.current = false;

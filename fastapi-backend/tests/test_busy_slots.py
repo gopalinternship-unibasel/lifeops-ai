@@ -143,3 +143,86 @@ def test_moved_blocks_never_start_in_the_past_or_outside_the_day_window():
     moved = plan.actions[0]
     # 20:00 is the latest end, so the two-hour block goes to the next morning at 08:00.
     assert (moved.start_time, moved.end_time) == (datetime(2026, 11, 25, 8), datetime(2026, 11, 25, 10))
+
+
+# --- blocks of a task with a deadline stay before that deadline -----------------------------
+
+from app.schemas import PlannerTask  # noqa: E402
+from app.services.busy_slots import latest_free_slot_before, related_deadline  # noqa: E402
+
+
+def _assignments_plan(block_start: str, block_end: str, deadline: str) -> PlannerOutput:
+    return PlannerOutput(
+        summary="Plan",
+        tasks=[PlannerTask(title="Complete two assignments", deadline=datetime.fromisoformat(deadline))],
+        actions=[_block("Assignment Deep Work", block_start, block_end)],
+    )
+
+
+def test_a_block_moves_to_a_free_slot_before_its_tasks_deadline_not_after_it():
+    # Friday 27 Nov 11:59 is the deadline; the block was planned on top of a Thursday lecture, and
+    # the rest of Thursday is busy after it. Thursday morning is free: the old search went on to
+    # Monday, after the deadline.
+    plan = _assignments_plan("2026-11-26T14:00:00", "2026-11-26T16:00:00", "2026-11-27T11:59:00")
+    busy = [
+        BusyInterval(title="Lecture", start="2026-11-26T13:00:00", end="2026-11-26T20:00:00"),
+        BusyInterval(title="Away", start="2026-11-27T08:00:00", end="2026-12-01T09:00:00"),
+    ]
+    plan, note = keep_clear_of_busy(plan, busy, datetime(2026, 11, 26, 7, 0))
+    block = plan.actions[0]
+    assert block.end_time <= datetime(2026, 11, 27, 11, 59)
+    assert (block.start_time, block.end_time) == (datetime(2026, 11, 26, 11, 0), datetime(2026, 11, 26, 13, 0))
+    assert note and "Moved 'Assignment Deep Work'" in note
+
+
+def test_an_earlier_slot_is_not_used_before_now():
+    plan = _assignments_plan("2026-11-26T14:00:00", "2026-11-26T16:00:00", "2026-11-27T11:59:00")
+    busy = [BusyInterval(title="Lecture", start="2026-11-26T13:00:00", end="2026-11-26T20:00:00")]
+    # It is 12:00 on Thursday: 08:00-11:00 is over, and 12:00-13:00 is too short for two hours, so
+    # the block goes to Friday morning, still before the deadline.
+    plan, note = keep_clear_of_busy(plan, busy, datetime(2026, 11, 26, 12, 0))
+    block = plan.actions[0]
+    assert (block.start_time, block.end_time) == (datetime(2026, 11, 27, 8, 0), datetime(2026, 11, 27, 10, 0))
+
+
+def test_with_no_free_time_before_the_deadline_the_block_stays_and_the_note_says_so():
+    plan = _assignments_plan("2026-11-26T14:00:00", "2026-11-26T16:00:00", "2026-11-27T11:59:00")
+    busy = [BusyInterval(title="Conference", start="2026-11-26T00:00:00", end="2026-11-28T00:00:00")]
+    plan, note = keep_clear_of_busy(plan, busy, datetime(2026, 11, 26, 7, 0))
+    block = plan.actions[0]
+    assert (block.start_time, block.end_time) == (datetime(2026, 11, 26, 14), datetime(2026, 11, 26, 16))
+    assert note and "no free time before the deadline" in note
+
+
+def test_a_block_with_no_related_task_deadline_moves_forward_as_before():
+    plan = PlannerOutput(
+        summary="Plan",
+        tasks=[PlannerTask(title="Renew passport", deadline=datetime(2026, 11, 27, 9, 0))],
+        actions=[_block("Gym", "2026-11-26T14:00:00", "2026-11-26T15:00:00")],
+    )
+    busy = [BusyInterval(title="Lecture", start="2026-11-26T13:00:00", end="2026-11-26T20:00:00")]
+    plan, note = keep_clear_of_busy(plan, busy, datetime(2026, 11, 26, 7, 0))
+    assert plan.actions[0].start_time == datetime(2026, 11, 27, 8, 0)
+    assert note and "Moved 'Gym'" in note
+
+
+def test_related_deadline_matches_words_and_ignores_tasks_without_a_deadline():
+    tasks = [
+        PlannerTask(title="Call the bank", deadline=datetime(2026, 11, 27, 17, 0)),
+        PlannerTask(title="Complete two assignments", deadline=None),
+        PlannerTask(title="Finish the assignments report", deadline=datetime(2026, 11, 27, 11, 59)),
+    ]
+    assert related_deadline("Assignment Deep Work", tasks) == datetime(2026, 11, 27, 11, 59)
+    assert related_deadline("Call the Bank", tasks) == datetime(2026, 11, 27, 17, 0)
+    assert related_deadline("Gym", tasks) is None
+
+
+def test_next_free_slot_with_a_deadline_returns_none_when_the_slot_would_end_after_it():
+    assert next_free_slot(timedelta(hours=2), datetime(2026, 11, 26, 9, 0), [], datetime(2026, 11, 26, 10, 30)) is None
+    assert next_free_slot(timedelta(hours=2), datetime(2026, 11, 26, 9, 0), [], datetime(2026, 11, 26, 11, 0)) == (
+        datetime(2026, 11, 26, 9, 0),
+        datetime(2026, 11, 26, 11, 0),
+    )
+    assert latest_free_slot_before(
+        timedelta(hours=1), datetime(2026, 11, 26, 0, 0), datetime(2026, 11, 26, 14, 0), [(datetime(2026, 11, 26, 12, 0), datetime(2026, 11, 26, 14, 0))]
+    ) == (datetime(2026, 11, 26, 11, 0), datetime(2026, 11, 26, 12, 0))
