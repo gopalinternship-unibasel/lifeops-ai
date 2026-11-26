@@ -33,6 +33,7 @@ import { isHostedDeployment } from "@/server/deployment.server";
 import type { WeekPlan, WeekPlanDay, WeekPlanItem, BusyEvent } from "@/types/plan";
 import type { Json } from "@/integrations/supabase/types";
 import { isRecord } from "@/lib/errors";
+import { PAST_START_MESSAGE, startsBeforeNow } from "@/lib/panel-state";
 import { weekPlanRequestView, type WeekPlanRequestView } from "@/lib/week-plan-request";
 import {
   addDaysISO,
@@ -46,6 +47,7 @@ import {
   INBOX_TASKS_RULE,
   inboxTasksPromptBlock,
   limitDayItems,
+  MAX_PLAN_ITEMS_WEEKDAY,
   maxItemsForDate,
   type PlanInboxTask,
 } from "@/server/plan-inbox.server";
@@ -715,7 +717,7 @@ async function callPlanAI(opts: {
   timeZone: string;
 }): Promise<{ reply: string; days: WeekPlanDay[] }> {
   const inboxTasks = opts.inboxTasks ?? [];
-  const inboxBlock = inboxTasksPromptBlock(inboxTasks, opts.timeZone);
+  const inboxBlock = inboxTasksPromptBlock(inboxTasks, opts.timeZone, opts.nowMs);
   const currentPlan = opts.currentPlan ?? null;
   // Items of the saved plan that a new draft keeps as they are: those in the calendar already
   // and those whose time has started. A refinement or a regeneration used to drop both, because
@@ -916,7 +918,7 @@ Always call the propose_week_plan tool. Always return all 7 days in order.`;
 
     items.sort((left, right) => toMs(left.starts_at) - toMs(right.starts_at));
     if (opts.mode === "create" && !slot.past) {
-      const limited = limitDayItems(items, maxItemsForDate(slot.date), (item) => kept.includes(item), inboxTasks);
+      const limited = limitDayItems(items, maxItemsForDate(slot.date), (item) => kept.includes(item), inboxTasks, maxItemsForDate(slot.date) === MAX_PLAN_ITEMS_WEEKDAY);
       items.splice(0, items.length, ...limited.items);
       trimmed += limited.dropped;
     }
@@ -1212,13 +1214,10 @@ export const updatePlanItem = createServerFn({ method: "POST" })
       // started cannot be approved any more, so its end is not editable; a start can still be
       // moved to later than now.
       const itemStartMs = toMs(item.starts_at);
-      if (startMs < nowMs) {
-        throw new Error(
-          itemStartMs < nowMs && startMs === itemStartMs
-            ? "This item has already started, so its time can no longer be changed."
-            : "That start time is already over. Pick a start later than now.",
-        );
+      if (itemStartMs < nowMs && startMs === itemStartMs) {
+        throw new Error("This item has already started, so its time can no longer be changed.");
       }
+      if (startsBeforeNow(new Date(startMs).toISOString(), nowMs)) throw new Error(PAST_START_MESSAGE);
     }
 
     const candidate = { starts_at: nextStart, ends_at: nextEnd };

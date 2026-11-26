@@ -1457,7 +1457,7 @@ describe("editing the time of an item (finding 60)", () => {
     storePlan(savedPlan());
     await expect(
       updateItem({ dayDate: TUE, itemIndex: 0, starts_at: at(TUE, 8), ends_at: at(TUE, 9) }),
-    ).rejects.toThrow("That start time is already over. Pick a start later than now.");
+    ).rejects.toThrow("This start time has passed. Pick a start later than now.");
   });
 });
 

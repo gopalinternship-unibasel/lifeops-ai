@@ -107,18 +107,28 @@ def _stems(text: str) -> set[str]:
     return {word[:5] for word in words if len(word) >= 3 and word not in _FILLER_WORDS}
 
 
+# Words that many unrelated titles share ("Lunch with team", "Team sync prep"): one of them alone
+# does not tie a block to a task.
+_COMMON_STEMS = {
+    "team", "meeti", "call", "sync", "prep", "work", "lunch", "break", "check", "plan", "revie",
+    "dinne", "coffe", "catch", "stand", "daily", "weekl", "gym", "walk", "sessi", "study",
+}
+
+
 def related_deadline(title: str, tasks: list[PlannerTask]) -> datetime | None:
     """The deadline of the task a block or reminder is about: the task whose title shares the most
-    words with the block's title (the earliest deadline on a tie). None when no task with a
-    deadline shares a word, and then nothing limits the block's new time."""
+    words with the block's title (the earliest deadline on a tie). A task is linked only when it
+    shares at least two words, or one word that is not a common one (team, meeting, call, ...).
+    None when no task with a deadline qualifies, and then nothing limits the block's new time."""
     words = _stems(title)
     best: tuple[int, datetime] | None = None
     for task in tasks:
         if task.deadline is None:
             continue
-        shared = len(words & _stems(task.title))
-        if shared == 0:
+        common = words & _stems(task.title)
+        if len(common) < 2 and not (common - _COMMON_STEMS):
             continue
+        shared = len(common)
         deadline = _naive(task.deadline)
         if best is None or shared > best[0] or (shared == best[0] and deadline < best[1]):
             best = (shared, deadline)
@@ -163,14 +173,24 @@ def keep_clear_of_busy(
     # Blocks of a task with a deadline stay before it: moves are searched between the start of the
     # block's own day (or now, if later) and the deadline, earlier slots included.
     too_late: list[str] = []
+    deadline_over: list[str] = []
     for action, start, end in to_move:
         earliest = max(start, earliest_allowed) if earliest_allowed else start
         deadline = related_deadline(action.title, plan.tasks)
+        if deadline is not None and earliest_allowed and deadline <= earliest_allowed:
+            # The deadline is already over: nothing to keep it before, so the block moves forward
+            # as it would without a task, and the note says so.
+            deadline_over.append(f"'{action.title}'")
+            deadline = None
         slot = next_free_slot(end - start, earliest, taken, deadline)
         if slot is None and deadline is not None:
-            window_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-            if earliest_allowed:
-                window_start = max(window_start, earliest_allowed)
+            if start > deadline:
+                # The block is after the deadline: look from now (or from the deadline's day).
+                window_start = earliest_allowed or deadline.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                window_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+                if earliest_allowed:
+                    window_start = max(window_start, earliest_allowed)
             slot = latest_free_slot_before(end - start, window_start, start, taken, deadline)
             if slot is None:
                 too_late.append(f"'{action.title}'")
@@ -199,4 +219,6 @@ def keep_clear_of_busy(
         notes.append(
             f"Found no free time before the deadline for {', '.join(too_late)}; it stays where it was and overlaps your calendar."
         )
+    if deadline_over:
+        notes.append(f"The deadline for {', '.join(deadline_over)} has already passed.")
     return plan, " ".join(notes) or None

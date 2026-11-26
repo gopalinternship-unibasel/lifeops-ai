@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { dropEventsAside, mergeWithExisting, sameItem, MERGED_PRIORITIES_MAX } from "@/server/ai/priority-merge.server";
+import { asksToReplacePriorities, dropEventsAside, mergeWithExisting, sameItem, MERGED_PRIORITIES_MAX } from "@/server/ai/priority-merge.server";
 
-const row = (rank: number, title: string) => ({ rank, title, reason: "" });
+const row = (rank: number, title: string) => ({ rank, title, reason: "", source: "rules" });
 
 describe("merging a typed list with the inbox and calendar priorities (L5)", () => {
   it("keeps the earlier items below the new ones, with new ranks", () => {
@@ -37,5 +37,26 @@ describe("merging a typed list with the inbox and calendar priorities (L5)", () 
     expect(dropEventsAside(reply, [row(1, "Call mom")], ["Team sync"])).toBe("Here's your ranked list: one, two.");
     expect(dropEventsAside(reply, [row(1, "Team sync")], ["Team sync"])).toBe(reply);
     expect(dropEventsAside("No aside here.", [], [])).toBe("No aside here.");
+  });
+});
+
+describe("merge rules of the second round (H4, H8)", () => {
+  it("keeps only inbox and calendar rows, not earlier typed lists", () => {
+    const typed = { rank: 1, title: "Pay rent", reason: "", source: "chat" };
+    const merged = mergeWithExisting([row(1, "Renew passport")], [typed, row(2, "Team sync")]);
+    expect(merged.priorities.map((p) => p.title)).toEqual(["Renew passport", "Team sync"]);
+  });
+
+  it("is skipped when the message asks to replace or clear", () => {
+    expect(mergeWithExisting([row(1, "Renew passport")], [row(1, "Team sync")], "Replace my priorities with renew passport").priorities).toHaveLength(1);
+    expect(mergeWithExisting([row(1, "Renew passport")], [row(1, "Team sync")], "Clear my priorities, just focus on: renew passport").priorities).toHaveLength(1);
+    expect(mergeWithExisting([row(1, "Renew passport")], [row(1, "Team sync")], "Rank: renew passport").priorities).toHaveLength(2);
+    expect(asksToReplacePriorities("rank my list")).toBe(false);
+  });
+
+  it("drops the events aside in two more wordings", () => {
+    for (const aside of ["(today's events first, then your tasks by importance)", "(today's events come first, then tasks by importance)"]) {
+      expect(dropEventsAside(`Here is the list ${aside}: one.`, [row(1, "Call mom")], ["Team sync"])).toBe("Here is the list: one.");
+    }
   });
 });

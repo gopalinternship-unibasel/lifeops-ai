@@ -38,7 +38,7 @@ import { listCalendarEvents } from "@/server/google/calendar.server";
 import { isGoogleConnected } from "@/server/workspace.server";
 import { getErrorMessage, isRecord } from "@/lib/errors";
 import { dropEventsAside, mergeWithExisting } from "@/server/ai/priority-merge.server";
-import { gateModelCards, PAST_PROPOSAL_NOTE, startsBeforeNow } from "@/lib/panel-state";
+import { gateModelCards, PAST_PROPOSAL_NOTE, PAST_START_MESSAGE, startsBeforeNow } from "@/lib/panel-state";
 import {
   addDaysISO,
   formatTimeInZone,
@@ -1098,6 +1098,7 @@ ${userContext.tasks}`;
       : mergeWithExisting(
           normalizedPriorities,
           oldTasks.map((task) => ({ rank: task.priority_rank, title: task.title, reason: task.reason ?? "", source: task.source })),
+          data.message,
         );
     priorities = merged.priorities;
     const keptSource = new Map(merged.kept.map((task) => [task.title, task.source]));
@@ -1160,6 +1161,8 @@ ${userContext.tasks}`;
         `Heads-up: the new time overlaps ${names}, so Save will be refused until you pick a free time.`;
     }
   }
+  // Proposals Save will refuse (the reply must not tell the user to click Save for them).
+  const refusedIds: string[] = [];
   for (const event of pendingEvents) {
     const notes: string[] = [];
     const conflicts = findConflicts(event, busyEvents);
@@ -1169,12 +1172,15 @@ ${userContext.tasks}`;
         .slice(0, 2)
         .join(", ");
       notes.push(`overlaps ${names}: Save will be refused`);
-      event.refusal = `This time overlaps ${names}.`;
+      // Not stored on the card: the clashing event can move later, and the server still
+      // refuses a real overlap when Save is tried.
+      refusedIds.push(event.id);
     }
     // A start that is already over cannot be saved (Save refuses it), so no Save is offered.
     if (startsBeforeNow(event.starts_at)) {
       notes.push(PAST_PROPOSAL_NOTE);
-      event.refusal = "This time is already over.";
+      event.refusal = PAST_START_MESSAGE;
+      if (!refusedIds.includes(event.id)) refusedIds.push(event.id);
     }
     // A new event with the title of one already in the calendar adds a second one; it does not
     // move the existing one (the reply says so, so the card cannot be mistaken for a move).
@@ -1270,6 +1276,7 @@ ${userContext.tasks}`;
       changeRequest: reconciled?.changeRequest ?? false,
       changeNote: reconciled?.note,
       notes: cardNotes,
+      refused: refusedIds,
       hasOtherCards: Boolean(panel.insight || panel.alternatives || priorities),
       refs: replyRefs,
       emailNote,

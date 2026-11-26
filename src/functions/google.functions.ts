@@ -398,6 +398,10 @@ export const updateCalendarEvent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d) => parseInput(CalendarEventUpdateSchema, d))
   .handler(async ({ context, data }) => {
+    // A move to a start that has passed is refused before the card is claimed (same sentence).
+    if (data.starts_at && startsBeforeNow(data.starts_at)) {
+      return { ok: false, event: null, alreadyHandled: false, error: PAST_START_MESSAGE };
+    }
     if (data.cardId) {
       const claim = await claimCard(context.supabase, context.userId, data.cardId, "applied");
       if (!claim.claimed) {

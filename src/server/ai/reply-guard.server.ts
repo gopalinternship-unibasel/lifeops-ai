@@ -355,6 +355,8 @@ export function cardConfirmations(opts: {
   timeZone: string;
   /** Notes per card id, for example a conflict that will make Save refuse. */
   notes?: Record<string, string>;
+  /** Ids of proposals that Save will refuse (time over, known overlap). */
+  refused?: string[];
 }): string[] {
   const { timeZone } = opts;
   const lines: string[] = [];
@@ -381,9 +383,15 @@ export function cardConfirmations(opts: {
     });
     // A blank line before the closing sentence: after a single line break Markdown reads it as
     // part of the last bullet ("... 8:00 AM Nothing is saved ...", review of 24 Nov 2026).
-    lines.push(
-      `Proposed for your calendar:\n${items.join("\n")}\n\nNothing is saved until you click **Save to Calendar** on the right.`,
-    );
+    const refused = new Set(opts.refused ?? []);
+    const refusedCount = opts.pendingEvents.filter((event) => refused.has(event.id)).length;
+    const closing =
+      refusedCount === 0
+        ? "Nothing is saved until you click **Save to Calendar** on the right."
+        : refusedCount === opts.pendingEvents.length
+          ? "None of these can be saved. Ask me for a later or free time."
+          : "Save the others on the right; nothing is saved until you click **Save to Calendar**.";
+    lines.push(`Proposed for your calendar:\n${items.join("\n")}\n\n${closing}`);
   }
   return lines;
 }
@@ -507,6 +515,7 @@ export function composeReply(opts: {
   /** Why a requested change has no card (a question back, or the reason it was refused). */
   changeNote?: string;
   notes?: Record<string, string>;
+  refused?: string[];
   /** Other cards the turn produced (insight, alternatives), for an otherwise empty reply. */
   hasOtherCards?: boolean;
   /** The prompt's short ids and what they stand for (see resolveRefs). */

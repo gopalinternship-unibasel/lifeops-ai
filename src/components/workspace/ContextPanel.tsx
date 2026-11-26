@@ -6,7 +6,7 @@ import { saveCalendarEvent, saveGmailDraft, updateCalendarEvent, removeCalendarE
 import { toast } from "sonner";
 import { getVisitorErrorMessage } from "@/lib/errors";
 import { getBrowserTimeZone } from "@/lib/date";
-import { proposalRefusal, todayTabCount, uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
+import { proposalRefusal, splitProposalsByDay, todayTabCount, uniqueKeys, type CalendarStatus, type PanelTab } from "@/lib/panel-state";
 
 type Tab = PanelTab;
 
@@ -188,7 +188,7 @@ function PrioritiesView({ priorities, inbox }: { priorities: PriorityRow[]; inbo
   );
 }
 
-function ScheduleView({
+export function ScheduleView({
   schedule, scheduleError, pendingEvents, pendingEventChanges,
   onPendingSaved, onPendingDismiss, onPendingChangeApplied, onPendingChangeDismiss,
 }: {
@@ -202,20 +202,26 @@ function ScheduleView({
   onPendingChangeDismiss: DismissHandler;
 }) {
   const sorted = [...schedule].sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+  const split = splitProposalsByDay(pendingEvents, pendingEventChanges);
   return (
     <div className="space-y-5">
-      {(pendingEvents.length > 0 || pendingEventChanges.length > 0) && (
-        <div>
-          <h3 className="text-[11px] font-mono uppercase tracking-wider text-amber-700 mb-3">Proposed by AI — review & save</h3>
-          <div className="space-y-2">
-            {pendingEventChanges.map((c) => (
-              <PendingChangeCard key={c.id} change={c} onApplied={onPendingChangeApplied} onDismiss={onPendingChangeDismiss} />
-            ))}
-            {pendingEvents.map((p) => (
-              <PendingEventCard key={p.id} ev={p} onSaved={onPendingSaved} onDismiss={onPendingDismiss} />
-            ))}
+      {[
+        { key: "today", heading: "Proposed by AI — review & save", group: split.today },
+        { key: "later", heading: "Later", group: split.later },
+      ].map(({ key, heading, group }) =>
+        group.events.length > 0 || group.changes.length > 0 ? (
+          <div key={key}>
+            <h3 className="text-[11px] font-mono uppercase tracking-wider text-amber-700 mb-3">{heading}</h3>
+            <div className="space-y-2">
+              {group.changes.map((c) => (
+                <PendingChangeCard key={c.id} change={c} onApplied={onPendingChangeApplied} onDismiss={onPendingChangeDismiss} />
+              ))}
+              {group.events.map((p) => (
+                <PendingEventCard key={p.id} ev={p} onSaved={onPendingSaved} onDismiss={onPendingDismiss} />
+              ))}
+            </div>
           </div>
-        </div>
+        ) : null,
       )}
 
       {scheduleError && (

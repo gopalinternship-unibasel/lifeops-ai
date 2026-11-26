@@ -32,11 +32,14 @@ function oneLine(value: string, max: number): string {
 
 /**
  * The prompt's list of the inbox's tasks: title, importance and deadline (local date and time),
- * the most important and earliest first. Empty when there are none.
+ * the most important and earliest first; tasks whose deadline is before `nowMs` are left out.
+ * Empty when there are none.
  */
-export function inboxTasksPromptBlock(tasks: PlanInboxTask[], timeZone: string): string {
+export function inboxTasksPromptBlock(tasks: PlanInboxTask[], timeZone: string, nowMs: number = Date.now()): string {
   const shown = [...tasks]
     .filter((task) => oneLine(task.title, 1).length > 0)
+    // A task whose deadline has passed cannot be planned any more ("Team sync at 7 PM" after 19:00).
+    .filter((task) => !(task.deadline && Date.parse(task.deadline) < nowMs))
     .sort(
       (a, b) =>
         IMPORTANCE_ORDER[a.importance] - IMPORTANCE_ORDER[b.importance] ||
@@ -82,14 +85,20 @@ const WORK_VALUE_EMOJI = new Set(["🎯", "📚", "✍️", "📖", "🏋️"]);
  */
 export function itemValue(item: WeekPlanItem, inboxTasks: PlanInboxTask[]): number {
   const words = stems(item.title);
-  if (inboxTasks.some((task) => [...stems(task.title)].some((word) => words.has(word)))) return 100;
+  // Only a [high] or [medium] inbox task counts: "Lunch" is not the low-importance "Lunch with Sam".
+  const wanted = inboxTasks.filter((task) => task.importance !== "low");
+  if (wanted.some((task) => [...stems(task.title)].some((word) => words.has(word)))) return 100;
   const hours = (Date.parse(item.ends_at) - Date.parse(item.starts_at)) / 3_600_000;
   const long = hours >= 3 ? 80 : 0;
+  // Work words first: "Show and tell prep" is work, not a show.
+  if (WORK_VALUE.test(item.title)) return Math.max(60, long);
   if (LOW_VALUE.test(item.title) || LOW_VALUE_EMOJI.has(item.emoji)) return Math.max(10, long);
-  if (WORK_VALUE.test(item.title) || WORK_VALUE_EMOJI.has(item.emoji)) return Math.max(60, long);
+  if (WORK_VALUE_EMOJI.has(item.emoji)) return Math.max(60, long);
   if (["🍳", "🥗", "🍝"].includes(item.emoji) || /\b(breakfast|lunch|dinner)\b/i.test(item.title)) return Math.max(40, long);
   return Math.max(30, long);
 }
+
+const BREAK_ITEM = /\b(walk|break|stroll)\b/i;
 
 /** The most items a day may hold in a plan the model drafted: the prompt's own 2 to 4 / 2 to 3. */
 export function maxItemsForDate(date: string): number {
@@ -108,10 +117,17 @@ export function limitDayItems(
   max: number,
   isProtected: (item: WeekPlanItem) => boolean,
   inboxTasks: PlanInboxTask[],
+  keepOneBreak = false,
 ): { items: WeekPlanItem[]; dropped: number } {
   if (items.length <= max) return { items, dropped: 0 };
+  const isBreak = (item: WeekPlanItem) => BREAK_ITEM.test(item.title);
+  // A weekday keeps one short walk or break (the prompt asks for one): the most valuable such
+  // item is dropped last, and only when nothing else can be dropped.
+  const spared = keepOneBreak && !items.some((item) => isProtected(item) && isBreak(item))
+    ? items.filter(isBreak).sort((a, b) => itemValue(b, inboxTasks) - itemValue(a, inboxTasks))[0]
+    : undefined;
   const droppable = items
-    .filter((item) => !isProtected(item))
+    .filter((item) => !isProtected(item) && item !== spared)
     .sort(
       (a, b) =>
         itemValue(a, inboxTasks) - itemValue(b, inboxTasks) ||
@@ -123,5 +139,6 @@ export function limitDayItems(
     if (items.length - toDrop.size <= max) break;
     toDrop.add(item);
   }
+  if (spared && items.length - toDrop.size > max) toDrop.add(spared);
   return { items: items.filter((item) => !toDrop.has(item)), dropped: toDrop.size };
 }

@@ -528,6 +528,39 @@ describe("structured answers (53, 56)", () => {
   });
 });
 
+describe("a typed priority list and the earlier priorities (H4)", () => {
+  const ask = (message: string, titles: string[]) => {
+    mocks.callAI.mockResolvedValue(answer({ reply: "Ranked.", priorities: titles.map((title, i) => ({ rank: i + 1, title, reason: "r" })) }));
+    return runChatTurn(context, { sessionId: SESSION, message, timeZone: ZRH });
+  };
+  const seed = () =>
+    db.rows("tasks").push(
+      { id: "old-a", user_id: USER, title: "Acme interview prep", priority_rank: 1, source: "rules" },
+      { id: "old-b", user_id: USER, title: "Pay rent", priority_rank: 2, source: "chat" },
+    );
+
+  it("keeps the inbox and calendar rows but not an earlier typed list", async () => {
+    seed();
+    await ask("Rank my tasks: renew passport", ["Renew passport"]);
+    expect(db.rows("tasks").map((task) => task.title)).toEqual(["Renew passport", "Acme interview prep"]);
+  });
+
+  it("two typed lists in a row do not stack", async () => {
+    await ask("Rank my tasks: renew passport", ["Renew passport"]);
+    await ask("Rank my tasks: buy groceries", ["Buy groceries"]);
+    expect(db.rows("tasks").map((task) => task.title)).toEqual(["Buy groceries"]);
+  });
+
+  it.each(["Replace my priorities with: renew passport", "Clear my priorities, just focus on: renew passport"])(
+    "%s drops the earlier rows",
+    async (message) => {
+      seed();
+      await ask(message, ["Renew passport"]);
+      expect(db.rows("tasks").map((task) => task.title)).toEqual(["Renew passport"]);
+    },
+  );
+});
+
 describe("priorities replace the task list safely (89)", () => {
   it("ranks such as 1.5 become whole numbers", async () => {
     mocks.callAI.mockResolvedValue(answer({ reply: "Ranked.", priorities: [{ rank: 1.5, title: "Y", reason: "b" }, { rank: 1, title: "X", reason: "a" }] }));
@@ -536,7 +569,7 @@ describe("priorities replace the task list safely (89)", () => {
   });
 
   it("a failed insert or delete leaves the old list in place", async () => {
-    db.rows("tasks").push({ id: "old-a", user_id: USER, title: "A", priority_rank: 1 }, { id: "old-b", user_id: USER, title: "B", priority_rank: 2 });
+    db.rows("tasks").push({ id: "old-a", user_id: USER, title: "A", priority_rank: 1, source: "rules" }, { id: "old-b", user_id: USER, title: "B", priority_rank: 2, source: "rules" });
     mocks.callAI.mockResolvedValue(answer({ reply: "Ranked.", priorities: [{ rank: 1, title: "X", reason: "a" }] }));
     db.failures.push({ table: "tasks", op: "insert", error: { code: "22P02", message: "invalid input syntax for type integer" } });
     await expect(runChatTurn(context, { sessionId: SESSION, message: "Rank my tasks", timeZone: ZRH })).rejects.toThrow("Could not save your priorities");
@@ -863,8 +896,8 @@ describe("a proposal for a time that is already over (L1, L6)", () => {
     const cards = result.panel.pendingEvents ?? [];
     const reading = cards.find((card) => card.title === "Reading");
     const writing = cards.find((card) => card.title === "Writing");
-    expect(reading?.refusal).toBe("This time is already over.");
-    expect(result.reply).toMatch(/already over/);
+    expect(reading?.refusal).toBe("This start time has passed. Pick a start later than now.");
+    expect(result.reply).toMatch(/has passed/);
     expect(writing?.refusal).toBeUndefined();
   });
 
@@ -874,7 +907,32 @@ describe("a proposal for a time that is already over (L1, L6)", () => {
       proposed_events: [{ title: "Gym", starts_at: "2026-11-24T19:00:00", ends_at: "2026-11-24T20:00:00" }],
     }));
     const result = await runChatTurn(context, { sessionId: SESSION, message: "Block 7 to 8 pm today for the gym", timeZone: ZRH });
-    expect(result.panel.pendingEvents?.[0]?.refusal).toMatch(/overlaps .*Team sync/);
+    // Not stored on the card, so Save can be tried again once the clash is gone; the reply says so.
+    expect(result.panel.pendingEvents?.[0]?.refusal).toBeUndefined();
+    expect(result.reply).toMatch(/overlaps .*Team sync/);
+    expect(result.reply).not.toContain("click **Save to Calendar**");
+  });
+
+  it("when every proposal is refused the reply does not tell the user to click Save", async () => {
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Reading is blocked.",
+      proposed_events: [{ title: "Reading", starts_at: "2026-11-24T08:00:00", ends_at: "2026-11-24T09:00:00" }],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Block 8 to 9 am today for reading", timeZone: ZRH });
+    expect(result.reply).not.toContain("click **Save to Calendar**");
+    expect(result.reply).toMatch(/None of these can be saved/);
+  });
+
+  it("when only some are refused the reply says to save the others", async () => {
+    mocks.callAI.mockResolvedValue(answer({
+      reply: "Blocked.",
+      proposed_events: [
+        { title: "Reading", starts_at: "2026-11-24T08:00:00", ends_at: "2026-11-24T09:00:00" },
+        { title: "Writing", starts_at: "2026-11-24T15:00:00", ends_at: "2026-11-24T16:00:00" },
+      ],
+    }));
+    const result = await runChatTurn(context, { sessionId: SESSION, message: "Block 8 to 9 am today for reading and 3 to 4 pm for writing", timeZone: ZRH });
+    expect(result.reply).toMatch(/Save the others on the right/);
   });
 });
 

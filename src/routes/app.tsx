@@ -100,14 +100,10 @@ function AppLayout() {
             })}
           </nav>
         </div>
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-4 sm:gap-3">
           {/* From lg up only, and cut short: a long address beside the links left the
               navigation a sliver at tablet widths. */}
           <span className="text-xs text-muted-foreground hidden lg:block max-w-[16rem] truncate" title={user.email}>{user.email}</span>
-          {/* Below sm only the 14 px icon shows: p-2 gives it a tap area of about 30 px, and -m-2
-              keeps it where it was. The extra 8 px on the left stays inside the header's gap-2,
-              which is never narrower than 8 px, and on the right inside its 12 px px-3, so the
-              tap area never covers the nav. */}
           {/* Profile is the last link in the scrolling nav and is out of view on a phone: from
               sm up the nav shows it, below sm this icon is the way to it. */}
           <Link
@@ -118,6 +114,10 @@ function AppLayout() {
           >
             <User className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
+          {/* Below sm only the 14 px icon shows: p-2 gives it a tap area of about 30 px, and -m-2
+              keeps it where it was. The extra 8 px on the left stays inside the header's gap-2,
+              which is never narrower than 8 px, and on the right inside its 12 px px-3, so the
+              tap area never covers the nav. */}
           <button
             type="button"
             onClick={() => {

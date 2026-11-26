@@ -18,15 +18,17 @@ export function isToday(block: { starts_at: string; ends_at: string }, now: Date
   return Number.isFinite(s) && Number.isFinite(e) && s < end.getTime() && e > start.getTime();
 }
 
-/** What a refused save of an event whose start is before now says (the same words as the plan page). */
-export const PAST_START_MESSAGE = "That start time is already over. Pick a start later than now.";
-/** The short note on a proposal whose start is before now. */
-export const PAST_PROPOSAL_NOTE = "this time is already over, so it cannot be saved";
+/** How long after its start an event can still be proposed or saved ("right now" is fine). */
+export const START_GRACE_MS = 10 * 60 * 1000;
+/** What a refused proposal or save of an event whose start has passed says (also the plan page). */
+export const PAST_START_MESSAGE = "This start time has passed. Pick a start later than now.";
+/** The short note on a proposal whose start has passed. */
+export const PAST_PROPOSAL_NOTE = "this start time has passed, so it cannot be saved";
 
-/** Whether an event starts before `nowMs` (an unreadable time is not treated as over). */
+/** Whether an event starts more than the grace period before `nowMs` (an unreadable time is not treated as over). */
 export function startsBeforeNow(startsAt: string, nowMs: number = Date.now()): boolean {
   const start = Date.parse(startsAt);
-  return Number.isFinite(start) && start < nowMs;
+  return Number.isFinite(start) && start < nowMs - START_GRACE_MS;
 }
 
 /**
@@ -35,7 +37,7 @@ export function startsBeforeNow(startsAt: string, nowMs: number = Date.now()): b
  * proposal was made). Null when Save is offered.
  */
 export function proposalRefusal(event: Pick<PendingEvent, "starts_at" | "refusal">, nowMs: number = Date.now()): string | null {
-  if (startsBeforeNow(event.starts_at, nowMs)) return "This time is already over.";
+  if (startsBeforeNow(event.starts_at, nowMs)) return PAST_START_MESSAGE;
   return event.refusal ?? null;
 }
 
@@ -51,6 +53,24 @@ export function todayTabCount(
     pendingEvents.filter((event) => isToday(event, now)).length +
     pendingEventChanges.filter((change) => isToday(change.original, now)).length
   );
+}
+
+/** Proposals and changes split into those for today and those for other days ("Later"). */
+export function splitProposalsByDay(
+  pendingEvents: PendingEvent[],
+  pendingEventChanges: PendingEventChange[],
+  now: Date = new Date(),
+): { today: { events: PendingEvent[]; changes: PendingEventChange[] }; later: { events: PendingEvent[]; changes: PendingEventChange[] } } {
+  return {
+    today: {
+      events: pendingEvents.filter((event) => isToday(event, now)),
+      changes: pendingEventChanges.filter((change) => isToday(change.original, now)),
+    },
+    later: {
+      events: pendingEvents.filter((event) => !isToday(event, now)),
+      changes: pendingEventChanges.filter((change) => !isToday(change.original, now)),
+    },
+  };
 }
 
 /**

@@ -58,7 +58,7 @@ describe("proposals that cannot be saved (L1, L6)", () => {
     expect(startsBeforeNow("2026-11-26T07:00:00Z", NOW)).toBe(true);
     expect(startsBeforeNow("2026-11-26T18:00:00Z", NOW)).toBe(false);
     expect(startsBeforeNow("not a date", NOW)).toBe(false);
-    expect(proposalRefusal({ starts_at: "2026-11-26T07:00:00Z" }, NOW)).toBe("This time is already over.");
+    expect(proposalRefusal({ starts_at: "2026-11-26T07:00:00Z" }, NOW)).toBe("This start time has passed. Pick a start later than now.");
     expect(proposalRefusal({ starts_at: "2026-11-26T18:00:00Z", refusal: 'This time overlaps "Sync".' }, NOW)).toBe('This time overlaps "Sync".');
     expect(proposalRefusal({ starts_at: "2026-11-26T18:00:00Z" }, NOW)).toBeNull();
   });
@@ -70,7 +70,7 @@ describe("proposals that cannot be saved (L1, L6)", () => {
       onDismiss: noop,
     });
     expect(over).toMatch(/<button[^>]*disabled=""[^>]*>.*Save to Calendar/);
-    expect(over).toContain("This time is already over.");
+    expect(over).toContain("This start time has passed.");
 
     const clash = html(PendingEventCard, {
       ev: { id: "pending-2", title: "Gym", starts_at: "2099-01-01T18:00:00.000Z", ends_at: "2099-01-01T19:00:00.000Z", refusal: 'This time overlaps "Team sync".' },

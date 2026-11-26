@@ -3,7 +3,7 @@
  * replaced by a stand-in that runs the validator and the handler with a fixed context, and the
  * database, calendar, AI and limit modules are fakes.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
 
@@ -182,9 +182,16 @@ const PG_ERROR = {
 /** The demo event as it is in the database: today 19:00-20:00 Zurich. */
 const AT_19 = { starts_at: "2026-11-24T18:00:00+00:00", ends_at: "2026-11-24T19:00:00+00:00" };
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  // The fixtures' dates are on 24 and 25 November: a move card is checked against "now".
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-24T08:00:00Z"));
   harness.admin.tables.clear();
   harness.admin.errors.clear();
   harness.user.tables.clear();
@@ -688,7 +695,7 @@ describe("Save refuses an event that starts before now (L1)", () => {
       data: { cardId: "pending-past", title: "Reading", starts_at: ago(-3 * 3_600_000), ends_at: ago(-2 * 3_600_000) },
     });
     expect(result).toMatchObject({ ok: false, event: null, alreadyHandled: false });
-    expect(result.error).toBe("That start time is already over. Pick a start later than now.");
+    expect(result.error).toBe("This start time has passed. Pick a start later than now.");
     expect(mocks.claimCard).not.toHaveBeenCalled();
     expect(mocks.createCalendarBlock).not.toHaveBeenCalled();
   });
@@ -700,5 +707,34 @@ describe("Save refuses an event that starts before now (L1)", () => {
     });
     expect(result).toMatchObject({ ok: true });
     expect(mocks.createCalendarBlock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a move card whose new start has passed (H6)", () => {
+  it("is refused before the card is claimed, with the shared sentence; a start a few minutes ago is allowed", async () => {
+    const past = await updateCalendarEvent({
+      data: {
+        cardId: "change-past",
+        eventId: EVENT,
+        starts_at: new Date(Date.now() - 3_600_000).toISOString(),
+        ends_at: new Date(Date.now() - 1_800_000).toISOString(),
+        originalStartsAt: AT_19.starts_at,
+        originalEndsAt: AT_19.ends_at,
+      },
+    });
+    expect(past).toMatchObject({ ok: false, alreadyHandled: false, error: "This start time has passed. Pick a start later than now." });
+    expect(mocks.claimCard).not.toHaveBeenCalled();
+
+    const now = await updateCalendarEvent({
+      data: {
+        cardId: "change-now",
+        eventId: EVENT,
+        starts_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+        ends_at: new Date(Date.now() + 55 * 60_000).toISOString(),
+        originalStartsAt: AT_19.starts_at,
+        originalEndsAt: AT_19.ends_at,
+      },
+    });
+    expect(now.error).not.toBe("This start time has passed. Pick a start later than now.");
   });
 });

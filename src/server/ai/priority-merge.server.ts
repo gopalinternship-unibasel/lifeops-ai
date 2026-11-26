@@ -39,15 +39,25 @@ export interface ExistingPriority extends PriorityRow {
   source?: string | null;
 }
 
+/** A message that asks to replace or clear the priorities: the earlier list is not kept then. */
+export function asksToReplacePriorities(message: string): boolean {
+  return /\b(?:replace|clear|reset|wipe|overwrite|start\s+over)\b[^.?!]{0,40}\b(?:priorit(?:y|ies)|lists?|tasks)\b/i.test(message);
+}
+
 /**
- * The model's list followed by the earlier items it does not name. Unchanged when there are no
- * earlier items or when the model's list names any of them (a re-rank).
+ * The model's list followed by the earlier inbox and calendar items it does not name (source
+ * "rules"; an earlier typed list is not kept). Unchanged when there are no such items, when the
+ * model's list names any of them (a re-rank) or when the message asks to replace or clear.
  */
 export function mergeWithExisting(
   fresh: PriorityRow[],
-  existing: ExistingPriority[],
+  allExisting: ExistingPriority[],
+  message = "",
 ): { priorities: PriorityRow[]; kept: ExistingPriority[] } {
-  if (fresh.length === 0 || existing.length === 0) return { priorities: fresh, kept: [] };
+  const existing = allExisting.filter((old) => old.source === "rules");
+  if (fresh.length === 0 || existing.length === 0 || asksToReplacePriorities(message)) {
+    return { priorities: fresh, kept: [] };
+  }
   if (existing.some((old) => fresh.some((item) => sameItem(item.title, old.title)))) {
     return { priorities: fresh, kept: [] };
   }
@@ -70,7 +80,7 @@ export function mergeWithExisting(
  * reply does not give.
  */
 export function dropEventsAside(reply: string, priorities: PriorityRow[], eventTitles: string[]): string {
-  const aside = /\s*\((?:today['’]?s? )?events first,? then (?:the )?tasks by importance\)/i;
+  const aside = /\s*\((?:today['’]?s? )?events (?:come )?first,? then (?:the |your )?tasks by importance\)/i;
   if (!aside.test(reply)) return reply;
   const listsEvent = priorities.some((item) => eventTitles.some((title) => sameItem(item.title, title)));
   return listsEvent ? reply : reply.replace(aside, "");

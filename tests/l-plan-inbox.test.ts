@@ -73,3 +73,42 @@ describe("the plan's limit of items per day (L3)", () => {
     expect(limitDayItems(items, 4, () => false, [])).toEqual({ items, dropped: 0 });
   });
 });
+
+describe("second round: scoring, past deadlines and the weekday break (H7)", () => {
+  it("an inbox match counts only for a high or medium task", () => {
+    const tasks = [
+      { title: "Lunch with Sam", importance: "low" as const },
+      { title: "Write research paper final draft", importance: "medium" as const },
+    ];
+    expect(itemValue(item("🥗", "Lunch", "12:00", "13:00"), tasks)).toBe(40);
+    expect(itemValue(item("✍️", "Paper final draft", "09:00", "11:00"), tasks)).toBe(100);
+  });
+
+  it("'Show and tell prep' is work, a movie is not", () => {
+    expect(itemValue(item("🎯", "Show and tell prep", "09:00", "10:00"), [])).toBe(60);
+    expect(itemValue(item("🎬", "Movie or show", "20:00", "22:00"), [])).toBe(10);
+  });
+
+  it("leaves out inbox tasks whose deadline is before now", () => {
+    const tasks = [
+      { title: "Team sync at 7 PM", importance: "high" as const, deadline: "2026-11-26T18:00:00.000Z" },
+      { title: "Write paper", importance: "high" as const, deadline: "2026-11-28T18:00:00.000Z" },
+    ];
+    const now = Date.parse("2026-11-26T19:00:00Z");
+    expect(inboxTasksPromptBlock(tasks, ZRH, now)).toBe("  - [high] Write paper (due 2026-11-28 19:00)");
+  });
+
+  it("a weekday keeps one walk or break when trimming", () => {
+    const items = [
+      item("☕", "Short break", "10:00", "10:15"),
+      item("🎯", "Deep work", "09:00", "11:00"),
+      item("📚", "Study", "11:30", "12:30"),
+      item("🥗", "Lunch", "12:30", "13:00"),
+      item("🎬", "Movie or show", "20:00", "22:00"),
+    ];
+    const kept = limitDayItems(items, 4, () => false, [], true).items.map((i) => i.title);
+    expect(kept).toContain("Short break");
+    expect(kept).not.toContain("Movie or show");
+    expect(limitDayItems(items, 4, () => false, []).items.map((i) => i.title)).not.toContain("Short break");
+  });
+});
