@@ -450,6 +450,26 @@ function forcedToolName(
   return tools.length === 1 ? tools[0].function.name : null;
 }
 
+/**
+ * Replace lone UTF-16 surrogates (half of an emoji, left when real email text is cut to a length)
+ * with U+FFFD in every string of a request body. JSON.stringify writes them as "\ud83d" escapes,
+ * which Cloudflare Workers AI rejects with HTTP 400 ("TextEncodeInput must be ...", or "Invalid
+ * JSON" for tool arguments): measured 26 Nov 2026 with a real Gmail inbox; the demo inbox never had
+ * one. Exported for tests.
+ */
+export function wellFormedDeep<T>(value: T): T {
+  if (typeof value === "string") {
+    return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD") as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => wellFormedDeep(item)) as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = wellFormedDeep(item);
+    return out as T;
+  }
+  return value;
+}
+
 /** Build the request body for one chat-completions call. Exported for tests. */
 export function buildRequestBody(opts: {
   config: LLMConfig;
@@ -513,7 +533,7 @@ async function singleCall(opts: {
   const res = await fetch(`${opts.config.baseUrl}/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify(buildRequestBody(opts)),
+    body: JSON.stringify(wellFormedDeep(buildRequestBody(opts))),
     signal: AbortSignal.timeout(opts.config.timeoutMs),
   });
 

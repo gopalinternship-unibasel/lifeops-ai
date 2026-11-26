@@ -62,6 +62,8 @@ function Workspace() {
   // message sent earlier was dropped, or replaced when the history arrived).
   const [ready, setReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
+  // Whether the account reads its real Gmail and Calendar (the composer hint says which inbox is used).
+  const [googleConnected, setGoogleConnected] = useState(false);
   const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [pending, setPending] = useState(false);
   const [inbox, setInbox] = useState<InboxSummary | undefined>();
@@ -187,6 +189,7 @@ function Workspace() {
       // Make sure the user has connected Google or chosen the demo data. If not, onboarding.
       const status = await getGoogleConnectionStatus();
       if (!mounted.current) return;
+      setGoogleConnected(status.connected);
       if (!status.connected && !status.demoMode && !user.is_anonymous) {
         navigate({ to: "/onboarding/connectors" });
         return;
@@ -329,6 +332,11 @@ function Workspace() {
           busy={pending || !ready}
           placeholder={ready ? undefined : bootError ? "Your workspace did not load. Use Try again." : "Loading your workspace…"}
           showSuggestions={messages.length <= 2}
+          hint={
+            googleConnected
+              ? "MONDAY reads your Gmail and Google Calendar. It saves only the drafts and events you approve, and never sends email."
+              : undefined
+          }
         />
       </section>
       <ContextPanel
