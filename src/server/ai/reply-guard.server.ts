@@ -563,6 +563,15 @@ export function composeReply(opts: {
     // "Ready to move your dentist appointment." next to a NEW event card (QA round 4): with no
     // change card, nothing is being moved or cancelled.
     if (opts.pendingEventChanges.length === 0) modelText = removeSentences(modelText, (sentence) => CHANGE_TALK.test(sentence)).text;
+    // Every proposal is refused (time over or a known overlap): a model sentence that asks the
+    // user to save ("Please save the event to confirm it.", live check of 26 Nov 2026) contradicts
+    // the closing line, which says none can be saved.
+    const refusedIds = new Set(opts.refused ?? []);
+    const allRefused =
+      opts.pendingEvents.length > 0 &&
+      opts.pendingEventChanges.length === 0 &&
+      opts.pendingEvents.every((event) => refusedIds.has(event.id));
+    if (allRefused) modelText = removeSentences(modelText, (sentence) => /\bsav(?:e|ed|ing)\b/i.test(sentence)).text;
   }
   // "Draft ready." with no draft card (QA round 4: an email id the inbox does not have).
   let draftClaims = 0;

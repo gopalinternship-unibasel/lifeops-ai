@@ -228,7 +228,7 @@ export function ConnectorsView({
           <div className="space-y-3 mb-6">
             <ScopeRow icon={<Mail className="h-4 w-4" />} title="Read recent emails" sub="Extract tasks and decide what needs replying." />
             <ScopeRow icon={<Mail className="h-4 w-4" />} title="Draft email replies" sub="Saved as drafts in Gmail — never sent automatically." />
-            <ScopeRow icon={<Calendar className="h-4 w-4" />} title="Read your calendar" sub="Know what's already scheduled today." />
+            <ScopeRow icon={<Calendar className="h-4 w-4" />} title="Read your calendar" sub="Know what is scheduled from today to three weeks ahead." />
             <ScopeRow icon={<Calendar className="h-4 w-4" />} title="Create calendar events" sub="Only when you click Save on a proposal." />
           </div>
 

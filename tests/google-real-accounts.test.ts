@@ -145,6 +145,12 @@ describe("the copy on the hosted site", () => {
     expect(login).toContain('to="/privacy"');
   });
 
+  it("has a Pages variant of the privacy page that does not claim Vercel hosting or Google sign-in", () => {
+    expect(privacy).toContain('import { isStaticShellBuild } from "@/lib/static-shell";');
+    expect(privacy).toContain("This GitHub Pages copy cannot connect a Google account");
+    expect(privacy).toContain("GitHub Pages serves this copy's files");
+  });
+
   it("states the privacy facts the code keeps", () => {
     expect(privacy).toContain("up to the first 4,000 characters");
     expect(privacy).toContain("from today up to 21 days ahead");

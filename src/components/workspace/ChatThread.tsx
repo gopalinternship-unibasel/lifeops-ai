@@ -59,7 +59,9 @@ export function ChatThread({
             >
               {m.role === "assistant" && <Avatar role="assistant" />}
               <div
-                className={`max-w-[78%] rounded-lg px-4 py-2.5 text-sm leading-relaxed ${
+                // relative: the sr-only "You said:" label is absolutely positioned; without a positioned
+                // parent it escaped the chat's scroll box and made the page ~1,100 px taller at 390 px.
+                className={`relative max-w-[78%] rounded-lg px-4 py-2.5 text-sm leading-relaxed ${
                   m.role === "user"
                     ? "text-primary-foreground"
                     : "bg-card border border-border"

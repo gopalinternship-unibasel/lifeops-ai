@@ -179,7 +179,7 @@ export async function getMessage(userId: string, messageId: string): Promise<Gma
     subject: header(headers, "Subject") || "(no subject)",
     snippet: m.snippet ?? "",
     date: header(headers, "Date"),
-    bodyText: extractBody(m.payload).slice(0, 8000),
+    bodyText: extractBody(m.payload).slice(0, 4000), // the limit the privacy page states
     unread: Array.isArray(m.labelIds) && m.labelIds.includes("UNREAD"),
   };
 }

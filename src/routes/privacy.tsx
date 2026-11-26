@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { MondayMark } from "@/components/MondayMark";
+import { isStaticShellBuild } from "@/lib/static-shell";
 
 export const Route = createFileRoute("/privacy")({
   component: PrivacyPage,
@@ -50,10 +51,21 @@ function PrivacyPage() {
         </Section>
 
         <Section title="Google data, when you connect a Google account">
-          <p>
-            While the app is in Google&apos;s testing phase, only Google accounts the owner has added as testers can
-            connect. When you connect one, MONDAY:
-          </p>
+          {isStaticShellBuild ? (
+            <p>
+              This GitHub Pages copy cannot connect a Google account; only the main site,{" "}
+              <a className="text-primary hover:underline" href="https://lifeops-ai-sigma.vercel.app">
+                lifeops-ai-sigma.vercel.app
+              </a>
+              , can. While the app is in Google&apos;s testing phase, only Google accounts the owner has added as testers
+              can connect there. When you connect one, MONDAY:
+            </p>
+          ) : (
+            <p>
+              While the app is in Google&apos;s testing phase, only Google accounts the owner has added as testers can
+              connect. When you connect one, MONDAY:
+            </p>
+          )}
           <ul className="mt-3 list-disc pl-5 space-y-1.5">
             <li>
               reads the sender, recipients, subject, date and text (up to the first 4,000 characters) of your unread and recent
@@ -74,9 +86,12 @@ function PrivacyPage() {
 
         <Section title="Who processes the data">
           <p>
-            Vercel (Frankfurt) runs the app and the planner service behind the dashboard. Supabase (Frankfurt) holds the
-            database and the sign-in. Cloudflare Workers AI runs the language model: the text MONDAY needs for an
-            answer, which can include the email and calendar details above, is sent to it for that answer.
+            {isStaticShellBuild
+              ? "GitHub Pages serves this copy's files and its server code runs in a Supabase Edge Function. Vercel (Frankfurt) runs the planner service behind the dashboard. "
+              : "Vercel (Frankfurt) runs the app and the planner service behind the dashboard. "}
+            Supabase (Frankfurt) holds the database and the sign-in. Cloudflare Workers AI runs the language model: the
+            text MONDAY needs for an answer, which can include the email and calendar details above, is sent to it for
+            that answer.
           </p>
         </Section>
 
