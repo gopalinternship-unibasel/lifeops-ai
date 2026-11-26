@@ -1713,7 +1713,23 @@ export function withSignOff(body: string, userName?: string | null): string {
   if (!first || /^user$/i.test(first)) return body;
   const lastLines = body.split("\n").slice(-3).join(" ").toLowerCase();
   if (lastLines.includes(first.toLowerCase())) return body;
+  // The model signed off already ("Best,\nGopal"), with a name other than the profile's: a second
+  // sign-off made "Best, Gopal Best, gopalkrishnadeveloper" (live Gmail test, 26 Nov 2026).
+  if (endsWithSignOff(body)) return body;
   return `${body.replace(/\s+$/, "")}\n\nBest,\n${first}`;
+}
+
+const SIGN_OFF_LINE =
+  /^(?:best(?:\s+regards|\s+wishes)?|kind(?:est)?\s+regards|warm(?:est)?\s+regards|regards|many\s+thanks|thanks(?:\s+again|\s+so\s+much)?|thank\s+you|cheers|sincerely|all\s+the\s+best|yours(?:\s+sincerely|\s+truly)?)\s*[,.!]?(?:\s+[\p{L}'’.-]+){0,3}\s*$/iu;
+
+/** Whether one of the body's last two non-empty lines is a short sign-off ("Best,", "Kind regards, Gopal"). */
+export function endsWithSignOff(body: string): boolean {
+  const lines = body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-2);
+  return lines.some((line) => line.length <= 40 && SIGN_OFF_LINE.test(line));
 }
 
 /** Lowercase letters and digits only, single spaces. */
